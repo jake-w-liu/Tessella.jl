@@ -578,6 +578,8 @@ function _occ_brep_curve_geometry(curve,lo,hi,caller)
         nc=_occ_brep_nurbs_curve(curve,caller)
         cv=_ModelOCCNURBSCurve(curve.kind==6 ? :bezier : :bspline,nc)
         return (occ=:copied_curve,curve=cv,t0=lo,t1=hi)
+    elseif curve.kind==5
+        return (occ=:copied_curve,curve=_occ_brep_hyperbola(curve,lo,hi,caller),t0=lo,t1=hi)
     elseif curve.kind==4
         f=curve.a
         f>0 || throw(ArgumentError("$caller: BREP parabola focal length must be positive"))
@@ -606,7 +608,7 @@ function _occ_brep_generatrix(curve,lo,hi,caller)
     g=_occ_brep_curve_geometry(curve,lo,hi,caller)
     g.occ===:copied_curve || throw(ArgumentError(
         "$caller: BREP generatrix has no native rational representation"))
-    return g.curve.curve,nothing
+    return g.curve.curve,g.curve isa _ModelOCCHyperbolaCurve ? g.curve.reparam : nothing
 end
 
 function _occ_brep_surface_geometry(surface,uvb,caller)
@@ -1096,3 +1098,4 @@ end
 include("ModelOCCBREPTrace.jl")
 include("ModelOCCBREPNatural.jl")
 include("ModelOCCBREPEdge.jl")
+include("ModelOCCBREPHyperbola.jl")

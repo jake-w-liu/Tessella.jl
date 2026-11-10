@@ -2,7 +2,14 @@ const _MODEL_ENTITY_TYPES=("Point","Line","Plane","Volume")
 
 # Gmsh `getTypeString` names for the native curve/surface kinds.
 function _model_entity_type_name(m::GeoModel,dimension::Int,tag::Int)
-    dimension==1 && return _curve_type_name(_curve_type(m,tag))
+    if dimension==1
+        geometry=get(m.curve_geometry,tag,nothing)
+        if geometry!==nothing && get(geometry,:occ,nothing)===:copied_curve
+            native=_model_occ_native_curve_type(geometry.curve)
+            native===nothing || return native
+        end
+        return _curve_type_name(_curve_type(m,tag))
+    end
     dimension==2 && return _surface_type_name(_surface_type(m,tag))
     return _MODEL_ENTITY_TYPES[dimension+1]
 end
@@ -23,7 +30,8 @@ end
     model_entity_type(model, dim, tag) -> String
 
 Return the native geometry type of an existing positive-tag entity. Explicit
-curves report `"Line"`, `"Circle"`, or `"Ellipse"`; explicit surfaces report
+curves report their native family, including `"Line"`, `"Circle"`,
+`"Ellipse"`, `"Hyperbola"` and converted `"BSpline"`; explicit surfaces report
 `"Plane"` or the ruled-filling `"Surface"`; points and volumes report
 `"Point"`/`"Volume"`. Native primitive and Boolean solids expose only their
 `"Volume"` entity because their boundary topology is implicit.

@@ -1,7 +1,7 @@
 """Pending OCC shape operations, separate from the public geometry model."""
 module occ
 import ....Model
-using ...API: _with_model, OPTIONS, _native_diagnostic_emit_locked
+using ...API: _with_model, OPTIONS, _native_diagnostic_emit_locked,LAST_MESH,LAST_MESH_CLASS,CURRENT
 
 # Recoverable OCC `Msg::Error` diagnostics the operation survives — e.g.
 # `_multiBind`'s "Cannot bind multiple volumes to single tag" — ride the
@@ -252,8 +252,20 @@ chamfer_2d(edge_tag1,edge_tag2,distance1,distance2;tag=-1)=
 offset_curve(curveLoopTag,offset)=_with_model(
     m->Model._model_occ_offset_wire!(m,curveLoopTag,offset;
         caller="OCC.offsetCurve"))
-convert_to_nurbs(dimTags)=_with_model(
-    m->Model._model_occ_convert_to_nurbs!(m,dimTags,"OCC.convertToNURBS"))
+function convert_to_nurbs(dimTags)
+    _with_model() do m
+        meshed=LAST_MESH[]!==nothing || any(pair->!isempty(last(pair).node_tags) ||
+            !isempty(last(pair).element_tags),Model._discrete_mesh_records_model(m))
+        has_status=m.meshing.mesh_authority!==nothing && !isempty(m.meshing.mesh_authority.done)
+        affected=Model._model_occ_convert_to_nurbs!(m,dimTags,"OCC.convertToNURBS";
+            mesh_clear=meshed || has_status,mesh_topology=meshed && LAST_MESH_CLASS[]===nothing)
+        meshed && !isempty(affected.entities) &&
+            getfield(parentmodule(parentmodule(@__MODULE__)),:_clear_mesh_native_lookup_live)(
+                affected.entities;upward_override=affected.upward)
+        Model._model_occ_nurbs_mesh_status!(CURRENT[],affected.entities)
+        return nothing
+    end
+end
 add_thru_sections(wireTags;tag=-1,makeSolid=true,makeRuled=false,
     maxDegree=-1,continuity="",parametrization="",smoothing=false)=
     _with_model(m->Model._model_occ_thru_sections!(m,tag,wireTags;

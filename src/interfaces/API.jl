@@ -5900,7 +5900,7 @@ end
 # GModel::deleteMesh checks each requested entity in declaration order. A
 # boundary remains meshed while a direct upward entity still has elements;
 # clearing that parent earlier in the selection makes the boundary eligible.
-function _mesh_clear_selection(model,cached,class,pairs)
+function _mesh_clear_selection(model,cached,class,pairs;upward_override=nothing)
     live=Set{Tuple{Int,Int32}}()
     if cached!==nothing
         for (_,dim,_,cells,owners) in _cache_catalog(cached,class)
@@ -5918,6 +5918,10 @@ function _mesh_clear_selection(model,cached,class,pairs)
                 push!(get!(()->Tuple{Int,Int32}[],upward,(dim-1,abs(boundary))),
                       (dim,tag))
             end
+        end
+    elseif upward_override!==nothing
+        for (owner,parents) in upward_override
+            upward[owner]=copy(parents)
         end
     else
         for (dim,tag) in pairs
@@ -5942,7 +5946,7 @@ function _mesh_clear_selection(model,cached,class,pairs)
     return cleared
 end
 
-function _clear_mesh_native_lookup_live(dim_tags=())
+function _clear_mesh_native_lookup_live(dim_tags=();upward_override=nothing)
     caller="API.mesh.clear"
     return lock(STATE_LOCK) do
         model=_model_locked()
@@ -5971,7 +5975,7 @@ function _clear_mesh_native_lookup_live(dim_tags=())
                 _mesh_classified_entity(model,class,dim,tag,caller)
             end
         end
-        cleared=_mesh_clear_selection(model,cached,class,pairs)
+        cleared=_mesh_clear_selection(model,cached,class,pairs;upward_override)
         isempty(cleared) && return nothing
         staged=Model._model_mesh_transaction_copy(model)
         staged.meshing.size_callback=model.meshing.size_callback

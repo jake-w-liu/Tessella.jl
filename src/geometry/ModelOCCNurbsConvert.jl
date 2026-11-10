@@ -4,10 +4,10 @@
 # (arc-length) parametrization; circle and ellipse edges become quadratic-
 # rational B-splines carrying `_ModelOCCConicReparam`, so the public
 # parameter map — and every stored pcurve — is preserved bitwise (upstream
-# refits 2-D curves approximately instead). Spline edges are already NURBS;
-# vertices, wires, degenerate and `surface_iso` edges pass through. Surface
-# and solid/shell patch conversion is a follow-up half of this slice — dim
-# -2, 2 and 3 inputs reject loudly for now rather than half-converting.
+# refits 2-D curves approximately instead). Hyperbolas expose their actual
+# rational parameter after conversion, with exact pcurve transport. Spline
+# edges are already NURBS; vertices and degenerate/iso records pass through.
+# Face, shell and solid closures stage their shared geometry together.
 
 # Rational-quadratic image of a circle/ellipse arc: equal spans of at most
 # π/2, interior poles on the tangent intersections `C + sec(Δ/2)·(p(m)−C)`,
@@ -75,6 +75,9 @@ function _model_occ_nurbs_curve_record(geometry,caller)
                 curve=_model_occ_nurbs_conic(geometry,caller)))
     elseif occ===:copied_curve
         curve=geometry.curve
+        if curve isa _ModelOCCHyperbolaCurve
+            return merge(geometry,(curve=_model_occ_hyperbola_nurbs(curve,caller),))
+        end
         curve isa _ModelOCCReparamCurve && return geometry
         # `GeomConvert` turns a Bezier into a single-span B-spline.
         curve.family===:bezier ||
@@ -89,7 +92,8 @@ function _model_occ_nurbs_curve_record(geometry,caller)
         "$caller: OCC curve kind $(occ) cannot be converted to NURBS"))
 end
 
-function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller)
+function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller;
+        mesh_clear=false,mesh_topology=false)
     kernel=m.occ_kernel
     # Validate and stage everything before the first kernel mutation —
     # failures leave the registry byte-identical (a superset of upstream,
@@ -109,6 +113,8 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller)
     # the public parametrization is preserved so shared sub-shapes stay
     # consistent for every referencing face.
     staged=Dict{UInt64,NamedTuple}()
+    curve_maps=Dict{UInt64,_ModelOCCHyperbolicReparam}()
+    surface_maps=Dict{UInt64,NamedTuple}()
     stack=copy(roots)
     seen=Set{UInt64}()
     order=UInt64[]
@@ -124,12 +130,43 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller)
             converted=_model_occ_nurbs_curve_record(record.geometry,caller)
             converted===record.geometry && continue
             staged[id]=merge(record,(kind=:tensor_bspline,geometry=converted))
+            source=get(record.geometry,:curve,nothing)
+            source isa _ModelOCCHyperbolaCurve &&
+                (curve_maps[id]=_occ_hyperbolic_full_map(source.reparam))
         elseif shape.dimension==2
             record=shape.geometry
             converted=_model_occ_nurbs_surface_record(record.geometry,caller)
             converted===record.geometry && continue
             staged[id]=merge(record,(geometry=converted,))
+            mappings=_occ_hyperbolic_surface_maps(record.geometry)
+            mappings==(u=nothing,v=nothing) || (surface_maps[id]=mappings)
         end
+    end
+    # An explicitly converted edge exposes a new rational parameter. Every
+    # referencing face keeps its physical trace, including a retained face
+    # outside the requested closure. Converted surfaces also expose their
+    # new rational UV coordinates.
+    for (fid,face) in kernel.shapes
+        face.dimension==2 || continue
+        current=get(staged,fid,face.geometry)
+        rec=current.geometry
+        hasproperty(rec,:pcurves) || continue
+        output=get(surface_maps,fid,(u=nothing,v=nothing))
+        changed=output!=(u=nothing,v=nothing)
+        pcurves=Dict{Int,NamedTuple}()
+        for (tag,entry) in rec.pcurves
+            eid=get(kernel.bindings,(1,abs(tag)),UInt64(0))
+            input=get(curve_maps,eid,nothing)
+            if input===nothing && output==(u=nothing,v=nothing)
+                pcurves[tag]=entry
+            else
+                changed=true
+                fwd=entry.fwd===nothing ? nothing : (brep_conversion2d=(entry.fwd,input,output),)
+                rev=entry.rev===nothing ? nothing : (brep_conversion2d=(entry.rev,input,output),)
+                pcurves[tag]=(fwd=fwd,rev=rev)
+            end
+        end
+        changed && (staged[fid]=merge(current,(geometry=merge(rec,(pcurves=pcurves,)),)))
     end
     # Member degenerate/surface-iso edges embed their owner face record —
     # rebind each to the converted record so the pcurve lookup and the
@@ -163,19 +200,88 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller)
             # the previously materialized model entries like the corner ops.
             delete!(m.curves,t);delete!(m.curve_types,t)
             delete!(m.curve_geometry,t)
+            delete!(m.curve_params,t)
         elseif shape.dimension==2
             delete!(m.surfaces,t);delete!(m.surface_types,t)
             delete!(m.surface_geometry,t)
         end
     end
+    return mesh_clear ? _model_occ_nurbs_mesh_selection(kernel,staged,order;topology=mesh_topology) :
+        (entities=Tuple{Int,Int}[],upward=Dict{Tuple{Int,Int32},Vector{Tuple{Int,Int32}}}())
+end
+
+# Clear the converted closure and meshed owners of its changed subshapes.
+# Other boundary products can survive when an unconverted owner still uses
+# them; the native mesh-clear operation enforces that ownership rule.
+function _model_occ_nurbs_mesh_selection(kernel,staged,order;topology=false)
+    empty_upward=Dict{Tuple{Int,Int32},Vector{Tuple{Int,Int32}}}()
+    isempty(staged) && return (entities=Tuple{Int,Int}[],upward=empty_upward)
+    parents=Dict{UInt64,Vector{UInt64}}()
+    for (id,shape) in kernel.shapes,child in shape.children
+        push!(get!(()->UInt64[],parents,child),id)
+    end
+    selected=Set{UInt64}(order)
+    pending=collect(keys(staged));visited=Set{UInt64}(pending)
+    position=1
+    while position<=length(pending)
+        id=pending[position];position+=1
+        push!(selected,id)
+        for parent in get(parents,id,UInt64[])
+            parent in visited && continue
+            push!(visited,parent);push!(pending,parent)
+        end
+    end
+    entities=Tuple{Int,Int}[]
+    for id in selected
+        entry=get(kernel.shape_tags,id,nothing)
+        entry===nothing || !(0<=entry[1]<=3) || push!(entities,entry)
+    end
+    sort!(unique!(entities);by=entry->(-entry[1],entry[2]))
+    topology || return (entities=entities,upward=empty_upward)
+    upward=empty_upward
+    for (dimension,tag) in entities
+        id=kernel.bindings[(dimension,tag)]
+        direct=Tuple{Int,Int32}[]
+        queue=copy(get(parents,id,UInt64[]));seen=Set{UInt64}(queue)
+        cursor=1
+        while cursor<=length(queue)
+            parent=queue[cursor];cursor+=1
+            entry=get(kernel.shape_tags,parent,nothing)
+            if entry!==nothing && entry[1]==dimension+1
+                push!(direct,(entry[1],Int32(entry[2])))
+                continue
+            end
+            for next in get(parents,parent,UInt64[])
+                next in seen && continue
+                push!(seen,next);push!(queue,next)
+            end
+        end
+        upward[(dimension,Int32(tag))]=unique!(direct)
+    end
+    return (entities=entities,upward=upward)
+end
+
+# A CAD replacement has fresh meshing status. Mesh.clear itself deliberately
+# retains status, so reset only replaced products that are now absent; shared
+# retained products and unrelated entities keep their completed state.
+function _model_occ_nurbs_mesh_status!(m,entities)
+    authority=m.meshing.mesh_authority
+    authority===nothing && return nothing
+    for (dimension,tag) in entities
+        owner=(dimension,Int32(tag))
+        haskey(authority.products,owner) && continue
+        delete!(authority.done,owner)
+        delete!(authority.native_inputs,owner)
+        delete!(authority.surface_constructor_inputs,owner)
+        delete!(authority.producer_rows,owner)
+    end
     return nothing
 end
 
 # ── surface conversion ─────────────────────────────────────────────────────
-# A converted face keeps its `occ` kind as analytic metadata and gains
-# `patch`+`reparam`; every evaluator checks `_model_nurbs_surface` first, so
-# the NURBS is authoritative while the preserved external parametrization
-# keeps pcurves, u-periods, measures and materializers bitwise consistent.
+# Analytic quadric conversions retain their existing external chart through
+# `patch`+`reparam`. Hyperbolic tensor axes expose the rational chart instead;
+# their pcurves transport both the edge parameter and surface UV coordinates.
 
 # One conic axis' pole layout over [t0,t1]: per-pole parameter value, radial
 # factor (1 or sec(Δ/2)) and weight — shared by every quadratic-rational
@@ -309,6 +415,9 @@ end
 function _model_occ_nurbs_surface_record(geometry,caller)
     occ=get(geometry,:occ,nothing)
     if hasproperty(geometry,:patch)
+        mappings=_occ_hyperbolic_surface_maps(geometry)
+        mappings==(u=nothing,v=nothing) ||
+            return _model_occ_hyperbolic_surface_nurbs(geometry,caller)
         # Already-NURBS tensor record: a bezier patch renormalizes to a
         # B-spline like `GeomConvert`; anything else passes through.
         geometry.patch.family===:bezier || return geometry

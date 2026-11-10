@@ -6,6 +6,8 @@ struct _ModelOCCNURBSCurve
     nets::NTuple{3,Union{Nothing,Vector{NTuple{4,Float64}}}}
 end
 
+_model_occ_native_curve_type(geometry)=nothing
+
 function _model_occ_curve_derivative_net(net,degree,knots)
     degree==0 && return nothing
     result=Vector{NTuple{4,Float64}}(undef,length(net)-1)

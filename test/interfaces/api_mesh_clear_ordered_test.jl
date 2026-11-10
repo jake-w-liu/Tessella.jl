@@ -82,8 +82,9 @@ Physical Surface(7)={1};
                                ([(3,1),(2,1)],[(2,1),(3,1)]))
         api.initialize()
         try
-            mktemp() do path,io
-                write(io,source);close(io)
+            mktempdir() do directory
+                path=joinpath(directory,"clear_order.geo")
+                write(path,source)
                 api.open_geo!(path)
             end
             api.mesh.generate(3)
