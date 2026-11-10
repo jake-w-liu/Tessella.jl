@@ -1648,6 +1648,36 @@ function _fd_delta(delta,caller)
     return d
 end
 
+function _fd_stencil_numerator(samples,weights)
+    R=Rational{BigInt}
+    return sum(R(samples[i])*weights[i] for i in eachindex(samples))
+end
+
+@noinline function _fd_stencil_exact(samples,weights,delta,degree,divisor)
+    R=Rational{BigInt}
+    return Float64(_fd_stencil_numerator(samples,weights)/(R(delta)^degree*divisor))
+end
+
+# Keep the ordinary stencil allocation-free; only unrepresentable intermediate
+# sums or spacing powers require exact arithmetic on the already held samples.
+@inline function _fd_stencil(samples,weights,delta,::Val{degree},divisor=1) where {degree}
+    if all(sample->sample==samples[1],samples)
+        iszero(sum(weights)) && return 0.0
+        degree==0 && sum(weights)==divisor && return Float64(samples[1])
+    end
+    numerator=0.0
+    for i in eachindex(samples)
+        sample=Float64(samples[i])
+        numerator=muladd(Float64(weights[i]),sample,numerator)
+    end
+    denominator=delta^degree*divisor
+    value=numerator/denominator
+    if !isfinite(value) || !isfinite(denominator) || abs(denominator)<floatmin(Float64)
+        return _fd_stencil_exact(samples,weights,delta,degree,divisor)
+    end
+    return value
+end
+
 """Gmsh `Gradient`: component 0/1/2 = ∂/∂x,∂/∂y,∂/∂z; 3 = Euclidean norm."""
 struct GradientField{F<:AbstractField} <: AbstractField
     input::F; kind::Int; delta::Float64
@@ -1659,9 +1689,12 @@ end
 function _gradient_value(field::GradientField,x,y,z,entity)
     x=_float_value(x,"GradientField","x"); y=_float_value(y,"GradientField","y")
     z=_float_value(z,"GradientField","z"); d=field.delta; g=field.input
-    gx()=(field_value(g,x+d/2,y,z,entity)-field_value(g,x-d/2,y,z,entity))/d
-    gy()=(field_value(g,x,y+d/2,z,entity)-field_value(g,x,y-d/2,z,entity))/d
-    gz()=(field_value(g,x,y,z+d/2,entity)-field_value(g,x,y,z-d/2,entity))/d
+    gx()=_fd_stencil((field_value(g,x+d/2,y,z,entity),
+        field_value(g,x-d/2,y,z,entity)),(1,-1),d,Val(1))
+    gy()=_fd_stencil((field_value(g,x,y+d/2,z,entity),
+        field_value(g,x,y-d/2,z,entity)),(1,-1),d,Val(1))
+    gz()=_fd_stencil((field_value(g,x,y,z+d/2,entity),
+        field_value(g,x,y,z-d/2,entity)),(1,-1),d,Val(1))
     value = field.kind==0 ? gx() : field.kind==1 ? gy() : field.kind==2 ? gz() :
             hypot(gx(),gy(),gz())
     return _checked_field_result(value,"GradientField",x,y,z)
@@ -1679,10 +1712,10 @@ LaplacianField(input::AbstractField; delta::Real=1e-4) =
 function _laplacian_value(field::LaplacianField,x,y,z,entity)
     x=_float_value(x,"LaplacianField","x"); y=_float_value(y,"LaplacianField","y")
     z=_float_value(z,"LaplacianField","z"); d=field.delta; g=field.input
-    value=(field_value(g,x+d,y,z,entity)+field_value(g,x-d,y,z,entity)+
-            field_value(g,x,y+d,z,entity)+field_value(g,x,y-d,z,entity)+
-            field_value(g,x,y,z+d,entity)+field_value(g,x,y,z-d,entity)-
-            6*field_value(g,x,y,z,entity))/(d*d)
+    value=_fd_stencil((field_value(g,x+d,y,z,entity),field_value(g,x-d,y,z,entity),
+            field_value(g,x,y+d,z,entity),field_value(g,x,y-d,z,entity),
+            field_value(g,x,y,z+d,entity),field_value(g,x,y,z-d,entity),
+            field_value(g,x,y,z,entity)),(1,1,1,1,1,1,-6),d,Val(2))
     return _checked_field_result(value,"LaplacianField",x,y,z)
 end
 field_value(field::LaplacianField,x,y,z)=_laplacian_value(field,x,y,z,nothing)
@@ -1698,10 +1731,10 @@ MeanField(input::AbstractField; delta::Real=1e-4) =
 function _mean_value(field::MeanField,x,y,z,entity)
     x=_float_value(x,"MeanField","x"); y=_float_value(y,"MeanField","y")
     z=_float_value(z,"MeanField","z"); d=field.delta; g=field.input
-    value=(field_value(g,x+d,y,z,entity)+field_value(g,x-d,y,z,entity)+
-            field_value(g,x,y+d,z,entity)+field_value(g,x,y-d,z,entity)+
-            field_value(g,x,y,z+d,entity)+field_value(g,x,y,z-d,entity)+
-            field_value(g,x,y,z,entity))/7
+    value=_fd_stencil((field_value(g,x+d,y,z,entity),field_value(g,x-d,y,z,entity),
+            field_value(g,x,y+d,z,entity),field_value(g,x,y-d,z,entity),
+            field_value(g,x,y,z+d,entity),field_value(g,x,y,z-d,entity),
+            field_value(g,x,y,z,entity)),(1,1,1,1,1,1,1),d,Val(0),7)
     return _checked_field_result(value,"MeanField",x,y,z)
 end
 field_value(field::MeanField,x,y,z)=_mean_value(field,x,y,z,nothing)
@@ -1716,13 +1749,26 @@ CurvatureOpField(input::AbstractField; delta::Real=1e-4) =
     CurvatureOpField{typeof(input)}(input,_fd_delta(delta,"CurvatureField"))
 """Alias for [`CurvatureOpField`](@ref), matching Gmsh's `Curvature` name."""
 const CurvatureField=CurvatureOpField
+@noinline function _grad_norm_exact(samples)
+    R=Rational{BigInt}
+    differences=ntuple(i->R(samples[2i-1])-R(samples[2i]),3)
+    scale=maximum(abs,differences)
+    scale==0 && return nothing
+    direction=map(value->Float64(value/scale),differences)
+    norm=_norm3(direction)
+    return map(value->value/norm,direction)
+end
 function _grad_norm(f,x,y,z,d,entity)
-    g=((field_value(f,x+d/2,y,z,entity)-field_value(f,x-d/2,y,z,entity)),
-       (field_value(f,x,y+d/2,z,entity)-field_value(f,x,y-d/2,z,entity)),
-       (field_value(f,x,y,z+d/2,entity)-field_value(f,x,y,z-d/2,entity)))
-    n=_norm3(g)
-    n==0 && return nothing
-    return ntuple(i->g[i]/n,3)
+    samples=(field_value(f,x+d/2,y,z,entity),field_value(f,x-d/2,y,z,entity),
+       field_value(f,x,y+d/2,z,entity),field_value(f,x,y-d/2,z,entity),
+       field_value(f,x,y,z+d/2,entity),field_value(f,x,y,z-d/2,entity))
+    gradient=ntuple(i->samples[2i-1]-samples[2i],3)
+    scale=maximum(abs,gradient)
+    isfinite(scale) || return _grad_norm_exact(samples)
+    scale==0 && return nothing
+    direction=map(value->value/scale,gradient)
+    norm=_norm3(direction)
+    return map(value->value/norm,direction)
 end
 function _curvature_value(field::CurvatureOpField,x,y,z,entity)
     x=_float_value(x,"CurvatureField","x"); y=_float_value(y,"CurvatureField","y")
@@ -1748,21 +1794,49 @@ struct MaxEigenHessianField{F<:AbstractField} <: AbstractField
 end
 MaxEigenHessianField(input::AbstractField; delta::Real=1e-4) =
     MaxEigenHessianField{typeof(input)}(input,_fd_delta(delta,"MaxEigenHessianField"))
+
+@noinline function _fd_hessian_max_exact(stencils,delta)
+    numerators=ntuple(6) do index
+        weights=index<=3 ? (1,1,-2) : (1,1,-1,-1)
+        _fd_stencil_numerator(stencils[index],weights)
+    end
+    # A large negative curvature need not make the largest eigenvalue overflow.
+    # Keep the six held stencils together until the final scalar conversion.
+    # This rare path has a fixed mantissa and the eigensolver's bounded sweeps.
+    return setprecision(BigFloat,8192) do
+        setrounding(BigFloat,RoundNearest) do
+            eigenvalues,_=_sym3_eigh_big(numerators...;bits=8192)
+            Float64(maximum(eigenvalues)/BigFloat(delta)^2)
+        end
+    end
+end
+
 function _maxeigenhessian_value(field::MaxEigenHessianField,x,y,z,entity)
     x=_float_value(x,"MaxEigenHessianField","x"); y=_float_value(y,"MaxEigenHessianField","y")
     z=_float_value(z,"MaxEigenHessianField","z"); d=field.delta; g=field.input
     f0=field_value(g,x,y,z,entity)
-    hxx=field_value(g,x+d,y,z,entity)+field_value(g,x-d,y,z,entity)-2*f0
-    hyy=field_value(g,x,y+d,z,entity)+field_value(g,x,y-d,z,entity)-2*f0
-    hzz=field_value(g,x,y,z+d,entity)+field_value(g,x,y,z-d,entity)-2*f0
-    hxy=field_value(g,x+d/2,y+d/2,z,entity)+field_value(g,x-d/2,y-d/2,z,entity)-
-        field_value(g,x-d/2,y+d/2,z,entity)-field_value(g,x+d/2,y-d/2,z,entity)
-    hxz=field_value(g,x+d/2,y,z+d/2,entity)+field_value(g,x-d/2,y,z-d/2,entity)-
-        field_value(g,x-d/2,y,z+d/2,entity)-field_value(g,x+d/2,y,z-d/2,entity)
-    hyz=field_value(g,x,y+d/2,z+d/2,entity)+field_value(g,x,y-d/2,z-d/2,entity)-
-        field_value(g,x,y-d/2,z+d/2,entity)-field_value(g,x,y+d/2,z-d/2,entity)
+    xx=(field_value(g,x+d,y,z,entity),field_value(g,x-d,y,z,entity),f0)
+    yy=(field_value(g,x,y+d,z,entity),field_value(g,x,y-d,z,entity),f0)
+    zz=(field_value(g,x,y,z+d,entity),field_value(g,x,y,z-d,entity),f0)
+    xy=(field_value(g,x+d/2,y+d/2,z,entity),
+        field_value(g,x-d/2,y-d/2,z,entity),field_value(g,x-d/2,y+d/2,z,entity),
+        field_value(g,x+d/2,y-d/2,z,entity))
+    xz=(field_value(g,x+d/2,y,z+d/2,entity),
+        field_value(g,x-d/2,y,z-d/2,entity),field_value(g,x-d/2,y,z+d/2,entity),
+        field_value(g,x+d/2,y,z-d/2,entity))
+    yz=(field_value(g,x,y+d/2,z+d/2,entity),
+        field_value(g,x,y-d/2,z-d/2,entity),field_value(g,x,y-d/2,z+d/2,entity),
+        field_value(g,x,y+d/2,z-d/2,entity))
+    hxx=_fd_stencil(xx,(1,1,-2),d,Val(2))
+    hyy=_fd_stencil(yy,(1,1,-2),d,Val(2))
+    hzz=_fd_stencil(zz,(1,1,-2),d,Val(2))
+    hxy=_fd_stencil(xy,(1,1,-1,-1),d,Val(2))
+    hxz=_fd_stencil(xz,(1,1,-1,-1),d,Val(2))
+    hyz=_fd_stencil(yz,(1,1,-1,-1),d,Val(2))
+    all(isfinite,(hxx,hyy,hzz,hxy,hxz,hyz)) || return _checked_field_result(
+        _fd_hessian_max_exact((xx,yy,zz,xy,xz,yz),d),"MaxEigenHessianField",x,y,z)
     λ,_=_sym3_eigh(hxx,hyy,hzz,hxy,hxz,hyz)
-    return _checked_field_result(maximum(λ)/(d*d),"MaxEigenHessianField",x,y,z)
+    return _checked_field_result(maximum(λ),"MaxEigenHessianField",x,y,z)
 end
 field_value(field::MaxEigenHessianField,x,y,z)=
     _maxeigenhessian_value(field,x,y,z,nothing)

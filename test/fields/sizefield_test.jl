@@ -514,9 +514,9 @@ end
         @test field_value(MeanField(ConstantSize(0.4);delta=0.1),0,0,0)≈0.4
         @test_throws ArgumentError GradientField(r2;kind=4)
         huge=ConstantSize(1e308)
-        @test_throws ArgumentError field_value(MeanField(huge),0.0,0.0,0.0)
-        @test_throws ArgumentError field_value(LaplacianField(huge),0.0,0.0,0.0)
-        @test_throws ArgumentError field_value(MaxEigenHessianField(huge),0.0,0.0,0.0)
+        @test field_value(MeanField(huge),0.0,0.0,0.0)==1e308
+        @test field_value(LaplacianField(huge),0.0,0.0,0.0)==0.
+        @test field_value(MaxEigenHessianField(huge),0.0,0.0,0.0)==0.
 
         # div(grad r / |grad r|) = 2/r for r=|x|.
         radial=MathEvalField("sqrt(x^2+y^2+z^2)")
