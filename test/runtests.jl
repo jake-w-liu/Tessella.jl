@@ -89,6 +89,7 @@ include("functional/fixtures.jl")
         "interfaces/api_view_inverse_recovery_test.jl",
         "interfaces/api_native_recombine_diamond_test.jl",
         "interfaces/api_view_normalization_test.jl",
+        "interfaces/api_plugin_normalized_probe_test.jl",
         "functional/model_merge_smoke.jl",
         "functional/pos_import_smoke.jl",
         "functional/view_time_smoke.jl",

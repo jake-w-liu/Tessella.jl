@@ -830,48 +830,39 @@ end
 const _PLUGIN_WEIGHT_FAMILY=(quadrangle=:qua,hexahedron=:hex,prism=:pri,
                              pyramid=:pyr)
 
-# Invert the bilinear/trilinear reference map through Newton iterations, the
-# same `insideElement` + nodal shape evaluation the upstream `OctreePost`
-# buckets perform for quadrangles, hexahedra, prisms and pyramids.
+# Reuse the safeguarded canonical map inverse used by view/field queries.
+# Coordinates are normalized by element variation, so translations cannot
+# turn the initial reference center into an accepted physical query.
+@noinline function _plugin_precise_weights(cell,family,point,seed,tolerance)
+    return SizeField._pv_precise_scope() do
+        reference=SizeField._pv_scheme_precise_inverse(cell,point,seed,tolerance)
+        reference===nothing && return nothing
+        map(Float64,MeshPointLocation._shape_functions(family,reference...,"plugin"))
+    end
+end
+
 function _plugin_newton_weights(coords,kind::Symbol,p)
     family=_PLUGIN_WEIGHT_FAMILY[kind]
-    ndim=kind===:quadrangle ? 2 : 3
-    ξ=(0.0,0.0,0.0)
-    scale=max(1.0,maximum(abs,coords))
-    T=1e-9
-    N=nothing
-    for _ in 1:50
-        N=collect(Float64,MeshPointLocation._shape_functions(
-            family,ξ[1],ξ[2],ξ[3],"plugin"))
-        resid=Float64[p[a]-LinearAlgebra.dot(N,view(coords,a,:)) for a in 1:3]
-        LinearAlgebra.norm(resid,Inf)<=T*scale && break
-        J=Matrix{Float64}(undef,3,ndim)
-        for k in 1:ndim
-            ξh=collect(ξ);ξh[k]+=1e-7
-            Nh=collect(Float64,MeshPointLocation._shape_functions(
-                family,ξh[1],ξh[2],ξh[3],"plugin"))
-            for a in 1:3
-                J[a,k]=LinearAlgebra.dot(Nh.-N,view(coords,a,:))/1e-7
-            end
+    empty_matrix=zeros(Float64,0,0);empty_exponents=NTuple{3,Float64}[]
+    code=SizeField._POSTVIEW_SCHEME_KIND[kind]
+    cell=SizeField._PVSchemeCell(code,true,kind===:pyramid,empty_matrix,
+        empty_exponents,empty_matrix,empty_exponents,coords,empty_matrix)
+    scale=SizeField._pv_scheme_scale(cell)
+    scale>0 || return nothing
+    base=SizeField._pv_scheme_base(cell)
+    query=SizeField._postview_scaled_query(p,base,scale)
+    tolerance=1e-9
+    reference=all(isfinite,query) ? SizeField._pv_scheme_inverse(cell,query,base,scale) : nothing
+    reference===nothing && return _plugin_precise_weights(cell,family,p,(0.,0.,0.),tolerance)
+    if SizeField._pv_query_roundtrip_differs(p,query,base,scale)
+        derivatives=SizeField._pv_scheme_jacobian(cell,reference...,base,scale)
+        if SizeField._pv_normalization_needs_precision(reference,p,query,base,
+                scale,derivatives,SizeField._pv_scheme_dim(code))
+            return _plugin_precise_weights(cell,family,p,reference,tolerance)
         end
-        Δ=try
-            (J'*J)\(J'*resid)
-        catch
-            return nothing
-        end
-        ξ=ξ.+ntuple(k->k<=ndim ? Δ[k] : 0.0,3)
-        LinearAlgebra.norm(Δ,Inf)<=T && break
     end
-    u,v,w=ξ
-    inside=kind===:quadrangle ? (abs(u)<=1+T && abs(v)<=1+T) :
-           kind===:hexahedron ? (abs(u)<=1+T && abs(v)<=1+T && abs(w)<=1+T) :
-           kind===:prism ? (u>=-T && v>=-T && u+v<=1+T && abs(w)<=1+T) :
-           (w>=-T && w<=1+T && abs(u)<=1-w+T && abs(v)<=1-w+T)
-    inside || return nothing
-    N=collect(Float64,MeshPointLocation._shape_functions(family,u,v,w,"plugin"))
-    resid=Float64[p[a]-LinearAlgebra.dot(N,view(coords,a,:)) for a in 1:3]
-    LinearAlgebra.norm(resid,Inf)<=T*scale || return nothing
-    return Tuple(N)
+    SizeField._pv_scheme_inside(code,reference...,tolerance) || return nothing
+    return MeshPointLocation._shape_functions(family,reference...,"plugin")
 end
 
 function _plugin_local_weights(coords,kind::Symbol,p)
@@ -906,16 +897,6 @@ function _plugin_local_weights(coords,kind::Symbol,p)
         _plugin_norm3(resid)<=T*scale &&
             u>=-T && v>=-T && u+v<=1+T || return nothing
         return (1.0-u-v,u,v)
-    elseif kind===:quadrangle
-        for nodes in ((1,2,3),(1,3,4))
-            sub=coords[:,collect(nodes)]
-            w=_plugin_local_weights(sub,:triangle,p)
-            w===nothing && continue
-            N=zeros(4)
-            for (i,node) in enumerate(nodes);N[node]=w[i];end
-            return Tuple(N)
-        end
-        return nothing
     elseif kind===:tetrahedron
         e1=_plugin_sub3(_plugin_col(coords,2),a)
         e2=_plugin_sub3(_plugin_col(coords,3),a)
