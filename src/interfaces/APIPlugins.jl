@@ -106,8 +106,8 @@
 # every populated step. `ModulusPhase` is the only in-place plugin that also
 # rewrites model payloads — its stored rows are per tag, so the upstream
 # NodeData double-application guard is unnecessary. Gradient differentiates
-# only linear nodal data — records whose value nodes outnumber the primary
-# geometric map (high-order `ElementNodeData`), non-scalar components and
+# the primary-node primitive data exposed by the native model-view plugin
+# interface, including higher-order source meshes. Non-scalar components and
 # point elements are skipped like the upstream scalar-record scan. CutPlane
 # interpolates section values from the primary corner values; elements fully
 # in the plane are re-emitted verbatim when they fit a list record type.
@@ -286,7 +286,11 @@ struct _PluginElement
     vals::Vector{Float64}
     ncomp::Int
     etag::UInt64
+    bounds_coords::Matrix{Float64}
 end
+
+_PluginElement(kind,dim,geo,vcoords,vals,ncomp,etag)=
+    _PluginElement(kind,dim,geo,vcoords,vals,ncomp,etag,vcoords)
 
 function _plugin_list_steps(view,caller::AbstractString)
     steps=_view_plain_list_steps(view.list_types,view.list_counts,view.list_data)
@@ -360,17 +364,17 @@ end
 
 function _plugin_model_mesh(slot,caller::AbstractString)
     slot===nothing && throw(ArgumentError("$caller: model view has no model"))
-    mesh=slot.mesh
-    mesh===nothing && throw(ArgumentError("$caller: model view has no mesh"))
-    return mesh
+    return _plugin_model_mesh_context(slot,_plugin_model_contexts(),caller).mesh
 end
 
 # Element records for one populated `(step, data_type)` model-data block; each
 # element carries its single-step values: ElementData rows broadcast the stored
 # row to every scanned node like the upstream GModel data path, ElementNodeData
 # rows keep their node-major payload (variable row widths come from the step
-# context `counts`), and NodeData rows gather per element node tag (elements
-# with incomplete node coverage are skipped). `etag` retains the source tag.
+# context `counts`), and NodeData rows gather primary element nodes. Native
+# primitive plugins project higher-order model data to those primary nodes;
+# their bounding boxes still include the complete source geometry. `etag`
+# retains the source tag.
 function _plugin_model_elements(view,key,caller::AbstractString)
     ctx=view.model_contexts[key];entity_tags,values,nc=view.model_data[key]
     nc>0 || throw(ArgumentError("$caller: malformed model data component count"))
@@ -399,6 +403,7 @@ function _plugin_model_elements(view,key,caller::AbstractString)
             for axis in 1:3,node in 1:ga
                 geo[axis,node]=mesh.coords[axis,Int(rec.node_tags[node])]
             end
+            bounds_coords=mesh.coords[:,Int.(rec.node_tags)]
             base=offsets[row]
             if kind=="ElementData"
                 vals=Vector{Float64}(undef,ga*nc)
@@ -406,17 +411,17 @@ function _plugin_model_elements(view,key,caller::AbstractString)
                     vals[(node-1)*nc+comp]=values[base+comp-1]
                 end
                 push!(elements,_PluginElement(_PLUGIN_FAMILY_KIND[spec.family],
-                    Int(spec.dim),geo,geo,vals,nc,UInt64(tag)))
+                    Int(spec.dim),geo,geo,vals,nc,UInt64(tag),bounds_coords))
             else
                 nn=(offsets[row+1]-base)÷nc
-                va=min(nn,length(rec.node_tags))
+                va=min(nn,ga)
                 vcoords=Matrix{Float64}(undef,3,va)
                 for axis in 1:3,node in 1:va
                     vcoords[axis,node]=mesh.coords[axis,Int(rec.node_tags[node])]
                 end
                 vals=collect(Float64,@view(values[base:base+va*nc-1]))
                 push!(elements,_PluginElement(_PLUGIN_FAMILY_KIND[spec.family],
-                    Int(spec.dim),geo,vcoords,vals,nc,UInt64(tag)))
+                    Int(spec.dim),geo,vcoords,vals,nc,UInt64(tag),bounds_coords))
             end
         end
     elseif kind=="NodeData"
@@ -426,7 +431,7 @@ function _plugin_model_elements(view,key,caller::AbstractString)
             rec=mesh_element_record(mesh,index)
             spec=msh_spec(Int(rec.element_type))
             spec.family===:trih && continue
-            nn=length(rec.node_tags)
+            nn=min(Elements._msh_primary_nodes(spec.family),length(rec.node_tags))
             rows=Vector{Int}(undef,nn)
             covered=true
             for node in 1:nn
@@ -452,7 +457,8 @@ function _plugin_model_elements(view,key,caller::AbstractString)
             etag=public===nothing ? UInt64(index) :
                 get(public.element_tags,index,UInt64(index))
             push!(elements,_PluginElement(_PLUGIN_FAMILY_KIND[spec.family],
-                Int(spec.dim),geo,vcoords,vals,nc,etag))
+                Int(spec.dim),geo,vcoords,vals,nc,etag,
+                mesh.coords[:,Int.(rec.node_tags)]))
         end
     else
         throw(ArgumentError("$caller: unsupported model data type '$kind'"))
@@ -565,12 +571,12 @@ function _plugin_publish_list_view!(name,types,counts,datas,time;caller="API.plu
     return tag
 end
 
-# Bounding-box accumulation over value-node coordinates (the upstream data
+# Bounding-box accumulation over the full source geometry (the upstream data
 # bounding box anchors the SP records of Integrate/MinMax/Probe outputs).
 function _plugin_bbox_bounds!(lo,hi,elements)
     for element in elements
-        for node in axes(element.vcoords,2),axis in 1:3
-            v=element.vcoords[axis,node]
+        for node in axes(element.bounds_coords,2),axis in 1:3
+            v=element.bounds_coords[axis,node]
             v<lo[axis] && (lo[axis]=v)
             v>hi[axis] && (hi[axis]=v)
         end
@@ -927,19 +933,35 @@ end
 # Integrators can sample thousands of times without rebuilding this snapshot.
 const _PLUGIN_MODEL_PROBE_CONTEXT_KEY=gensym(:TessellaPluginModelProbe)
 
-function _plugin_model_probe_context(slot,contexts,caller)
+function _plugin_model_contexts()
+    storage=current_task().storage
+    contexts=storage===nothing ? nothing : get(storage,_PLUGIN_MODEL_PROBE_CONTEXT_KEY,nothing)
+    return contexts===nothing ? IdDict{Any,Any}() : contexts
+end
+
+@inline function _plugin_model_context_matches(previous,slot)
+    return previous!==nothing && previous.source_model===slot.model &&
+        previous.source_mesh===slot.mesh && previous.source_class===slot.class &&
+        previous.source_high_order===slot.high_order
+end
+
+function _plugin_model_mesh_context(slot,contexts,caller)
     previous=get(contexts,slot,nothing)
-    if previous!==nothing && previous.source_mesh===slot.mesh &&
-            previous.source_class===slot.class && previous.source_high_order===slot.high_order
-        return previous
-    end
-    slot.mesh===nothing && throw(ArgumentError("$caller: model view has no mesh"))
+    _plugin_model_context_matches(previous,slot) && return previous
     mesh=_native_view_writer_mesh(slot,caller)
     public=_cache_public_tags(mesh;caller)
-    context=(mesh=mesh,public=public,locator=_MixedMeshLocator(mesh),
+    context=(mesh=mesh,public=public,source_model=slot.model,
         source_mesh=slot.mesh,source_class=slot.class,source_high_order=slot.high_order)
     contexts[slot]=context
     return context
+end
+
+function _plugin_model_probe_context(slot,contexts,caller)
+    context=_plugin_model_mesh_context(slot,contexts,caller)
+    haskey(context,:locator) && return context
+    located=merge(context,(locator=_MixedMeshLocator(context.mesh),))
+    contexts[slot]=located
+    return located
 end
 
 # Probe each populated step on its own actual model. Reference inversion and
@@ -948,9 +970,7 @@ function _plugin_probe_model(view,p,caller::AbstractString;dimension::Int=-1)
     _slot_capture_locked!()
     keys=_plugin_model_keys(view)
     isempty(keys) && return nothing,Int[]
-    storage=current_task().storage
-    contexts=storage===nothing ? nothing : get(storage,_PLUGIN_MODEL_PROBE_CONTEXT_KEY,nothing)
-    contexts===nothing && (contexts=IdDict{Any,Any}())
+    contexts=_plugin_model_contexts()
     located=IdDict{Any,Any}()
     kind=view.model_kind
     out=Vector{Float64}[];step_nums=Int[]
@@ -1584,7 +1604,7 @@ function _plugin_elements_all_steps(view,caller::AbstractString)
             end
         end
         push!(merged,_PluginElement(proto.kind,proto.dim,proto.geo,
-                                    proto.vcoords,vals,nc,etag))
+                                    proto.vcoords,vals,nc,etag,proto.bounds_coords))
     end
     return merged,length(keys),[_plugin_step_time(view,key[1]) for key in keys]
 end
@@ -1656,7 +1676,7 @@ end
 # `∇u = J (JᵀJ)⁻¹ ∇ξu` evaluated at the node's reference location: the exact
 # tangential gradient for dim<3 elements and the full gradient for volume
 # elements. `nothing` when the element has no linear gradient — non-scalar
-# data, value nodes outnumbering the primary map (high-order data), or a
+# data, value nodes not matching the primitive map, or a
 # degenerate map.
 function _plugin_element_gradient(element::_PluginElement,step::Int)
     nodes=get(_PLUGIN_REFERENCE_NODES,element.kind,nothing)

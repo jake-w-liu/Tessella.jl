@@ -97,6 +97,7 @@ include("functional/fixtures.jl")
         "interfaces/api_view_normalization_test.jl",
         "interfaces/api_plugin_normalized_probe_test.jl",
         "interfaces/api_plugin_mesh_skin_test.jl",
+        "interfaces/api_plugin_primary_model_data_test.jl",
         "functional/model_merge_smoke.jl",
         "functional/pos_import_smoke.jl",
         "functional/view_time_smoke.jl",
