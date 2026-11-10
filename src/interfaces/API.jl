@@ -769,6 +769,7 @@ function initialize()
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
         _onelab_reset_server_state!()
+        _parser_reset_session!()
         empty!(SESSION_INPUT_ERRORS[])
         _SESSION_START_TIME[]=time()
     end
@@ -788,6 +789,7 @@ function finalize()
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
         _onelab_reset_server_state!()
+        _parser_reset_session!()
         empty!(SESSION_INPUT_ERRORS[])
     end
     return nothing

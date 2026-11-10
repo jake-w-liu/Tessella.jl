@@ -1,12 +1,17 @@
 # `parser` module: the `.geo` parser variable store, matching the gmsh 4.15.2
 # `gmshParser*` API surface. Number variables are `Vector{Float64}`; string
 # variables are `Vector{String}`; name queries use the upstream `search`
-# regular-expression argument. `parse` runs a `.geo` file on a detached
-# execution (no geometry lands in the current model) and adopts the resulting
-# symbol table — the same cumulative-merge semantics the upstream parser has.
+# regular-expression argument. `parse` executes a file against the current
+# model and existing parser namespace. Model, mesh and parameter changes use
+# the same detached preparation and native publication as ONELAB ParseString.
 
 const _PARSER_NUMBERS = Dict{String,Vector{Float64}}()
 const _PARSER_STRINGS = Dict{String,Vector{String}}()
+
+function _parser_reset_session!()
+    empty!(_PARSER_NUMBERS);empty!(_PARSER_STRINGS)
+    return nothing
+end
 
 function _parser_check_name(name,caller::AbstractString)
     name isa AbstractString || throw(ArgumentError(
@@ -132,33 +137,16 @@ function _parser_clear(name)
     end
 end
 
-# Run `fileName` through the standalone `.geo` evaluator on a detached
-# execution — `parser.parse` populates the symbol table only; upstream it does
-# not touch the current model's geometry or mesh. Variables defined by the
-# file merge into the store, overwriting same-named entries.
+# ParseFile consumes the current namespace and model. A successful operation
+# publishes the actual geometry/mesh together with its final symbol table.
 function _parser_parse(path)
     caller="API.parser.parse"
     source=_parser_check_name(path,caller)
     isempty(source) && throw(ArgumentError("$caller: file name must not be empty"))
-    lock(STATE_LOCK) do
+    return lock(STATE_LOCK) do
         _model_locked()
-        return nothing
-    end
-    result=execute_geo(source;mesh_dim=0)
-    lock(STATE_LOCK) do
-        _model_locked()
-        for (key,value) in result.values
-            _PARSER_NUMBERS[key]=[value]
-            delete!(_PARSER_STRINGS,key)
-        end
-        for (key,vector) in result.lists
-            _PARSER_NUMBERS[key]=copy(vector)
-            delete!(_PARSER_STRINGS,key)
-        end
-        for (key,vector) in result.strings
-            _PARSER_STRINGS[key]=copy(vector)
-            delete!(_PARSER_NUMBERS,key)
-        end
+        isfile(source) || throw(ArgumentError("$caller: missing file $source"))
+        Base.invokelatest(_onelab_live_parse_string!,"";filename=abspath(source))
         return nothing
     end
 end
@@ -180,7 +168,7 @@ get_number(name)=_parser_get_number(name)
 get_string(name)=_parser_get_string(name)
 "Clear all parser variables, or remove the single variable `name`."
 clear(name="")=_parser_clear(name)
-"Parse the `.geo` file `fileName`, adopting its variable definitions into the store."
+"Parse `fileName` against the current model and existing parser variables."
 parse(fileName)=_parser_parse(fileName)
 
 end # module parser

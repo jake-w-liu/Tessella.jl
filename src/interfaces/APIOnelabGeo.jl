@@ -85,8 +85,9 @@ function _onelab_geo_adopt_runner!(runner)
     return nothing
 end
 
-function _onelab_geo_source!(model,context,allocator,source)
-    statements,locations=GeoExec._geo_exec_statements(IOBuffer(source))
+function _onelab_geo_source!(model,context,allocator,source;filename=nothing)
+    statements,locations=filename===nothing ?
+        GeoExec._geo_exec_statements(IOBuffer(source)) : GeoExec._geo_exec_statements(filename)
     context.exec_hook=src->GeoExec._geo_exec_value_term(model,src,context,allocator)
     context.entity_name_lookup=(dim,tag,kind)->kind===:physical ?
         get(model.physical_names,(dim,tag),"") : get(model.entity_names,(dim,tag),"")
@@ -144,8 +145,9 @@ function _onelab_geo_run!(model,context,name,command,allocator)
     return nothing
 end
 
-function _onelab_live_parse_string!(source)
-    caller="ONELAB ParseString";current=_model_locked();index=_current_slot_index_locked()
+function _onelab_live_parse_string!(source;filename=nothing)
+    caller=filename===nothing ? "ONELAB ParseString" : "API.parser.parse"
+    current=_model_locked();index=_current_slot_index_locked()
     original=MODEL_SLOTS[index];model=Model._model_mesh_transaction_copy(current)
     complete=_model_merge_complete(current,LAST_MESH[],LAST_MESH_CLASS[],caller)
     model.meshing.mesh_authority=_model_merge_authority(model,complete,caller)
@@ -198,7 +200,8 @@ function _onelab_live_parse_string!(source)
     for ((dimension,entity),physicals) in model.entity_physicals,physical in physicals
         push!(get!(() -> Int[],context.raw_physicals,(dimension,physical)),entity)
     end
-    context.file_name=isempty(MODEL_FILE_NAME[]) ? joinpath(pwd(),"onelab.geo") : MODEL_FILE_NAME[]
+    context.file_name=filename===nothing ?
+        (isempty(MODEL_FILE_NAME[]) ? joinpath(pwd(),"onelab.geo") : MODEL_FILE_NAME[]) : filename
     runner=_onelab_geo_runner(;session=true)
     context.onelab_numbers=runner.numbers;context.onelab_strings=runner.strings
     context.native_onelab_runner=runner
@@ -206,7 +209,7 @@ function _onelab_live_parse_string!(source)
     GeoExec._GEO_EXEC_VIEWS[context]=copy(views.views)
     GeoExec._GEO_EXEC_VIEW_MAX[context]=views.maximum
     GeoExec._GEO_EXEC_VIEW_CALLBACK[context]=tag->(views.next[]=max(views.next[],tag);nothing)
-    transfinite=Base.invokelatest(_onelab_geo_source!,model,context,allocator,source)
+    transfinite=Base.invokelatest(_onelab_geo_source!,model,context,allocator,source;filename)
     _onelab_geo_sync!(runner)
     params=(;fields=context.fields,background_field=context.background_field,
         boundary_layer_fields=context.boundary_layer_fields)

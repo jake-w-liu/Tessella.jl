@@ -75,6 +75,8 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_boolean_seam_test.jl",
         "interfaces/api_occ_fuse_images_test.jl",
         "interfaces/api_onelab_run_test.jl",
+        "interfaces/api_onelab_cancellation_test.jl",
+        "interfaces/api_parser_live_test.jl",
         "interfaces/api_xao_native_import_test.jl",
         "interfaces/api_incomplete_pyramid_view_test.jl",
         "interfaces/api_native_pyramid_apex_test.jl",

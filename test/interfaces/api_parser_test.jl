@@ -76,8 +76,7 @@ c = "text";
             @test A.parser.get_names() |> issorted
             @test "keep" in A.parser.get_names()
             @test "a" in A.parser.get_names()
-            # Parsing does not create model geometry upstream-style — the
-            # current model carries no entities from the file.
+            # This variable-only file declares no model entities.
             @test isempty(A.model.get_entities())
             # Missing files fail loudly.
             @test_throws Exception A.parser.parse(joinpath(dir,"none.geo"))

@@ -172,6 +172,25 @@ function _onelab_spawn_job!(engine,name::String,command::String,parent_socket=no
     end
 end
 
+function _onelab_abort_socket!(socket::TCPSocket)
+    # Ordinary close flushes libuv's write queue, which can wait forever when
+    # a connected peer survives the launched process and stops reading. Use
+    # Julia's force-close primitive under the same IO lock as Base.close.
+    # libuv still owns the descriptor and wakes pending reads/writes, so no
+    # descriptor is closed twice or reused behind a live Julia handle.
+    Base.iolock_begin()
+    try
+        if socket.handle!=C_NULL && socket.status!=Base.StatusUninit &&
+                socket.status!=Base.StatusClosed
+            GC.@preserve socket ccall(:jl_forceclose_uv,Cvoid,(Ptr{Cvoid},),socket.handle)
+            socket.status=Base.StatusClosing
+        end
+    finally
+        Base.iolock_end()
+    end
+    return nothing
+end
+
 function _onelab_engine_cancel!(engine)
     jobs=lock(_ONELAB_RUN_LOCK) do
         engine.cancelled[]=true
@@ -183,6 +202,10 @@ function _onelab_engine_cancel!(engine)
     # lock indefinitely (independently reproduced on Julia 1.13.3/Windows).
     for job in jobs
         job.process===nothing || try _onelab_process_close!(job.process) catch end
+    end
+    for job in jobs
+        socket=job.socket
+        socket===nothing || _onelab_abort_socket!(socket)
     end
     for job in jobs
         socket=job.socket
