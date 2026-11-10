@@ -276,7 +276,11 @@ function _onelab_wire_decode(msg::AbstractString,caller::AbstractString)
         p.kind_name=_onelab_wire_pop!(items,caller,"kind")
         p.choices_s=_onelab_wire_pop_list!(items,caller,"choices",nothing)
     end
-    items.position==length(items.items)+1 || throw(ArgumentError(
+    # Native Gmsh frames include the C-string terminator; the public Python
+    # client sends the same parameter without that final NUL. Accept one
+    # optional terminator after the complete record, never extra members.
+    (items.position==length(items.items)+1 ||
+        items.position==length(items.items) && isempty(last(items.items))) || throw(ArgumentError(
         "$caller: trailing ONELAB parameter members"))
     return p
 end
@@ -356,7 +360,7 @@ end
 
 # Blocking exact-length read: `read(sock,UInt8)` waits for data and throws
 # `EOFError` once the peer closes the stream.
-function _onelab_client_recv_exact(sock::TCPSocket,n::Int)
+function _onelab_client_recv_exact(sock::Union{TCPSocket,Base.PipeEndpoint},n::Int)
     n>=0 || throw(ArgumentError("onelab client: negative byte count"))
     buf=UInt8[];sizehint!(buf,min(n,4096))
     while length(buf)<n

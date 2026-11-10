@@ -42,6 +42,8 @@ end
     @test p.value_labels==Dict(1.5=>"small",9.0=>"big")
     # Encode round-trips to the identical byte stream.
     @test _OL._onelab_wire_encode(p)==alpha
+    @test _OL._onelab_wire_decode(alpha*"\0","native frame").values_f==[1.5,2.0]
+    @test_throws ArgumentError _OL._onelab_wire_decode(alpha*"\0\0","extra members")
     mode="1.3\x00string\x00test/mode\x00\x00\x0031\x001\x000\x000\x000\x001\x00compute\x00generic" *
          "\x002\x00check\x00compute"
     s=_OL._onelab_wire_decode(mode,"test")
@@ -50,6 +52,14 @@ end
     @test s.kind_name=="generic" && s.choices_s==["check","compute"]
     @test s.changed_value==31 && s.visible && !s.read_only
     @test _OL._onelab_wire_encode(s)==mode
+    @test _OL._onelab_wire_decode(mode*"\0","native frame").values_s==["compute"]
+    @test_throws ArgumentError _OL._onelab_wire_decode(mode*"\0extra","extra members")
+    empty_choice=_OL._OnelabWireParameter(:string,"empty choice")
+    empty_choice.values_s=[""];empty_choice.choices_s=[""]
+    for suffix in ("","\0")
+        parsed=_OL._onelab_wire_decode(_OL._onelab_wire_encode(empty_choice)*suffix,"empty fields")
+        @test parsed.values_s==[""] && parsed.choices_s==[""]
+    end
     dummy="1.3\x00number\x00dummy\x00\x00\x0031\x001\x000\x000\x000\x001\x000\x00-1e+200\x001e+200\x000" *
           "\x00-1\x000\x000"
     d=_OL._onelab_wire_decode(dummy,"test")

@@ -5,9 +5,25 @@ mutable struct _OnelabGeoRunner
     seed_numbers::Dict{String,Float64}
     seed_strings::Dict{String,String}
     epoch::Union{Nothing,UInt64}
+    remote::Union{Nothing,_OnelabRemoteSession}
 end
 
 const _ONELAB_LIVE_GEO=Ref{Any}(nothing)
+
+function _onelab_geo_namespace_stage(context,allocator)
+    numbers=Dict{String,Vector{Float64}}(name=>[value] for (name,value) in context.values)
+    for name in context.list_variables
+        haskey(context.lists,name) && (numbers[name]=copy(context.lists[name]))
+    end
+    return (;context,allocator,numbers,strings=deepcopy(context.strings))
+end
+
+function _onelab_geo_adopt_namespace!(stage)
+    _ONELAB_LIVE_GEO[]=(;context=stage.context,allocator=stage.allocator)
+    empty!(_PARSER_NUMBERS);merge!(_PARSER_NUMBERS,stage.numbers)
+    empty!(_PARSER_STRINGS);merge!(_PARSER_STRINGS,stage.strings)
+    return nothing
+end
 
 function _onelab_geo_runner(;session=false)
     store=if session
@@ -22,8 +38,10 @@ function _onelab_geo_runner(;session=false)
             Set{_OnelabParameterKey}(),Dict{_OnelabParameterKey,_OnelabWireParameter}(),
             Dict{String,Bool}(),Dict{String,String}(),ReentrantLock())
     end
+    remote=_onelab_remote_current()
+    remote===nothing || _onelab_remote_refresh!(store,remote)
     runner=_OnelabGeoRunner(store,Dict{String,Float64}(),Dict{String,String}(),
-        Dict{String,Float64}(),Dict{String,String}(),session ? _ONELAB_SESSION_EPOCH[] : nothing)
+        Dict{String,Float64}(),Dict{String,String}(),session ? _ONELAB_SESSION_EPOCH[] : nothing,remote)
     _onelab_geo_refresh!(runner)
     return runner
 end
@@ -58,14 +76,20 @@ function _onelab_geo_sync!(runner)
                 end
                 store.parameters[key]=parameter
                 _onelab_store_mark_changed!(store,key)
+                runner.remote===nothing || _onelab_remote_publish!(store,runner.remote,key)
             end
         end
         for name in keys(seeds)
-            haskey(values,name) || _onelab_store_delete!(store,(kind,name))
+            if !haskey(values,name)
+                _onelab_store_delete!(store,(kind,name))
+                runner.remote===nothing || _onelab_remote_send(runner.remote,_ONELAB_MSG.PARAMETER_CLEAR,name)
+            end
         end
     end
     # Empty and multi-value records retain their complete values when their
     # scalar projection is unchanged.
+    empty!(runner.seed_numbers);merge!(runner.seed_numbers,numbers)
+    empty!(runner.seed_strings);merge!(runner.seed_strings,strings)
     return nothing
 end
 
@@ -89,6 +113,7 @@ function _onelab_geo_source!(model,context,allocator,source;filename=nothing)
     context.soft_unknown_reads=true
     result=GeoExec._exec_geo_statements!(model,statements,locations,firstindex(statements),
         lastindex(statements),context,allocator,Ref(0))
+    _onelab_remote_geo_status!(context.native_onelab_runner,context.stop,context.exit_code)
     context.stop===:toomany && throw(ArgumentError("ONELAB: too many GEO parse errors"))
     context.stop===:exit && context.exit_code!=0 && throw(ArgumentError("ONELAB: GEO Exit $(context.exit_code)"))
     GeoExec._geo_sync_physical_view!(model,context)
@@ -126,6 +151,7 @@ end
 
 function _onelab_geo_run!(model,context,name,command,allocator)
     runner=_onelab_geo_context_runner!(context)
+    runner.remote===nothing || return _onelab_remote_run!(runner,name,command)
     _onelab_geo_sync!(runner)
     logger=(kind,client,message)->begin
         kind==_ONELAB_MSG.ERROR ? GeoExec._geo_msg_error!(context,"$client: $message") :
@@ -203,6 +229,7 @@ function _onelab_live_parse_string!(source;filename=nothing)
     context.file_name=filename===nothing ?
         (isempty(MODEL_FILE_NAME[]) ? joinpath(pwd(),"onelab.geo") : MODEL_FILE_NAME[]) : filename
     runner=_onelab_geo_runner(;session=true)
+    runner.remote===nothing || (context.native_onelab_action=runner.remote.action)
     context.onelab_numbers=runner.numbers;context.onelab_strings=runner.strings
     context.native_onelab_runner=runner
     views=_geo_import_view_seed()
@@ -211,6 +238,7 @@ function _onelab_live_parse_string!(source;filename=nothing)
     GeoExec._GEO_EXEC_VIEW_CALLBACK[context]=tag->(views.next[]=max(views.next[],tag);nothing)
     transfinite=Base.invokelatest(_onelab_geo_source!,model,context,allocator,source;filename)
     _onelab_geo_sync!(runner)
+    namespace=_onelab_geo_namespace_stage(context,allocator)
     params=(;fields=context.fields,background_field=context.background_field,
         boundary_layer_fields=context.boundary_layer_fields)
     result=(;model,mesh=context.mesh,params,transfinite_tri=transfinite,
@@ -224,12 +252,6 @@ function _onelab_live_parse_string!(source;filename=nothing)
         caller,detached_result=true,view_sections=incoming,geo_views=views)
     plan.slot.file_name=MODEL_FILE_NAME[];plan.slot.name=model.name
     _model_import_publish!(plan;legacy=true)
-    _ONELAB_LIVE_GEO[]=(;context,allocator)
-    empty!(_PARSER_NUMBERS);empty!(_PARSER_STRINGS)
-    for (name,value) in context.values;_PARSER_NUMBERS[name]=[value];end
-    for name in context.list_variables
-        haskey(context.lists,name) && (_PARSER_NUMBERS[name]=copy(context.lists[name]))
-    end
-    merge!(_PARSER_STRINGS,deepcopy(context.strings))
+    _onelab_geo_adopt_namespace!(namespace)
     return true
 end

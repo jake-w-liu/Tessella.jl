@@ -51,6 +51,7 @@ function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=fal
     # Its vectors, metadata, consumers and command registry publish only after
     # the model/UID/view preparation succeeds.
     onelab=_onelab_geo_runner(;session=true)
+    namespace=Ref{Any}(nothing)
     views=_geo_import_view_seed()
     view_receipt===nothing || (view_receipt[]=views)
     fields=initial_fields===nothing && legacy ? _model_merge_fields() : initial_fields
@@ -78,10 +79,16 @@ function _model_import_execute_geo(path,dimension,options,diagnostics;legacy=fal
         _initial_views=views.views,_initial_view_tag_max=views.maximum,
         _initial_view_tag_callback=tag->(views.next[]=max(views.next[],tag);nothing),
         _initial_onelab_numbers=onelab.numbers,_initial_onelab_strings=onelab.strings,
-        _initial_onelab_runner=onelab)
+        _initial_onelab_runner=onelab,
+        _initial_onelab_action=onelab.remote===nothing ? "" : onelab.remote.action,
+        _execution_context_callback=(context,allocator)->
+            (namespace[]=_onelab_geo_namespace_stage(context,allocator);nothing))
     _onelab_geo_sync!(onelab)
+    _onelab_remote_geo_status!(onelab,result.exit_code===nothing ? :run : :exit,
+        something(result.exit_code,0))
     return merge(NamedTuple{propertynames(result)}(Tuple(getproperty(result,name)
-        for name in propertynames(result))),(;onelab_stage=onelab,geo_execution=result))
+        for name in propertynames(result))),(;onelab_stage=onelab,geo_execution=result,
+            geo_namespace_stage=namespace[]))
 end
 
 function _model_import_lookup(receipt,model,caller)
@@ -357,6 +364,7 @@ function _model_import_publish!(plan;legacy=false)
         append!(SESSION_INPUT_ERRORS[],plan.result.errors)
     end
     hasproperty(plan.result,:onelab_stage) && _onelab_geo_adopt_runner!(plan.result.onelab_stage)
+    hasproperty(plan.result,:geo_namespace_stage) && _onelab_geo_adopt_namespace!(plan.result.geo_namespace_stage)
     return nothing
 end
 

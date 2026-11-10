@@ -2340,6 +2340,7 @@ _geo_syntax_abort(token::AbstractString)=
 const _MSG_LOG_IO=Ref{Any}(nothing)
 const _MSG_INFO_RESOURCES=Ref{Bool}(false)
 const _MSG_START_NS=Ref{UInt64}(0)
+const _MSG_TASK_SINK_KEY=gensym(:tessella_message_sink)
 # Upstream's `Fopen(name,"w")` is a text-mode stream — CRLF on Windows.
 const _MSG_LOG_NEWLINE=Sys.iswindows() ? "\r\n" : "\n"
 
@@ -2362,6 +2363,8 @@ function _msg_log_close()
 end
 
 function _msg_log_write(prefix::AbstractString,message::AbstractString)
+    sink=get(task_local_storage(),_MSG_TASK_SINK_KEY,nothing)
+    sink===nothing || sink(prefix,message)
     io=_MSG_LOG_IO[]
     io===nothing && return nothing
     print(io,prefix,message,_MSG_LOG_NEWLINE)
@@ -4759,6 +4762,7 @@ function _geo_raw_arg_function!(parser::_GeoExprParser,name::String,pos::Int)
         (1<=length(args)<=2) || _geo_expr_error(
             parser,"GetNumber takes one or two arguments",pos)
         key=_geo_eval_string(args[1],context,caller)
+        _geo_onelab_query!(context,:number,key)
         haskey(context.onelab_numbers,key) &&
             return context.onelab_numbers[key]
         length(args)==2 &&
@@ -6157,6 +6161,7 @@ function _geo_string_function(name::String,inner::AbstractString,
         (length(args)==1 || length(args)==2) || throw(ArgumentError(
             "$caller: GetString takes one or two arguments"))
         key=_geo_string_expr(args[1],context,caller)
+        _geo_onelab_query!(context,:string,key)
         haskey(context.onelab_strings,key) && return context.onelab_strings[key]
         length(args)==2 && return _geo_string_expr(args[2],context,caller)
         return ""
@@ -8280,6 +8285,20 @@ function _geo_option_number_read(context::_GeoNumericContext,family::String,
     value===nothing && throw(ArgumentError(
         "$caller: Unknown number option '$family.$member'"))
     return value
+end
+
+function _geo_onelab_query!(context,kind,name)
+    runner=context.native_onelab_runner
+    (runner===nothing || runner.remote===nothing) && return nothing
+    api=getfield(parentmodule(@__MODULE__),:API)
+    return Base.invokelatest(getfield(api,:_onelab_remote_query!),runner,kind,name)
+end
+
+function _geo_onelab_changed!(context)
+    runner=context.native_onelab_runner
+    (runner===nothing || runner.remote===nothing) && return nothing
+    api=getfield(parentmodule(@__MODULE__),:API)
+    return Base.invokelatest(getfield(api,:_onelab_geo_sync!),runner)
 end
 
 # `Msg::ExchangeOnelabParameter` — the ONELAB name is `Name`'s value (default

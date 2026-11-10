@@ -75,6 +75,8 @@ Usage: tessella file.geo [-1|-2|-3] [-o output.msh] [-format format] [-bin]
        [-part_split|-part_split_files|-oneFilePerPart]
        [-combine]
        tessella file.geo -run
+       tessella file.geo -onelab name address [-1|-2|-3|-parse_and_exit]
+       tessella [-socket address] [file.geo]
        tessella -convert file [file2 ...]
        tessella -help | -version | -info | -help_options
 
@@ -108,6 +110,9 @@ before meshing; background-view references follow their combined source.
 OnelabAction set to "check", retaining server parameters across both passes.
 Solver.AutoLoadDatabase reloads <stem>.db before the check pass;
 Solver.AutoSaveDatabase controls the final native parameter database write.
+-onelab exchanges parameters and messages with its controller during the batch;
+-socket serves native GEO/file commands until Exit or controller disconnection.
+Addresses are host:port, local Unix sockets, or Windows named pipes.
 -log file mirrors Msg-channel output into the file; -cpu appends the
 (From start: Wall, CPU, Mem) resource suffix to Info/Error messages.
 -statreport writes (truncating) and -append_statreport appends the upstream
@@ -324,8 +329,6 @@ const _REJECTED_FLAGS=Dict{String,String}(
     # Upstream `-debugSurface` restricts surface meshing to a tagged face and
     # dumps `debugSurface.brep`; a diagnostic-only debug knob.
     "-debugSurface"=>"per-surface mesh debugging (debugSurface.brep) is not implemented",
-    "-onelab"=>"ONELAB solver clients are not implemented",
-    "-socket"=>"ONELAB solver clients are not implemented",
     "-listen"=>"solver socket listeners are not implemented",
     "-minterpreter"=>"Octave interpreters are not implemented",
     "-pyinterpreter"=>"Python interpreters are not implemented",
@@ -719,6 +722,12 @@ output is written.
 `-convert files...` rewrites each file to `file_new` (binary MSH 4.1 for
 mesh inputs, binary `.pos` for views; `.geo` inputs emit their accumulated
 views plus the in-script mesh when one exists) and must come last.
+`-run` executes a GEO metamodel and its actual ONELAB clients, preserving
+parameters for its second, `check` pass. `-onelab name address` connects this
+mesher to an ONELAB controller for live parameters, diagnostics and delegated
+solver processes. `-socket address` also executes incoming GEO/file commands
+until `Exit` or controller disconnection, unless a batch action was requested.
+Addresses accept TCP `host:port`, Unix sockets and Windows named pipes.
 `file.msh -check` validates the mesh without writing. `-`, `-parse_and_exit`,
 `-help`/`--help`, `-version`/`--version`, `-info`/`--info`, `-help_options`
 and `-pid` are informational; the first four must be used alone.
@@ -771,7 +780,9 @@ function _main(args::AbstractVector{<:AbstractString})
     # (API sessions, repeated `main` invocations) that never saw the flags.
     IO._MSG_START_NS[]=time_ns()
     try
-        return _run(tokens)
+        selected,ordinary=_onelab_cli_flags(tokens)
+        return selected===nothing || selected.address===nothing ? _run(ordinary) :
+            _run_onelab_remote_cli(ordinary,selected)
     finally
         IO._msg_log_close()
         IO._MSG_INFO_RESOURCES[]=false
@@ -795,7 +806,7 @@ function _cli_geo_batch_error(result)
     return nothing
 end
 
-function _run(tokens::Vector{String})
+function _run(tokens::Vector{String};_reuse_session::Bool=false)
     numeric_options=Dict{String,Float64}()
     # Pre-file parser input, in flag order: literal `.geo` statements and
     # `(name, value)` numeric option assignments. On `.geo` inputs both are
@@ -1192,6 +1203,17 @@ function _run(tokens::Vector{String})
             "tessella: -run cannot be combined with other batch actions or output options"))
         return _run_onelab_cli(files,preludes,numeric_options)
     end
+    if isempty(files) && _reuse_session
+        remote=API._onelab_remote_current()
+        default=API._onelab_remote_default_file(remote)
+        if default!==nothing
+            push!(files,(String(default),:none))
+        elseif !(dimension_seen || output_seen || format_seen || binary_seen || check_seen ||
+                refine_seen || save_seen || barycentric_seen || adapt_seen || combine_seen ||
+                unroll_seen || reclassify!==nothing || reparam!==nothing || part!==nothing || bgm_seen)
+            return _run_onelab_empty(preludes,numeric_options)
+        end
+    end
     isempty(files) && throw(ArgumentError("tessella: missing input file"))
     # Upstream batch actions are mutually exclusive — the strict CLI rejects
     # combinations instead of keeping only the last one. `-4` is not a batch
@@ -1247,7 +1269,7 @@ function _run(tokens::Vector{String})
     geo_unrolled_output=effective_format==".geo_unrolled"
     foreign_output=effective_format!==nothing &&
         effective_format in _FOREIGN_OUTPUT_EXTENSIONS
-    session=extension in (".msh",".pos") || length(files)>1 || refine_seen || combine_seen ||
+    session=_reuse_session || extension in (".msh",".pos") || length(files)>1 || refine_seen || combine_seen ||
         adapt_seen || barycentric_seen ||
         save_seen || reclassify!==nothing || reparam!==nothing ||
         part!==nothing || foreign_output ||
@@ -1524,7 +1546,7 @@ function _run(tokens::Vector{String})
         statreport,output_format,
         unroll=unroll_seen,bgm=[path for (path,_) in bgm_specs],
         reclassify,reparam,part,part_topo,part_ghosts,part_split,
-        part_physicals,part_weights)
+        part_physicals,part_weights,_reuse_session)
 end
 
 # Classified `MixedMesh` preferred for `-save_parametric`/`-save_topology`
@@ -1917,7 +1939,7 @@ function _session_main(files,preludes,numeric_options;
                        reclassify,reparam,part,part_topo,part_ghosts,part_split,
                        part_physicals,part_weights=nothing,
                        adapt=false,barycentric=false,unroll=false,bgm=String[],combine=false,
-                       statreport=nothing,output_format=nothing)
+                       statreport=nothing,output_format=nothing,_reuse_session=false)
     need_output=dim>0 || refine || adapt || barycentric || unroll || save ||
         reclassify!==nothing ||
         reparam!==nothing || part!==nothing
@@ -2004,7 +2026,7 @@ function _session_main(files,preludes,numeric_options;
     get(numeric_options,"Mesh.MeshSizeMin",0.0)<=
         get(numeric_options,"Mesh.MeshSizeMax",1e22) || throw(ArgumentError(
             "tessella: minimum mesh size exceeds maximum"))
-    API.initialize()
+    _reuse_session || API.initialize()
     temporary=nothing
     # `.geo` inputs record recoverable `Error   :` diagnostics into the
     # session's input-error channel rather than failing — they are the
@@ -2041,6 +2063,8 @@ function _session_main(files,preludes,numeric_options;
                 API.merge(source)
             end
         end
+        remote=_reuse_session ? API._onelab_remote_current() : nothing
+        remote===nothing || API._onelab_remote_model_info!(remote;path=first(files)[1])
         input_errors=copy(API.SESSION_INPUT_ERRORS[])
         # `-bgm`: merge the `.pos` views and point a `PostView` background
         # field at each file's last view — the same semantics the standalone
@@ -2254,7 +2278,7 @@ function _session_main(files,preludes,numeric_options;
         end
     finally
         temporary===nothing || rm(temporary;force=true)
-        API.finalize()
+        _reuse_session || API.finalize()
     end
     isempty(input_errors) || throw(ArgumentError(join(input_errors,"\n")))
     return need_output ? destination : files[1][1]

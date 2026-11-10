@@ -102,7 +102,7 @@ function _onelab_store_wire(store,parameter,client)
     return result
 end
 
-function _onelab_store_receive!(store,wire,client)
+function _onelab_store_receive!(store,wire,client;mark_changed=true)
     isempty(wire.name) && throw(ArgumentError("ONELAB server: parameter name must be nonempty"))
     all(isfinite,wire.values_f) && all(isfinite,wire.choices_f) &&
         all(isfinite,(wire.min,wire.max,wire.step)) &&
@@ -135,7 +135,7 @@ function _onelab_store_receive!(store,wire,client)
     wire.choices_f=Float64[];wire.choices_s=String[]
     store.parameters[key]=parameter
     store.wire[key]=wire
-    changed && _onelab_store_mark_changed!(store,key)
+    changed && mark_changed && _onelab_store_mark_changed!(store,key)
     return nothing
 end
 

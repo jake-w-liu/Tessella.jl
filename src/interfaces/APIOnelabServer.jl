@@ -172,7 +172,7 @@ function _onelab_spawn_job!(engine,name::String,command::String,parent_socket=no
     end
 end
 
-function _onelab_abort_socket!(socket::TCPSocket)
+function _onelab_abort_socket!(socket::Union{TCPSocket,Base.PipeEndpoint})
     # Ordinary close flushes libuv's write queue, which can wait forever when
     # a connected peer survives the launched process and stops reading. Use
     # Julia's force-close primitive under the same IO lock as Base.close.
@@ -254,6 +254,7 @@ function _onelab_cancel_session_runs!()
         [engine for engine in keys(_ONELAB_ACTIVE_ENGINES) if engine.epoch!==nothing]
     end
     foreach(_onelab_engine_cancel!,engines)
+    _onelab_cancel_remote_sessions!()
     return nothing
 end
 
@@ -299,10 +300,12 @@ function _onelab_dispatch!(engine,index,socket,kind,payload)
 end
 
 include("APIOnelabStore.jl")
+include("APIOnelabRemote.jl")
 include("APIOnelabPreprocess.jl")
 include("APIOnelabGeo.jl")
 include("APIOnelabMetadata.jl")
 include("APIOnelabDatabase.jl")
+include("APIOnelabRemoteGeo.jl")
 
 function _onelab_engine_failure(engine,exception)
     engine.timed_out[] && return ArgumentError(

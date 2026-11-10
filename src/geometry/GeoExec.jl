@@ -81,6 +81,7 @@ using ..Model: create_topology!, classify_surfaces!, create_geometry!,
 using ..MeshTypes: Mesh
 using ..IO: read_geo_params, _GeoNumericContext, _GeoGeometryParts, _geo_eval_numeric
 using ..IO: _geo_exchange_onelab_number!, _geo_exchange_onelab_string!
+using ..IO: _geo_onelab_changed!
 using ..IO: _geo_split_list, _geo_split_range, _geo_range_count
 using ..IO: _geo_numeric_list_terms, _geo_numeric_list_values
 using ..IO: _geo_signed_gmsh_int_value
@@ -851,7 +852,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_onelab_numbers::Union{Nothing,Dict{String,Float64}}=nothing,
                      _initial_onelab_strings::Union{Nothing,Dict{String,String}}=nothing,
                      _initial_onelab_runner=nothing,
-                     _initial_onelab_action::AbstractString="")
+                     _initial_onelab_action::AbstractString="",
+                     _execution_context_callback=nothing)
     isfile(path) || throw(ArgumentError("execute_geo: missing file $path"))
     mesh_dim isa Bool && throw(ArgumentError("execute_geo: mesh_dim must not be Bool"))
     dim=try
@@ -990,6 +992,11 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     # is a voluntary stop (errorstate 999) — nonzero but not an error.
     if context.stop===:exit
         code=context.exit_code
+        runner=context.native_onelab_runner
+        if runner!==nothing && runner.remote!==nothing
+            api=getfield(parentmodule(@__MODULE__),:API)
+            Base.invokelatest(getfield(api,:_onelab_remote_geo_status!),runner,:exit,code)
+        end
         code==0 || throw(ArgumentError(
             "execute_geo: Exit $code (script requested a nonzero exit)"))
         # `exit(0)` leaves before the end-of-parse errorstate check.
@@ -1041,6 +1048,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         end
         params=GeoParams(values...)
     end
+    _execution_context_callback===nothing || _execution_context_callback(context,allocator_state)
     return GeoExecution(model,mesh,params,transfinite_tri,context.values,
                         context.lists,context.strings,
                         copy(context.exec_warnings),context.msg_error_count,
@@ -9211,6 +9219,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             delete!(context.onelab_numbers,name)
             delete!(context.onelab_strings,name)
         end
+        _geo_onelab_changed!(context)
         return
     elseif (mm=match(r"^SetNumber\s*\(\s*(.*?)\s*\)\s*;?\s*$",line)) !== nothing
         args=_geo_split_args(mm.captures[1],"execute_geo: SetNumber")
@@ -9219,6 +9228,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         context.onelab_numbers[
             _geo_eval_string(args[1],context,"execute_geo: SetNumber")]=
             _geo_eval_numeric(args[2],context,"execute_geo: SetNumber")
+        _geo_onelab_changed!(context)
         return
     elseif (mm=match(r"^SetString\s*\(\s*(.*?)\s*\)\s*;?\s*$",line)) !== nothing
         args=_geo_split_args(mm.captures[1],"execute_geo: SetString")
@@ -9227,6 +9237,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         context.onelab_strings[
             _geo_eval_string(args[1],context,"execute_geo: SetString")]=
             _geo_eval_string(args[2],context,"execute_geo: SetString")
+        _geo_onelab_changed!(context)
         return
     elseif (mm=match(r"^(Printf|Warning|Error)\s*\(\s*(.*?)\s*\)\s*(?:(>>|>)\s*(.*?)\s*)?;?\s*$",
                      line)) !== nothing

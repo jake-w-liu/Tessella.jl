@@ -11,6 +11,7 @@ end
 function _onelab_geo_declare!(runner,kind,defaults,fopts,copts,labels,caller)
     _onelab_geo_sync!(runner)
     store=runner.store;name=first(copts["Name"]);key=(kind,name)
+    runner.remote===nothing || _onelab_remote_query!(runner,kind,name)
     return _onelab_store_locked(store,runner.epoch) do
         all(values->all(isfinite,values),Base.values(fopts)) &&
             (kind!==:number || all(isfinite,defaults)) || throw(ArgumentError(
@@ -80,6 +81,7 @@ function _onelab_geo_declare!(runner,kind,defaults,fopts,copts,labels,caller)
             wire.clients["Gmsh"]=wire.changed_value
             store.client_changed["Gmsh"]=get(store.client_changed,"Gmsh",false) || wire.changed_value!=0
         end
+        runner.remote===nothing || _onelab_remote_publish!(store,runner.remote,key)
         if kind===:number
             projection=isempty(parameter.values_f) ? 0. : first(parameter.values_f)
             runner.numbers[name]=projection;runner.seed_numbers[name]=projection

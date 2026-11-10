@@ -358,8 +358,7 @@ end
         # (Geometry.MatchGeomAndMesh → GeomMeshMatcher::match).
         for (flag,fragment) in (("-swapangle","edge-swap"),
                                 ("-watch","GUI"),
-                                ("-debugSurface","debugSurface.brep"),
-                                ("-run","ONELAB"))
+                                ("-debugSurface","debugSurface.brep"))
             err=try
                 Tessella.CLI.main([square_geo,"-2","-o",square_msh,flag])
                 nothing
