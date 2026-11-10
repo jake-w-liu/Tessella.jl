@@ -26,7 +26,7 @@ _high_order_optimize_level() = begin
     return clamp(round(Int, v), typemin(Int32), typemax(Int32))
 end
 
-# Stage gates: the unbounded elastic-smoothing stage runs for upstream
+# Stage gates: the Navier FEM elastic stage runs for upstream
 # modes -1 (elastic only) and 2 (elastic then optimize); the banded
 # optimization stage runs for modes 1 and 2.
 _high_order_optimize_elastic() =
@@ -547,7 +547,7 @@ end
 # interior slots only).  `"HighOrder"`/`"HighOrderElastic"` are the dedicated
 # upstream method names for the same two stages this module stages for
 # `Mesh.HighOrderOptimize`; both are routed here — `"HighOrderElastic"` to
-# the unbounded elastic stage, `"HighOrder"` to the
+# the Navier FEM elastic stage, `"HighOrder"` to the
 # Mesh.HighOrderThresholdMin/Max-banded stage.  Every arm works on detached
 # coordinate copies and commits atomically through the standard cache
 # replacement path, so a failure leaves the published mesh untouched.

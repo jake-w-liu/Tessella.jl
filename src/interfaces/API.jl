@@ -308,7 +308,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.SecondOrderIncomplete"=>0.0,
     # High-order mesh optimization controls (upstream gmsh option surface).
     # `HighOrderOptimize`: -1 elastic smoothing, 0 none, 1 relocation
-    # optimization, 2 both — this slice implements the relocation pass;
+    # optimization, 2 both;
     # `HighOrderPoissonRatio` controls the native Navier FEM elastic stage.
     "Mesh.HighOrderOptimize"=>0.0,
     "Mesh.HighOrderIterMax"=>100.0,
@@ -12119,36 +12119,6 @@ set_as_background_mesh(tag)=_field_set_as_background_mesh(tag)
 set_as_boundary_layer(tag)=_field_set_as_boundary_layer(tag)
 
 end # module field
-end
-
-# Legacy partial-publication callback for internal callers. The atomic API
-# file frontends stage complete results and do not invoke this callback.
-function _native_geo_recombine_partial_publish_locked(model,context)
-    stored_model=deepcopy(model)
-    imported_authority=stored_model.meshing.mesh_authority
-    stored_mesh=imported_authority!==nothing && imported_authority.mesh!==nothing ?
-        imported_authority.mesh : context.mesh===nothing ? nothing : _copy_mesh(context.mesh)
-    stored_class=if imported_authority!==nothing && imported_authority.mesh!==nothing
-        classified=_higher_classification_from_data(stored_mesh,"API.open_geo! selector4 prefix")
-        _mixed_rebind_class(classified,stored_mesh;
-            node_parametric=Model._model_mesh_runtime_parameters(stored_model,stored_mesh))
-    else
-        nothing
-    end
-    index=_current_slot_index_locked()
-    CURRENT[]=stored_model
-    MODEL_FILE_NAME[]=context.file_name
-    if index!=0
-        MODEL_SLOTS[index].model=stored_model
-        MODEL_SLOTS[index].file_name=context.file_name
-    end
-    _replace_mesh_cache_locked!(stored_mesh,stored_class)
-    NODE_TAG_MAX[]=max(NODE_TAG_MAX[],context.mesh_node_max)
-    ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],context.mesh_element_max)
-    NATIVE_CONTEXT_LC[]=context.native_context_lc
-    NATIVE_CONTEXT_FORCED_BBOX[]=context.native_context_forced_bbox
-    _native_lookup_import_receipt_locked!(context.native_element_lookup_receipt)
-    return nothing
 end
 
 """
