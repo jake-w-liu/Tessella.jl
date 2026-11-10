@@ -1,19 +1,16 @@
 """
     IO
 
-Mesh file I/O (PLAN.md §3 "IO"): gmsh **MSH v2.2 and v4.1** (ASCII) read/write,
+Mesh file I/O: gmsh **MSH v2.2 and v4.1** (ASCII) read/write,
 ASCII/binary **STL** ingest for boundary surface meshes, and a lightweight
 **`.geo`** parameter/structure and mesh-field scanner.
 
-The round-trip contract (DEVELOPMENT.md CRC gate for Stage 0) is *connectivity
-preservation*: reading a mesh and writing it back — in either format version —
+The MSH round-trip contract is *connectivity preservation*: reading a mesh and writing it back — in either format version —
 must reproduce the same topology, verified by `MeshTypes.mesh_crc`. gmsh allows
 arbitrary node/element tags; we relabel to a compact `1:N` on read (connectivity
 is invariant under a consistent relabel) while preserving physical-group tags.
 
-Full evaluation of a `.geo` OpenCASCADE CSG script (Booleans → BREP → faces) is
-still pending. `read_geo_params` reads the declarations that do not require a CAD
-evaluator: global mesh sizing, physical groups, numeric list variables, and the raw
+`read_geo_params` scans declarations without executing CAD operations: global mesh sizing, physical groups, numeric list variables, and the raw
 background-field graph.
 """
 module IO
@@ -13035,9 +13032,9 @@ including 2477 group output, which the pinned release uses for physical
 groups — are rejected; physical tags are emitted in field 4, which the
 upstream reader interprets as the physical tag.
 """
-function write_unv(path,m)
+function write_unv(path,input_mesh)
     caller="write_unv"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     # Validate every block before touching the destination file.
@@ -13111,9 +13108,9 @@ physical tag when positive, otherwise its elementary-entity tag; vertex `ref`
 is the owning entity tag. Element families Medit cannot express (quadratic
 quads/hexes, prisms, pyramids, point cells, special records) are rejected.
 """
-function write_mesh(path,m)
+function write_mesh(path,input_mesh)
     caller="write_mesh"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     sections=Dict{Int,String}()
@@ -13190,9 +13187,9 @@ rejections of families Medit cannot express. Gmsh itself has no `.meshb`
 route; this writes the standard GMF layout readable by libMeshb-based
 tools.
 """
-function write_meshb(path,m;version::Integer=0)
+function write_meshb(path,input_mesh;version::Integer=0)
     caller="write_meshb"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     sections=Dict{Int,String}()
@@ -13239,18 +13236,19 @@ function write_meshb(path,m;version::Integer=0)
     ptype=version>=3 ? Int64 : Int32
     isize=Int64(sizeof(itype));psize=Int64(sizeof(ptype))
     target,parent=_foreign_target(path,caller)
+    written_version=version
     mktemp(parent) do temporary,io
         write_i(v)=write(io,itype(v))
         write_pos(v)=write(io,ptype(v))
-        write_real(x)=version==1 ? write(io,Float32(x)) :
+        write_real(x)=written_version==1 ? write(io,Float32(x)) :
             write(io,Float64(x))
         # Header: MeshVersionFormatted code+version, then the mandatory
         # Dimension keyword; `cursor` tracks the next keyword's byte offset.
-        write(io,_MEDITB_VERSION_FORMATTED);write(io,Int32(version))
+        write(io,_MEDITB_VERSION_FORMATTED);write(io,Int32(written_version))
         cursor=Int64(8+4+psize+4)
         write(io,_MEDITB_DIMENSION);write_pos(cursor);write(io,Int32(3))
         # Vertices is always emitted, like the ASCII writer.
-        vrec=Int64(3*(version==1 ? 4 : 8)+isize)
+        vrec=Int64(3*(written_version==1 ? 4 : 8)+isize)
         write(io,_MEDITB_VERTICES)
         write_pos(cursor+4+psize+isize+nn*vrec);write_i(nn)
         @inbounds for i in 1:nn
@@ -13407,10 +13405,10 @@ skipped, as upstream's face-only traversal does. A mesh with no surface
 elements at all is an error — an empty `solid` would look like a successful
 export of nothing.
 """
-function write_stl(path,m;binary=false)
+function write_stl(path,input_mesh;binary=false)
     caller="write_stl"
     binary isa Bool || throw(ArgumentError("$caller: binary must be Bool"))
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     _assert_mixed_structure(m,caller)
@@ -13437,12 +13435,13 @@ function write_stl(path,m;binary=false)
     facets>0 || throw(ArgumentError("$caller: mesh has no surface elements to write"))
     binary && _stl_binary_count(facets)
     target,parent=_foreign_target(path,caller)
+    written_facets=facets
     mktemp(parent) do temporary,io
         if binary
             header=zeros(UInt8,80)
             label=codeunits("Tessella binary STL")
             copyto!(header,1,label,1,length(label))
-            write(io,header);write(io,htol(_stl_binary_count(facets)))
+            write(io,header);write(io,htol(_stl_binary_count(written_facets)))
         else
             println(io,"solid tessella")
         end
@@ -13836,9 +13835,9 @@ more than one dimension below the domain — curve and point elements of a
 model. Physical tags on the top-dimension cells and physical names of
 un-named groups are not representable and are dropped.
 """
-function write_su2(path,m)
+function write_su2(path,input_mesh)
     caller="write_su2"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     for block in m.blocks
@@ -14375,9 +14374,9 @@ Point cells are skipped (the format has no point element); every other
 unmapped type — 3-node lines, 9-node quads, tets beyond order 2 and special
 records — rejects loudly. Coordinates must fit the 8-column field.
 """
-function write_bdf(path,m)
+function write_bdf(path,input_mesh)
     caller="write_bdf"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     for block in m.blocks
@@ -14920,9 +14919,9 @@ name, matching upstream's fallbacks). Element types with no Abaqus name
 (order-3+ cells, the full-P2 prism/pyramid, special records) reject loudly;
 `MASS` carries point cells.
 """
-function write_inp(path,m)
+function write_inp(path,input_mesh)
     caller="write_inp"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     for block in m.blocks
@@ -15411,9 +15410,9 @@ the tag. Element types Gambit cannot express (second-order cells, special
 records) reject loudly; point cells are skipped and a mesh with no
 dimension-1+ elements is an error.
 """
-function write_neu(path,m)
+function write_neu(path,input_mesh)
     caller="write_neu"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     for block in m.blocks
@@ -15909,9 +15908,9 @@ corner vertices) and one ` 0 0 0` edge placeholder per triangle — the
 pinned writer leaves the signed edge table unwritten. Every other cell
 is skipped like upstream.
 """
-function write_mail(path,m)
+function write_mail(path,input_mesh)
     caller="write_mail"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     for block in m.blocks
@@ -15925,8 +15924,9 @@ function write_mail(path,m)
         msh_family(block.msh)==:tri && (ntri+=size(block.nodes,2))
     end
     target,parent=_foreign_target(path,caller)
+    written_ntri=ntri
     mktemp(parent) do temporary,io
-        println(io," ",nn," ",ntri)
+        println(io," ",nn," ",written_ntri)
         @inbounds for i in 1:nn
             println(io,@sprintf(" %19.10E %19.10E %19.10E",
                 m.coords[1,i],m.coords[2,i],m.coords[3,i]))
@@ -16221,9 +16221,9 @@ and rejects loudly (the export projection carries no per-cell
 partition); any other value falls back to the elementary tag like
 upstream. Curve and point cells are skipped.
 """
-function write_ir3(path,m;element_tag_type::Integer=1)
+function write_ir3(path,input_mesh;element_tag_type::Integer=1)
     caller="write_ir3"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     Int64(element_tag_type)==3 && throw(ArgumentError(
@@ -16242,12 +16242,13 @@ function write_ir3(path,m;element_tag_type::Integer=1)
         d==3 && (num3+=size(block.nodes,2))
     end
     target,parent=_foreign_target(path,caller)
+    written_num2,written_num3=num2,num3
     mktemp(parent) do temporary,io
         println(io,"33")
-        if num2>0 && num3>0
-            println(io,nn," ",num2," ",num3)
+        if written_num2>0 && written_num3>0
+            println(io,nn," ",written_num2," ",written_num3)
         else
-            println(io,nn," ",num2>0 ? num2 : num3)
+            println(io,nn," ",written_num2>0 ? written_num2 : written_num3)
         end
         @inbounds for i in 1:nn
             println(io,i," ",@sprintf("%.16g",m.coords[1,i])," ",
@@ -16576,9 +16577,9 @@ mutual inverses for the non-involution layouts, so a `.diff` round trip
 permutes quad8/quad9, tet10 and hex8/hex20/hex27 connectivity exactly like
 Gmsh itself.
 """
-function write_diff(path,m;scaling_factor::Real=1.0)
+function write_diff(path,input_mesh;scaling_factor::Real=1.0)
     caller="write_diff"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     factor=try
@@ -16681,15 +16682,16 @@ function write_diff(path,m;scaling_factor::Real=1.0)
         end
     end
     target,parent=_foreign_target(path,caller)
+    written_num_elements,written_min_arity,written_max_arity,written_dim=num_elements,min_arity,max_arity,dim
     mktemp(parent) do temporary,io
         print(io,"\n\n")
         print(io," Finite element mesh (GridFE):\n\n")
         print(io," Number of space dim. =   3\n")
-        print(io," Number of elements   =  ",num_elements,"\n")
+        print(io," Number of elements   =  ",written_num_elements,"\n")
         print(io," Number of nodes      =  ",num_vertices,"\n\n")
         print(io," All elements are of the same type: ",
-            max_arity==min_arity ? "dpTRUE" : "dpFALSE","\n")
-        print(io," Max number of nodes in an element: ",max_arity," \n")
+            written_max_arity==written_min_arity ? "dpTRUE" : "dpFALSE","\n")
+        print(io," Max number of nodes in an element: ",written_max_arity," \n")
         print(io," Only one subdomain               : dpFALSE\n")
         print(io," Lattice data                     ? 0\n\n\n\n")
         print(io," ",length(ordered_indicators)," Boundary indicators:  ")
@@ -16730,7 +16732,7 @@ function write_diff(path,m;scaling_factor::Real=1.0)
             entry=get(_DIFF_WRITE_TABLE,block.msh,nothing)
             entry===nothing && continue
             cdim=msh_dimension(block.msh)
-            cdim==dim || continue
+            cdim==written_dim || continue
             name,perm=entry
             for j in axes(block.nodes,2)
                 etag=_foreign_cell_entity(m,bi,j)
@@ -17121,9 +17123,9 @@ records) reject before the destination file is touched. Unlike the
 model-view writer the legacy `CELLS` encoding is always used — the pinned
 model writer has no `OFFSETS`/`CONNECTIVITY` variant.
 """
-function write_vtk(path,m;title::AbstractString="Tessella mesh")
+function write_vtk(path,input_mesh;title::AbstractString="Tessella mesh")
     caller="write_vtk"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     (occursin('\n',title) || occursin('\r',title)) && throw(ArgumentError(
@@ -17144,6 +17146,7 @@ function write_vtk(path,m;title::AbstractString="Tessella mesh")
     any_physical=any(tag>0 for block in m.blocks for tag in block.tags)
     nn=size(m.coords,2)
     target,parent=_foreign_target(path,caller)
+    written_ncells,written_size_ints=ncells,size_ints
     mktemp(parent) do temporary,io
         println(io,"# vtk DataFile Version 2.0")
         println(io,title)
@@ -17154,7 +17157,7 @@ function write_vtk(path,m;title::AbstractString="Tessella mesh")
             println(io,@sprintf("%.17g %.17g %.17g",
                 m.coords[1,i],m.coords[2,i],m.coords[3,i]))
         end
-        println(io,"CELLS ",ncells," ",size_ints)
+        println(io,"CELLS ",written_ncells," ",written_size_ints)
         for (block,layout) in zip(m.blocks,layouts)
             order=layout.order
             @inbounds for j in axes(block.nodes,2)
@@ -17165,14 +17168,14 @@ function write_vtk(path,m;title::AbstractString="Tessella mesh")
                 println(io)
             end
         end
-        println(io,"CELL_TYPES ",ncells)
+        println(io,"CELL_TYPES ",written_ncells)
         for (block,layout) in zip(m.blocks,layouts)
             for _ in axes(block.nodes,2)
                 println(io,layout.type)
             end
         end
         if any_physical
-            println(io,"CELL_DATA ",ncells)
+            println(io,"CELL_DATA ",written_ncells)
             println(io,"SCALARS CellEntityIds int 1")
             println(io,"LOOKUP_TABLE default")
             for block in m.blocks
@@ -18019,9 +18022,9 @@ Write a `Mesh`/`MixedMesh` as an Object File Format deck (`OFF nv nf 0`,
 triangle/quadrangle cells are emitted (upstream iterates `faces`); other
 element families are ignored. Higher-order faces use their corner vertices.
 """
-function write_off(path,m;scaling_factor::Real=1.0)
+function write_off(path,input_mesh;scaling_factor::Real=1.0)
     caller="write_off"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     _assert_mixed_structure(m,caller)
@@ -18061,9 +18064,9 @@ Write a `Mesh`/`MixedMesh` as Wavefront OBJ (`# Gmsh OBJ export` header,
 vertex list as 1-based indices). Only dim-2 cells are emitted (upstream
 iterates `faces`).
 """
-function write_obj(path,m;scaling_factor::Real=1.0)
+function write_obj(path,input_mesh;scaling_factor::Real=1.0)
     caller="write_obj"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     target,parent=_foreign_target(path,caller)
@@ -18098,9 +18101,9 @@ Write a `Mesh`/`MixedMesh` in the Stanford `ply2` triangulation dialect
 records over 0-based indices). Only triangle cells are emitted
 and higher-order triangles use their three corner vertices.
 """
-function write_ply2(path,m)
+function write_ply2(path,input_mesh)
     caller="write_ply2"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     _assert_mixed_structure(m,caller)
@@ -18549,10 +18552,10 @@ preamble, `node <i> x [y [z]]` rows at `%.16g` for the mesh dimension,
 node-set sections. Element families without an upstream TOCHNOG mnemonic are
 skipped exactly as upstream (`getStringForTOCHNOG()==nullptr`).
 """
-function write_dat(path,m;save_groups_of_nodes::Bool=true,
+function write_dat(path,input_mesh;save_groups_of_nodes::Bool=true,
                    scaling_factor::Real=1.0)
     caller="write_dat"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     dim=0
@@ -18562,6 +18565,7 @@ function write_dat(path,m;save_groups_of_nodes::Bool=true,
     end
     target,parent=_foreign_target(path,caller)
     labels=_dense_labels(m)
+    written_dim=dim
     mktemp(parent) do temporary,io
         println(io,"(----Tochnog Input File Created by Gmsh Version 2.13.1 ----)")
         println(io," ")
@@ -18575,14 +18579,14 @@ function write_dat(path,m;save_groups_of_nodes::Bool=true,
             "end_initia \n","options_element_dof -yes  \n")
         println(io,"\n(----------------Nodes----------------)\n")
         for i in 1:size(m.coords,2)
-            if dim==3
+            if written_dim==3
                 println(io,"node ",labels[i]," ",_format16(m.coords[1,i]*scaling_factor),
                     " ",_format16(m.coords[2,i]*scaling_factor)," ",
                     _format16(m.coords[3,i]*scaling_factor))
-            elseif dim==2
+            elseif written_dim==2
                 println(io,"node ",labels[i]," ",_format16(m.coords[1,i]*scaling_factor),
                     " ",_format16(m.coords[2,i]*scaling_factor))
-            elseif dim==1
+            elseif written_dim==1
                 println(io,"node ",labels[i]," ",_format16(m.coords[1,i]*scaling_factor))
             end
         end
@@ -18592,9 +18596,9 @@ function write_dat(path,m;save_groups_of_nodes::Bool=true,
             block isa ElementBlock || continue
             typ=get(_TOCHNOG_STRINGS,block.msh,nothing)
             typ===nothing && continue
-            # upstream writes points always, and the top-dim family only
+            # upstream writes points always, and the top-written_dim family only
             wanted=_io_dim(block.msh)
-            (wanted==0 || wanted==dim) || continue
+            (wanted==0 || wanted==written_dim) || continue
             for j in 1:size(block.nodes,2)
                 counter+=UInt64(1)
                 elnum=_foreign_cell_uid(m,bi,j,counter)
@@ -18671,9 +18675,9 @@ Write a `Mesh`/`MixedMesh` as a MATLAB `load_gmsh2` deck: `msh.nbNod`,
 physical tag (or elementary tag when zero). Element families without an
 upstream MATLAB name are skipped.
 """
-function write_m(path,m;scaling_factor::Real=1.0,model_name::AbstractString="")
+function write_m(path,input_mesh;scaling_factor::Real=1.0,model_name::AbstractString="")
     caller="write_m"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     target,parent=_foreign_target(path,caller)
@@ -18730,9 +18734,9 @@ IndexedLineSet` and `DEF Surface<tag> IndexedFaceSet` `coordIndex` blocks
 terminated by `-1`). Matches `GModel::writeVRML`: only dim-0..2 vertices are
 written and only line/surface cells appear in the index sets.
 """
-function write_wrl(path,m;scaling_factor::Real=1.0)
+function write_wrl(path,input_mesh;scaling_factor::Real=1.0)
     caller="write_wrl"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     target,parent=_foreign_target(path,caller)
@@ -18813,9 +18817,9 @@ tet4 repeats node 4 into slots 4–8, penta6 into 7–8/5–6 pattern, tri3 shel
 repeats node 3, 6-node shell expands to 8, 3-node beam appends its third node
 on a second field.
 """
-function write_key(path,m;scaling_factor::Real=1.0)
+function write_key(path,input_mesh;scaling_factor::Real=1.0)
     caller="write_key"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     # Element families without an upstream KEY mnemonic are skipped
@@ -18929,9 +18933,9 @@ with `%10d` element records, `/GRSH3N/SH3N` physical-group sections for
 triangles and `/GR...` element sets, `*`-free Radioss syntax). Implements the
 upstream degenerate-node fills (penta→brick pattern, tet4 4-node records).
 """
-function write_rad(path,m;scaling_factor::Real=1.0)
+function write_rad(path,input_mesh;scaling_factor::Real=1.0)
     caller="write_rad"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     # Element families without an upstream RAD card are skipped
@@ -18942,13 +18946,14 @@ function write_rad(path,m;scaling_factor::Real=1.0)
     for pat in ("_0000.rad",".rad")
         endswith(beginname,pat) && (beginname=beginname[1:end-length(pat)])
     end
+    written_beginname=beginname
     mktemp(parent) do temporary,io
         println(io,"#RADIOSS STARTER")
         println(io,"#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|")
         println(io,"# Created by Gmsh, Radioss Mesh Interface by PaulAltair sharp@altair.com")
         println(io,"#---1----|----2----|----3----|----4----|----5----|----6----|----7----|----8----|----9----|---10----|")
         println(io,"/BEGIN")
-        println(io,beginname)
+        println(io,written_beginname)
         println(io,"      2022         0")
         println(io,"                  Mg                  mm                   s")
         println(io,"                  Mg                  mm                   s")
@@ -19045,10 +19050,10 @@ switches with the default `x3dsurfaces=1` merged behaviour. Higher-order
 surface cells use their primary corner vertices. The source and both
 destination paths are validated before replacing the X3D target.
 """
-function write_x3d(path,m;scaling_factor::Real=1.0,surfaces::Bool=true,
+function write_x3d(path,input_mesh;scaling_factor::Real=1.0,surfaces::Bool=true,
                    edges::Bool=false,vertices::Bool=false)
     caller="write_x3d"
-    m isa Mesh && (m=simplex_to_mixed(m))
+    m=input_mesh isa Mesh ? simplex_to_mixed(input_mesh) : input_mesh
     m isa MixedMesh || throw(ArgumentError(
         "$caller: mesh must be a Mesh or MixedMesh"))
     (surfaces || edges || vertices) || throw(ArgumentError(
