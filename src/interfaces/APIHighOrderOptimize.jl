@@ -7,28 +7,17 @@
 # high-order nodes to improve the minimum scaled Jacobian while keeping
 # boundary/geometry supports fixed), 2 applies both.  The optimization
 # stage honors `Mesh.HighOrderThresholdMin/Max` — only nodes whose
-# incident minimum lies inside the band are candidates.  The elastic
-# stage runs the same certificate-gated bounded ascent without the band
-# (`threshold_min=-Inf`, `threshold_max=Inf`), so elements below the
-# optimize floor are smoothed too — the native realization of upstream's
-# elasticity-analogy pass, restricted to the certified P2 families and
-# still never able to create or repair inverted elements.
+# incident minimum lies inside the band are relocation candidates.
 #
-# The pass itself lives in HighOrder.optimize_p2_interior! and covers every
-# full-P2 family with an exact Bernstein positivity bound — Tri6, Quad9,
-# Tet10, Hex27, Prism18 and Pyr14 (the collapsed-map certificate of
-# HighOrderPyramid.jl supplies its boolean bound) — while every uncertified
-# block family keeps its nodes fixed.  Curve-owned mids additionally slide along their
-# owning CAD curve in parameter space and face-owned mids slide in the
-# owning surface's (u,v) parameters — both re-evaluated through the same
-# model evaluators that produced the stored parameters.  This file
-# translates option state, classification ownership, and
-# geometric-support structure into the engine's movable mask, fixed
-# edge/facet sets, and slider descriptors, then commits accepted parameter
-# states back into the plan-local entity_data/classification atomically.
-# It mutates the *unpublished* coordinate matrix of a freshly built
-# plan/overlay, so a failure still leaves the previously published cache
-# untouched.
+# Elastic smoothing solves the isotropic Navier finite-element equations on
+# a straight-sided reference mesh with the curved boundary as its Dirichlet
+# displacement. Mesh.HighOrderPoissonRatio controls the Lamé coefficients.
+# Interior primary and high-order nodes participate; CAD face nodes are
+# projected back to their support. Whole-element positivity certificates
+# gate publication, with bounded displacement backtracking when necessary.
+# The separate banded relocation stage uses optimize_p2_interior! and its
+# geometric parameter sliders. Both operate on unpublished plan coordinates
+# and commit accepted parameters atomically with the mesh.
 # ══════════════════════════════════════════════════════════════════════════════
 
 _high_order_optimize_level() = begin
@@ -276,6 +265,31 @@ function _high_order_optimize_fixed_supports(mesh::MixedMesh, class)
     return edges, facets
 end
 
+# Elastic FEM uses ownership to constrain geometric boundaries, and projects
+# accepted face-interior displacements through the owning CAD evaluator.
+function _high_order_elastic_mixed!(mesh, class, model; itermax, passes)
+    classified = class !== nothing && length(class.node_entities) == size(mesh.coords,2)
+    ownership = classified ? [owner[1] for owner in class.node_entities] : nothing
+    project = if classified && model !== nothing
+        function (v, point)
+            owner = class.node_entities[v]
+            stored = class.node_parametric[v]
+            (owner[1] == 2 && stored !== nothing) || return (point,nothing)
+            closest,parameters = Model.model_closest_point(model,2,Int(owner[2]),point)
+            length(closest) == 3 && all(isfinite,closest) &&
+                length(parameters) == 2 && all(isfinite,parameters) ||
+                throw(ArgumentError("invalid elastic CAD projection"))
+            return (closest,parameters)
+        end
+    else
+        nothing
+    end
+    blocks = [(msh,cells) for (msh,_,_,cells,_) in _cache_catalog(mesh,class)]
+    return HighOrder.elastic_p2!(mesh.coords,blocks;
+        poisson=_high_order_optimize_num_option("Mesh.HighOrderPoissonRatio",0.33),
+        ownership=ownership,project=project,itermax=itermax,passes=passes)
+end
+
 # Relocate interior high-order nodes of an unpublished MixedMesh in place —
 # every certified family present in the cache — and slide curve-owned
 # parametric mids along their owning curve.  `elastic`/`banded` select the
@@ -303,11 +317,13 @@ function _high_order_optimize_mixed_stages!(mesh::MixedMesh, class, model,
     moved = 0
     stats = (0, NaN, NaN, 0, 0)
     if elastic
-        s = HighOrder.optimize_p2_interior!(mesh.coords, blocks, movable;
-            itermax=itermax, passes=passes,
-            fixed_edges=fixed_edges, fixed_facets=fixed_facets,
-            sliders=sliders,
-            threshold_min=-Inf, threshold_max=Inf)
+        s, elastic_parameters = _high_order_elastic_mixed!(mesh,class,model;
+            itermax=itermax,passes=passes)
+        if sliders !== nothing
+            for (v,parameters) in elastic_parameters
+                haskey(sliders,Int32(v)) && (sliders[Int32(v)].u=parameters)
+            end
+        end
         moved += s[1]
         stats = (moved, s[2], s[3], stats[4] + s[4], stats[5] + s[5])
         s[1] > 0 &&
@@ -362,7 +378,8 @@ end
 # The overlay has a single owner group, so the combined complex boundary
 # already covers every geometric support — no extra fixed edges are needed.
 function _high_order_optimize_overlay_stages!(p2::Union{P2Mesh,P2TriMesh},
-        mids::AbstractVector{<:Tuple{Int,Int32}}; elastic::Bool, banded::Bool)
+        mids::AbstractVector{<:Tuple{Int,Int32}}; elastic::Bool, banded::Bool,
+        class=nothing)
     (elastic || banded) || return nothing
     dim = p2 isa P2Mesh ? 3 : 2
     cells = p2 isa P2Mesh ? p2.tet10 : p2.tri6
@@ -372,15 +389,24 @@ function _high_order_optimize_overlay_stages!(p2::Union{P2Mesh,P2TriMesh},
     for i in eachindex(mids)
         mids[i][1] == dim && (movable[nlin + i] = true)
     end
+    ownership=fill(dim,nnodes(p2))
+    if class !== nothing && length(class.node_entities)>=nlin
+        for v in 1:nlin
+            ownership[v]=class.node_entities[v][1]
+        end
+    end
+    for i in eachindex(mids)
+        ownership[nlin+i]=mids[i][1]
+    end
     msh = p2 isa P2Mesh ? Int32(11) : Int32(9)
     itermax = _high_order_optimize_int_option("Mesh.HighOrderIterMax", 100)
     passes = _high_order_optimize_int_option("Mesh.HighOrderPassMax", 25)
     moved = 0
     stats = (0, NaN, NaN, 0, 0)
     if elastic
-        s = HighOrder.optimize_p2_interior!(p2.coords, ((msh, cells),),
-            movable; itermax=itermax, passes=passes,
-            threshold_min=-Inf, threshold_max=Inf)
+        s, _ = HighOrder.elastic_p2!(p2.coords,((msh,cells),);
+            poisson=_high_order_optimize_num_option("Mesh.HighOrderPoissonRatio",0.33),
+            ownership=ownership,itermax=itermax,passes=passes)
         moved += s[1]
         stats = (moved, s[2], s[3], stats[4] + s[4], stats[5] + s[5])
         s[1] > 0 &&
@@ -409,20 +435,20 @@ function _high_order_optimize_overlay_stages!(p2::Union{P2Mesh,P2TriMesh},
 end
 
 function _high_order_optimize_overlay!(p2::Union{P2Mesh,P2TriMesh},
-                                       mids::AbstractVector{<:Tuple{Int,Int32}})
+                                       mids::AbstractVector{<:Tuple{Int,Int32}};class=nothing)
     _high_order_optimize_relocation() || return nothing
     return _high_order_optimize_overlay_stages!(p2, mids;
         elastic=_high_order_optimize_elastic(),
-        banded=_high_order_optimize_optimize())
+        banded=_high_order_optimize_optimize(),class=class)
 end
 
 # Retained overlays are live published state: relocate on a deep copy so a
 # failure cannot mutate the mesh the session still exposes.
 function _high_order_optimize_overlay(p2::Union{P2Mesh,P2TriMesh},
                                       mids::AbstractVector{<:Tuple{Int,Int32}};
-                                      fresh::Bool)
+                                      fresh::Bool,class=nothing)
     if fresh
-        _high_order_optimize_overlay!(p2, mids)
+        _high_order_optimize_overlay!(p2, mids;class=class)
         return p2
     end
     _high_order_optimize_relocation() || return p2
@@ -431,7 +457,7 @@ function _high_order_optimize_overlay(p2::Union{P2Mesh,P2TriMesh},
                require_positive_tets=false) :
         P2TriMesh(copy(p2.coords), copy(p2.tri6); tri_tag=copy(p2.tri_tag),
                   _check_geometry=false)
-    _high_order_optimize_overlay!(copy_p2, mids)
+    _high_order_optimize_overlay!(copy_p2, mids;class=class)
     return copy_p2
 end
 
@@ -494,7 +520,8 @@ function _high_order_optimize_plan!(plan, caller::AbstractString)
     if overlay isa Union{P2Mesh,P2TriMesh}
         mids = get(plan, :preserved_mid_owners, Tuple{Int,Int32}[])
         optimized = _high_order_optimize_overlay(
-            overlay, mids; fresh = overlay !== LAST_MESH_HIGH_ORDER[])
+            overlay, mids; fresh = overlay !== LAST_MESH_HIGH_ORDER[],
+            class=get(plan,:class,nothing))
         optimized === overlay ||
             (plan = merge(plan, (preserved_overlay=optimized,)))
     end
@@ -1108,7 +1135,7 @@ function _optimize_high_order_locked!(method, pairs, caller::AbstractString)
             P2TriMesh(copy(overlay.coords), copy(overlay.tri6);
                 tri_tag=copy(overlay.tri_tag), _check_geometry=false)
         stats = _high_order_optimize_overlay_stages!(edited,
-            LAST_MESH_HIGH_ORDER_MIDS[]; elastic=elastic, banded=!elastic)
+            LAST_MESH_HIGH_ORDER_MIDS[]; elastic=elastic, banded=!elastic,class=class)
         stats === nothing && return _optimize_high_order_linear_notice()
         stats[1] == 0 && return nothing
         _replace_mesh_cache_with_overlay_locked!(cached, class, caller;

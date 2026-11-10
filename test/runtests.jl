@@ -38,6 +38,7 @@ include("functional/fixtures.jl")
         "meshing/ordered_matching_seeded_test.jl",
         "core/transform_axis_scale_test.jl",
         "core/fem_linear_solvers_test.jl",
+        "meshing/highorder_elastic_fem_test.jl",
         "core/mesh_coordinate_cancellation_test.jl",
         "core/barycentric_range_test.jl",
         "fields/threshold_interval_precision_test.jl",

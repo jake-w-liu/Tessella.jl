@@ -3099,5 +3099,6 @@ function optimize_p2_tet_interior!(coords::AbstractMatrix{Float64},
 end
 
 include("HighOrderPyramid.jl")
+include("HighOrderElastic.jl")
 
 end # module HighOrder

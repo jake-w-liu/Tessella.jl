@@ -309,8 +309,7 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     # High-order mesh optimization controls (upstream gmsh option surface).
     # `HighOrderOptimize`: -1 elastic smoothing, 0 none, 1 relocation
     # optimization, 2 both — this slice implements the relocation pass;
-    # `HighOrderPoissonRatio` is consumed by the (not yet implemented)
-    # elastic-analogy stage only.
+    # `HighOrderPoissonRatio` controls the native Navier FEM elastic stage.
     "Mesh.HighOrderOptimize"=>0.0,
     "Mesh.HighOrderIterMax"=>100.0,
     "Mesh.HighOrderPassMax"=>25.0,
@@ -2574,7 +2573,7 @@ function _apply_mesh_order(m::GeoModel,cached::Mesh,class,caller)
     if existing!==nothing
         if existing isa P2Mesh && _high_order_optimize_relocation()
             mids=LAST_MESH_HIGH_ORDER_MIDS[]
-            optimized=_high_order_optimize_overlay(existing,mids;fresh=false)
+            optimized=_high_order_optimize_overlay(existing,mids;fresh=false,class=class)
             optimized===existing ||
                 _set_high_order_overlay(optimized,cached,mids)
         end
@@ -2597,7 +2596,7 @@ function _apply_mesh_order(m::GeoModel,cached::Mesh,class,caller)
     mids=_p2_mid_owners(p2,cached,class,dimension,Int.(last.(entities)))
     # Mesh.HighOrderOptimize — the fresh overlay is unpublished, so the
     # certificate-gated interior relocation may update it in place.
-    p2 isa P2Mesh && _high_order_optimize_overlay!(p2,mids)
+    p2 isa P2Mesh && _high_order_optimize_overlay!(p2,mids;class=class)
     _set_high_order_overlay(p2,cached,mids)
     return nothing
 end
@@ -11659,7 +11658,7 @@ also fires at `niter=0` — while `Relocate2D` accepts the curved quadratic
 surface class and relocates its face-owned mid nodes in the owning surface's
 (u,v) parameters through the certificate-gated interior relocation pass.
 `"HighOrder"` runs that pass' banded stage (Mesh.HighOrderThresholdMin/Max)
-and `"HighOrderElastic"` its unbounded elastic stage on certified full-P2
+and `"HighOrderElastic"` its Navier FEM elastic stage on certified full-P2
 families; a mesh without quadratic elements draws upstream's
 `Applying high-order mesh optimizer to mesh with linear elements` warning.
 Other optimizer names fail explicitly.
