@@ -207,9 +207,12 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
         plane=Model._model_plane_frame(m,Int(owner),caller)
         _PrimaryPlaneEvaluation(plane.origin,plane.first_direction,plane.second_direction)
     end
-    if settings.reposition && settings.smoothing>0 && !discrete && any(value->value[1]==2,owners)
+    relocate=settings.reposition && settings.smoothing>0
+    diamond_parameters=settings.topology_passes>0 && topology_admitted &&
+        evaluate isa _PrimaryPlaneEvaluation
+    if (relocate || diamond_parameters) && !discrete && any(value->value[1]==2,owners)
         evaluate isa _PrimaryPlaneEvaluation || throw(ArgumentError(evaluate.message))
-        boundary_layer_context && throw(ArgumentError(
+        relocate && boundary_layer_context && throw(ArgumentError(
             "$caller: native relocation with active boundary-layer context is not implemented"))
         missing_face_parameters=any(enumerate(rows)) do (local_row,row)
             owners[local_row][1]==2 || return false
@@ -236,6 +239,9 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
                         "$caller: native relocation requires two finite stored Surface parameters"))
                     (parameter[1],parameter[2])
                 end
+            elseif !relocate
+                _primary_plane_parameters(evaluate,(source.mesh.coords[1,row],
+                    source.mesh.coords[2,row],source.mesh.coords[3,row]))
             elseif dimension==0
                 point=get(m.points,Int(entity),nothing)
                 point!==nothing || throw(ArgumentError(
@@ -456,8 +462,9 @@ function _api_native_recombine_plan(m,cached,class,caller;
     for (row,tag) in enumerate(output_data.external_node_tags)
         owner=output_data.node_entities[row]
         context=owner[1]==2 ? get(contexts,owner[2],nothing) : nothing
-        moved=context!==nothing && context.reposition && context.smoothing>0 &&
-            context.evaluate isa _PrimaryPlaneEvaluation
+        moved=(context!==nothing && context.reposition && context.smoothing>0 &&
+            context.evaluate isa _PrimaryPlaneEvaluation) ||
+            (hasproperty(result,:topology_moved_tags) && tag in result.topology_moved_tags)
         push!(runtime,moved ? deepcopy(output_data.node_parametric[row]) :
             deepcopy(source.runtime_parameters[source_positions[tag]]))
     end

@@ -504,7 +504,9 @@ function _recombine_triangles(mesh::MeshTypes.Mesh;min_quality=0.0,
         result=_primary_emission_product(actual,optimized.emission;preserve_segments,
             physical_names,full_quad)
         return merge(result,(removed_nodes=optimized.removed_nodes,
-            node_parameters=optimized.node_parameters))
+            node_parameters=optimized.node_parameters,
+            topology_moved_nodes=optimized.topology_moved_nodes,
+            primary_quad_sources=optimized.primary_quad_sources))
     end
 
 

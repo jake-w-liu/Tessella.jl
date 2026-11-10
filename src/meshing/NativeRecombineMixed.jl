@@ -53,6 +53,7 @@ function _primary_recombine_mixed(mesh::Elements.MixedMesh;algorithm=:blossom,an
     coordinates_out=copy(mesh.coords)
     parameters_out=deepcopy(data.node_parametric)
     removed_nodes=falses(size(mesh.coords,2))
+    topology_moved_tags=Set{UInt64}()
     # Untouched lower, Volume and high-order Surface cells remain in their
     # stored order.
     for (bi,block) in enumerate(mesh.blocks)
@@ -128,7 +129,9 @@ function _primary_recombine_mixed(mesh::Elements.MixedMesh;algorithm=:blossom,an
             removed_nodes[rows].|=result.removed_nodes
             for (local_row,row) in enumerate(rows)
                 context.node_entities[local_row]==(2,owner) || continue
-                (!context.reposition || context.smoothing<=0 || context.evaluate===nothing) && continue
+                result.topology_moved_nodes[local_row] && push!(topology_moved_tags,data.external_node_tags[row])
+                (!context.reposition || context.smoothing<=0 || context.evaluate===nothing) &&
+                    !result.topology_moved_nodes[local_row] && continue
                 context.parameter_present[local_row] || continue
                 parameters_out[row]=copy(result.node_parameters[:,local_row])
             end
@@ -148,7 +151,13 @@ function _primary_recombine_mixed(mesh::Elements.MixedMesh;algorithm=:blossom,an
             for column in axes(nodes,2)
                 birth=result.element_births[bi][column]
                 if birth==0
-                    key=Tuple(sort(nodes[:,column]));labels=get(previous,key,nothing)
+                    key=Tuple(sort(nodes[:,column]))
+                    if block.msh==3 && hasproperty(result,:primary_quad_sources)
+                        local_key=Tuple(sort(collect(ntuple(i->block.nodes[i,column],4))))
+                        source=get(result.primary_quad_sources,local_key,local_key)
+                        key=Tuple(sort(rows[collect(source)]))
+                    end
+                    labels=get(previous,key,nothing)
                     labels!==nothing && !isempty(labels) || throw(ArgumentError("retained cell lost its actual identity"))
                     push!(external,popfirst!(labels))
                 else
@@ -227,5 +236,5 @@ function _primary_recombine_mixed(mesh::Elements.MixedMesh;algorithm=:blossom,an
         ancillary_sections=mesh.ancillary_sections,data_sections=sections,
         partition_data=partition)
     Elements.validate(output;reject_duplicate_point_cells=false).ok || throw(ArgumentError("invalid detached mixed output"))
-    return (mesh=output,maximum_element_tag=maximum_tag)
+    return (mesh=output,maximum_element_tag=maximum_tag,topology_moved_tags)
 end

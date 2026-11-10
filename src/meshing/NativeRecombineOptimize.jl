@@ -222,21 +222,112 @@ function _primary_collapse_degree_two(coords,triangles,quadrangles,tags,births,
         removed,counter,changes=length(added))
 end
 
-# Only a qualifying diamond requires the still-unimplemented collapse
-# policy. An ordinary mesh with no such configuration proceeds normally.
-function _primary_require_no_diamonds(triangles,quadrangles,context::_PrimarySurfaceContext)
-    context.evaluate===nothing && return nothing
-    touched=Set{Int32}(node for cell in triangles for node in cell)
-    degrees=zeros(Int,length(context.node_tags))
-    for cell in quadrangles,node in cell;degrees[node]+=1;end
-    for cell in quadrangles
-        any(node->node in touched,cell) && continue
-        all(node->context.node_entities[node]==(2,context.entity),cell) || continue
-        ((degrees[cell[1]]==degrees[cell[3]]==3) ||
-         (degrees[cell[2]]==degrees[cell[4]]==3)) || continue
-        throw(ArgumentError("native recombination diamond optimization is not implemented for this configuration"))
+# A diamond contracts the opposite degree-three vertices of one quadrangle.
+# The two remaining corners must have higher valence: contracting a four-way
+# degree-three patch would create doublets instead of the intended diamond.
+# Keep the surviving cells' identities; only the central cell is consumed.
+function _primary_patch_boundary(cells)
+    edges=Dict{Tuple{Int32,Int32},Tuple{Int,Int}}()
+    for cell in cells,i in 1:4
+        a=cell[i];b=cell[mod1(i+1,4)];key=minmax(a,b)
+        count,balance=get(edges,key,(0,0))
+        edges[key]=(count+1,balance+(a<b ? 1 : -1))
+    end
+    boundary=Set{Tuple{Int32,Int32}}()
+    for ((a,b),(count,balance)) in edges
+        if count==1
+            push!(boundary,balance==1 ? (a,b) : (b,a))
+        elseif count!=2 || balance!=0
+            return nothing
+        end
+    end
+    return boundary
+end
+
+function _primary_quad_projection(coords,cell)
+    for axes in ((1,2),(2,3),(3,1))
+        reference=orient2((_projected_point(coords,cell[i],axes) for i in 1:3)...)
+        reference==0 && continue
+        all(i->orient2(_projected_point(coords,cell[i],axes),
+            _projected_point(coords,cell[mod1(i+1,4)],axes),
+            _projected_point(coords,cell[mod1(i+2,4)],axes))==reference,2:4) || continue
+        return (axes,reference)
     end
     return nothing
+end
+
+function _primary_collapse_diamonds!(coords,triangles,quadrangles,tags,births,
+                                     context::_PrimarySurfaceContext,sources)
+    removed=falses(size(coords,2));moved=falses(size(coords,2));changes=0
+    context.evaluate isa _PrimaryPlaneEvaluation || return (
+        quadrangles=quadrangles,tags=tags,births=births,removed=removed,moved=moved,changes=changes)
+    adjacency=[Int[] for _ in axes(coords,2)]
+    for (column,cell) in enumerate(quadrangles),node in cell
+        push!(adjacency[node],column)
+    end
+    triangle_nodes=Set{Int32}(node for cell in triangles for node in cell)
+    touched=falses(length(quadrangles));consumed=falses(length(quadrangles))
+    keys=Set(Tuple(sort(collect(cell))) for cell in quadrangles)
+    for (column,cell) in enumerate(quadrangles)
+        touched[column] && continue
+        any(node->node in triangle_nodes,cell) && continue
+        all(node->context.node_entities[node]==(2,context.entity),cell) || continue
+        first_pair=length(adjacency[cell[1]])==length(adjacency[cell[3]])==3 &&
+            length(adjacency[cell[2]])>3 && length(adjacency[cell[4]])>3
+        second_pair=length(adjacency[cell[2]])==length(adjacency[cell[4]])==3 &&
+            length(adjacency[cell[1]])>3 && length(adjacency[cell[3]])>3
+        (first_pair || second_pair) || continue
+        keep,drop=first_pair ? (cell[1],cell[3]) : (cell[2],cell[4])
+        intersect(adjacency[keep],adjacency[drop])==[column] || continue
+        patch=sort!(union(adjacency[keep],adjacency[drop]))
+        any(index->touched[index],patch) && continue
+        all(index->tags[index]==tags[column],patch) || continue
+        old_cells=quadrangles[patch]
+        boundary=_primary_patch_boundary(old_cells)
+        boundary===nothing && continue
+        any(edge->keep in edge || drop in edge,boundary) && continue
+        neighbors=filter(!=(column),patch)
+        old_neighbors=quadrangles[neighbors]
+        replacements=[ntuple(i->nodes[i]==drop ? keep : nodes[i],4) for nodes in old_neighbors]
+        all(allunique,replacements) || continue
+        _primary_patch_boundary(replacements)==boundary || continue
+        certificates=[_primary_quad_projection(coords,nodes) for nodes in old_neighbors]
+        any(isnothing,certificates) && continue
+        old_keys=[Tuple(sort(collect(nodes))) for nodes in old_neighbors]
+        new_keys=[Tuple(sort(collect(nodes))) for nodes in replacements]
+        allunique(new_keys) || continue
+        any(key->key in keys && !(key in old_keys),new_keys) && continue
+        # UV averaging stays on the actual Plane; divide before adding so
+        # opposite finite coordinates cannot overflow the midpoint.
+        u=context.parameters[1,keep]*0.5+context.parameters[1,drop]*0.5
+        v=context.parameters[2,keep]*0.5+context.parameters[2,drop]*0.5
+        point=context.evaluate(u,v)
+        all(isfinite,point) || continue
+        before=ntuple(axis->coords[axis,keep],3)
+        for axis in 1:3;coords[axis,keep]=point[axis];end
+        valid=all(zip(replacements,certificates)) do (nodes,certificate)
+            axes,reference=certificate
+            all(i->orient2(_projected_point(coords,nodes[i],axes),
+                _projected_point(coords,nodes[mod1(i+1,4)],axes),
+                _projected_point(coords,nodes[mod1(i+2,4)],axes))==reference,1:4) &&
+                last(_quad_quality_range_result(coords,nodes))
+        end
+        if !valid
+            for axis in 1:3;coords[axis,keep]=before[axis];end
+            continue
+        end
+        lineage=[get(sources,key,key) for key in old_keys]
+        for key in old_keys;delete!(sources,key);delete!(keys,key);end
+        delete!(keys,Tuple(sort(collect(cell))))
+        for (index,nodes,key,source) in zip(neighbors,replacements,new_keys,lineage)
+            quadrangles[index]=nodes;sources[key]=source;push!(keys,key)
+        end
+        context.parameters[1,keep]=u;context.parameters[2,keep]=v
+        consumed[column]=true;touched[patch].=true
+        removed[drop]=true;moved[keep]=true;changes+=1
+    end
+    return (quadrangles=quadrangles[.!consumed],tags=tags[.!consumed],
+        births=births[.!consumed],removed,moved,changes)
 end
 
 function _primary_optimized_emission(coords,source_triangles,source_tags,
@@ -253,7 +344,8 @@ function _primary_optimized_emission(coords,source_triangles,source_tags,
     append!(triangle_births,emission.triangle_births)
     quadrangles=copy(emission.quadrangles);quad_tags=copy(emission.quadrangle_tags)
     quad_births=copy(emission.quadrangle_births);counter=emission.factory_births
-    removed=falses(size(coords,2))
+    removed=falses(size(coords,2));topology_moved=falses(size(coords,2))
+    quad_sources=Dict{NTuple{4,Int32},NTuple{4,Int32}}()
     _primary_relocate!(coords,triangles,quadrangles,context)
     if context.topology_passes>0 && context.topology_admitted
         for _ in 0:context.topology_passes
@@ -264,7 +356,10 @@ function _primary_optimized_emission(coords,source_triangles,source_tags,
                 counter=pass.counter;removed .|= pass.removed;changes+=pass.changes
                 pass.changes==0 && break
             end
-            _primary_require_no_diamonds(triangles,quadrangles,context)
+            diamonds=_primary_collapse_diamonds!(coords,triangles,quadrangles,
+                quad_tags,quad_births,context,quad_sources)
+            quadrangles=diamonds.quadrangles;quad_tags=diamonds.tags;quad_births=diamonds.births
+            removed .|= diamonds.removed;topology_moved .|= diamonds.moved;changes+=diamonds.changes
             _primary_relocate!(coords,triangles,quadrangles,context)
             changes==0 && break
         end
@@ -292,5 +387,6 @@ function _primary_optimized_emission(coords,source_triangles,source_tags,
     end
     result=_PrimaryWeightedEmission(trues(size(source_triangles,2)),triangles,triangle_tags,triangle_births,
         kept,kept_tags,kept_births,counter,emission.pair_count,emission.pair_passes)
-    return (emission=result,removed_nodes=removed,node_parameters=context.parameters)
+    return (emission=result,removed_nodes=removed,node_parameters=context.parameters,
+        topology_moved_nodes=topology_moved,primary_quad_sources=quad_sources)
 end
