@@ -39,6 +39,7 @@ include("functional/fixtures.jl")
         "core/transform_axis_scale_test.jl",
         "core/mesh_coordinate_cancellation_test.jl",
         "core/barycentric_range_test.jl",
+    "fields/threshold_interval_precision_test.jl",
         "fields/distance_triangle_translation_test.jl",
         "fields/scalar_finite_interpolation_test.jl",
         "fields/finite_difference_range_test.jl",

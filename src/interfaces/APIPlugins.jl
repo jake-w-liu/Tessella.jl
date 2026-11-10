@@ -5354,7 +5354,7 @@ function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
             for node in 1:nvert
                 d=dist[Int(rec.node_tags[node])]
                 if minscale>0 && maxscale>0 && maxd!=mind
-                    d=minscale+(d-mind)/(maxd-mind)*(maxscale-minscale)
+                    d=SizeField._field_interval_lerp(d,mind,maxd,minscale,maxscale)
                 elseif minscale>0
                     d=minscale+d
                 end

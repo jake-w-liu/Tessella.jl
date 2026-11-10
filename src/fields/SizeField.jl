@@ -162,6 +162,42 @@ end
     return _field_interval_ratio_exact(value,lower,upper)
 end
 
+@noinline function _field_interval_lerp_exact(value,lower,upper,a,b)
+    R=Rational{BigInt}
+    return Float64(R(a)+(R(value)-R(lower))*(R(b)-R(a))/(R(upper)-R(lower)))
+end
+
+@inline function _field_interval_lerp(value,lower,upper,a,b)
+    value<=lower && return a
+    value>=upper && return b
+    ratio=_field_interval_ratio(value,lower,upper)
+    result=_field_lerp(a,b,ratio)
+    a==b && return result
+    # Normal subtraction/division bounds the ratio error by a few relative
+    # ULPs; gradual underflow contributes an absolute minimum subnormal.
+    # Check its possible amplification before accepting a rounded ratio.
+    ratio_error=nextfloat(4eps(Float64)*abs(ratio)+nextfloat(0.))
+    mapped_error=nextfloat(ratio_error*abs(b-a))
+    mapped_error<=8eps(Float64)*abs(result) && return result
+
+    # A coarse bound need not allocate for a well-conditioned descending
+    # ramp. Recover the actual normalization residual using the same guarded
+    # expansion as view/structured queries, including the interval-width tail.
+    width,width_tail=_two_diff_pair(upper,lower)
+    residual=isfinite(width) ? _pv_normalization_residual(value,ratio,lower,width) : NaN
+    if isfinite(residual) && isfinite(width_tail)
+        iszero(residual) && iszero(width_tail) && return result
+        corrected=muladd(-ratio,width_tail,residual)
+        error=nextfloat(abs(corrected)+eps(residual)+eps(corrected))
+        lower_width=prevfloat(width-abs(width_tail))
+        if lower_width>0 && isfinite(error)
+            mapped_error=nextfloat(nextfloat(error/lower_width)*abs(b-a))
+            mapped_error<=4eps(Float64)*abs(result) && return result
+        end
+    end
+    return _field_interval_lerp_exact(value,lower,upper,a,b)
+end
+
 # Evaluate an affine function of a square root without losing a small
 # result to cancellation between its two terms. Its coefficients are exact
 # dyadics or rational combinations of the original field parameters.
@@ -700,10 +736,10 @@ end
 @inline function _threshold_value(field::ThresholdField, x, y, z, entity)
     d=_checked_field_result(field_value(field.input,x,y,z,entity),"ThresholdField input",x,y,z)
     field.stop_at_dist_max && d>=field.dist_max && return GMSH_MAX_SIZE
+    !field.sigmoid && return _field_interval_lerp(d,field.dist_min,field.dist_max,
+        field.size_min,field.size_max)
     r=clamp(_field_interval_ratio(d,field.dist_min,field.dist_max),0.0,1.0)
-    if field.sigmoid
-        e=exp(12r-6); r=e/(1+e)
-    end
+    e=exp(12r-6); r=e/(1+e)
     return _field_lerp(field.size_min,field.size_max,r)
 end
 field_value(field::ThresholdField,x,y,z)=_threshold_value(field,x,y,z,nothing)
