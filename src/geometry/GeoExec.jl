@@ -530,6 +530,28 @@ function _geo_exec_statements(path::AbstractString)
     end
 end
 
+function _geo_emit_statement!(statements,locs,buf,buf_nl,buf_line0,cur_line,line_lfs)
+    raw_stmt=String(take!(buf))
+    statement=strip(raw_stmt)
+    lead=0;rn=ncodeunits(raw_stmt)
+    while lead<rn && isspace(raw_stmt[lead+1])
+        lead+=1
+    end
+    nl=Int[]
+    for p in buf_nl
+        q=p-lead
+        1<=q<=ncodeunits(statement) && push!(nl,q)
+    end
+    length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
+        "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
+    push!(statements,String(statement))
+    first=buf_line0>0 ? buf_line0 : cur_line
+    lastline=min(first+length(nl),length(line_lfs))
+    push!(locs,(first,nl,Bool[line_lfs[l] for l in first:lastline]))
+    empty!(buf_nl)
+    return nothing
+end
+
 function _geo_exec_statements(stream::Base.IO)
     statements=String[]
     locs=Tuple{Int,Vector{Int},Vector{Bool}}[]
@@ -561,33 +583,6 @@ function _geo_exec_statements(stream::Base.IO)
     # lookahead is the `syntax error` token and stays inside the statement.
     extrude_pending=false
     extrude_pending_committed=false
-    # Emit the buffer as a statement plus its `(line0, newline-offsets)`
-    # pair: leading blanks trim first, so the recorded offsets shift into
-    # statement coordinates.
-    function emit!()
-        raw_stmt=String(take!(buf))
-        statement=strip(raw_stmt)
-        lead=0;rn=ncodeunits(raw_stmt)
-        while lead<rn && isspace(raw_stmt[lead+1])
-            lead+=1
-        end
-        nl=Int[]
-        for p in buf_nl
-            q=p-lead
-            1<=q<=ncodeunits(statement) && push!(nl,q)
-        end
-        length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
-            "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
-        push!(statements,String(statement))
-        # The statement's file lines are `buf_line0 .. buf_line0+length(nl)`;
-        # each loc carries their lone-`'\n'` flags for `yylineno-1` parity.
-        first=buf_line0>0 ? buf_line0 : cur_line
-        lastline=min(first+length(nl),length(line_lfs))
-        push!(locs,(first,nl,Bool[line_lfs[l] for l in first:lastline]))
-        empty!(buf_nl)
-        buf_has_content=false
-        return nothing
-    end
     for rawline in eachline(stream;keep=true)
         cur_line+=1
         # `'\n'` vs `'\r\n'`/unterminated decides the reported line
@@ -626,7 +621,8 @@ function _geo_exec_statements(stream::Base.IO)
                     # statement. A bare shape list instead glues the token on:
                     # `;`, `}`, or the next statement's head is the syntax-
                     # error token the statement's execution reports.
-                    emit!()
+                    _geo_emit_statement!(statements,locs,buf,buf_nl,buf_line0,cur_line,line_lfs)
+                    buf_has_content=false
                 end
             end
             if block_comment
@@ -676,7 +672,8 @@ function _geo_exec_statements(stream::Base.IO)
                         extrude_pending_committed=_geo_extrude_pending_params(
                             String(buf.data[1:position(buf)]))
                     else
-                        emit!()
+                        _geo_emit_statement!(statements,locs,buf,buf_nl,buf_line0,cur_line,line_lfs)
+                        buf_has_content=false
                     end
                 end
             elseif c==';' && depth==0
@@ -685,7 +682,8 @@ function _geo_exec_statements(stream::Base.IO)
                 # A `;` left after a `}`-terminated transform or between
                 # statements is an upstream `syntax error (;)` — it is kept
                 # as a statement so execution reports and recovers on it.
-                emit!()
+                _geo_emit_statement!(statements,locs,buf,buf_nl,buf_line0,cur_line,line_lfs)
+                buf_has_content=false
             else
                 buf_has_content || isspace(c) || (buf_line0=cur_line)
                 write(buf,c)
@@ -724,8 +722,9 @@ function _geo_exec_statements(stream::Base.IO)
         length(statements)<_MAX_GEO_EXEC_STATEMENTS || throw(ArgumentError(
             "execute_geo: input exceeds $_MAX_GEO_EXEC_STATEMENTS statements"))
         push!(statements,String(tail))
-        kept_nl=Int[p-tail_lead for p in tail_nl if
-                    1<=p-tail_lead<=ncodeunits(tail)]
+        kept_tail=tail;kept_lead=tail_lead
+        kept_nl=Int[p-kept_lead for p in tail_nl if
+                    1<=p-kept_lead<=ncodeunits(kept_tail)]
         push!(locs,(tail_first,kept_nl,tail_flags(length(kept_nl))))
         tail=""
     end
