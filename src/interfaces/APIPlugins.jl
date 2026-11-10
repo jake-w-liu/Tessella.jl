@@ -5223,8 +5223,177 @@ end
 # entities with per-node distances — `MinScale`/`MaxScale` rescale the value
 # column when both are positive and the field is non-constant, `MinScale`
 # alone shifts it. The view is named `distance` with one time step at t=0.
-# `DistanceType > 0` solves the Legrand diffusion PDE upstream under
-# HAVE_SOLVER; that arm is not yet ported.
+# Positive DistanceType solves the Legrand diffusion/reaction equation with
+# zero Dirichlet data on the selected boundary and natural data elsewhere.
+
+using ..FEMLinearSolvers: _fem_solve_spd
+
+function _plugin_distance_product(factors::Vararg{Float64,N}) where N
+    value=1.0
+    for factor in factors
+        value*=factor
+        if !isfinite(value) || (abs(value)<floatmin(Float64) && !iszero(factor))
+            return setprecision(BigFloat,256) do
+                Float64(prod(BigFloat(f) for f in factors))
+            end
+        end
+    end
+    return value
+end
+
+function _plugin_distance_boundary(slot,mesh,index,maxdim,ids)
+    entity=_plugin_element_entity(mesh,nothing,index)
+    entity===nothing && return false
+    all(iszero,ids) && return entity[1]==maxdim-1
+    0<=entity[1]<=2 || return false
+    id=ids[entity[1]+1]
+    id==0 && return false
+    slot.model===nothing && return false
+    return id in model_physical_groups_for_entity(slot.model,entity...)
+end
+
+function _plugin_distance_root(parents,node)
+    while parents[node]!=node
+        parents[node]=parents[parents[node]]
+        node=parents[node]
+    end
+    return node
+end
+
+function _plugin_distance_pde(mesh,slot,total,maxdim,mu,ids,caller)
+    active=falses(nnodes(mesh));fixed=falses(nnodes(mesh))
+    parents=collect(1:nnodes(mesh))
+    for index in 1:total
+        record=mesh_element_record(mesh,index)
+        if record.dimension==maxdim
+            first_node=Int(first(record.node_tags))
+            for node in record.node_tags
+                active[Int(node)]=true
+                root=_plugin_distance_root(parents,Int(node))
+                parents[root]=_plugin_distance_root(parents,first_node)
+            end
+        end
+        if _plugin_distance_boundary(slot,mesh,index,maxdim,ids)
+            for node in record.node_tags;fixed[Int(node)]=true;end
+        end
+    end
+    # A missing selected boundary has no distance problem to publish.
+    any(active .& fixed) || return nothing
+    maxdim>0 || return zeros(nnodes(mesh))
+    anchored=falses(nnodes(mesh))
+    for node in eachindex(active)
+        active[node] && fixed[node] && (anchored[_plugin_distance_root(parents,node)]=true)
+    end
+    # DistanceType is relative to the selected boundary's box. An isolated
+    # physical curve can have a different extent from its source domain.
+    boundary_nodes=findall(fixed)
+    bounds=ntuple(axis->extrema(mesh.coords[axis,node] for node in boundary_nodes),3)
+    lengthscale=hypot(ntuple(axis->bounds[axis][2]-bounds[axis][1],3)...)
+    iszero(lengthscale) && return zeros(nnodes(mesh))
+    isfinite(lengthscale) && lengthscale>0 || throw(ArgumentError(
+        "$caller: diffusion distance needs a finite positive model extent"))
+    origin=ntuple(axis->bounds[axis][1],3)
+    unknown=zeros(Int,nnodes(mesh));count=0
+    for node in eachindex(active)
+        if active[node] && !fixed[node] && anchored[_plugin_distance_root(parents,node)]
+            count+=1;unknown[node]=count
+        end
+    end
+    rows=Int[];columns=Int[];values=Float64[];rhs=zeros(count)
+    # For mu>=1 solve for w=mu^2*s. This keeps a finite small distance
+    # representable even when s itself would underflow.
+    invmu=1/mu
+    root_diffusion=mu>=1 ? 1.0 : mu
+    reaction=mu>=1 ? invmu*invmu : 1.0
+    references=Dict{Int,NTuple{2,NTuple{3,Vector{Float64}}}}()
+    for index in 1:total
+        record=mesh_element_record(mesh,index)
+        record.dimension==maxdim || continue
+        any(node->unknown[Int(node)]!=0,record.node_tags) || continue
+        element_type=Int(record.element_type);spec=msh_spec(element_type)
+        reference=get!(references,element_type) do
+            # The matrix and source have different polynomial degrees.
+            # Keeping their rules separate also reproduces curved-element
+            # diffusion without relying on a corner-geometry approximation.
+            ntuple(2) do part
+                order=2spec.order+(part==1)
+                points,weights=mesh_integration_points(element_type,"Gauss$order";caller)
+                _,basis,_=mesh_basis_functions(element_type,points,"Lagrange";caller)
+                _,gradients,_=mesh_basis_functions(element_type,points,"GradLagrange";caller)
+                (basis,gradients,weights)
+            end
+        end
+        nodes=Int.(record.node_tags);n=length(nodes)
+        coordinates=Matrix{Float64}(undef,3,n)
+        for node in 1:n,axis in 1:3
+            coordinates[axis,node]=(mesh.coords[axis,nodes[node]]-origin[axis])/lengthscale
+        end
+        localmatrix=zeros(n,n);load=zeros(n)
+        derivatives=Matrix{Float64}(undef,maxdim,n)
+        for (part,(basis,gradients,weights)) in enumerate(reference)
+            for q in eachindex(weights)
+                offset=(q-1)*n
+                for node in 1:n,axis in 1:maxdim
+                    derivatives[axis,node]=gradients[3(offset+node-1)+axis]
+                end
+                jacobian=coordinates*transpose(derivatives)
+                triangular=Matrix(LinearAlgebra.qr(jacobian).R)
+                measure=prod(abs(triangular[axis,axis]) for axis in 1:maxdim)
+                isfinite(measure) && measure>0 || throw(ArgumentError(
+                    "$caller: degenerate diffusion element"))
+                weight=weights[q]*measure
+                if part==2
+                    for i in 1:n;load[i]+=weight*basis[offset+i];end
+                    continue
+                end
+                # Weight before squaring or dividing: the unweighted gradient
+                # can be enormous on a valid thin element. Keep mu unsquared
+                # here so a small diffusion coefficient survives amplification.
+                root_measure=prod(sqrt(abs(triangular[axis,axis])) for axis in 1:maxdim)
+                physical=(transpose(triangular)\(derivatives.*root_measure)).*root_diffusion
+                for i in 1:n,j in i:n
+                    stiffness=sum(physical[axis,i]*physical[axis,j] for axis in 1:maxdim)
+                    entry=weights[q]*(stiffness+measure*reaction*basis[offset+i]*basis[offset+j])
+                    localmatrix[i,j]+=entry
+                    i!=j && (localmatrix[j,i]+=entry)
+                end
+            end
+        end
+        for i in 1:n
+            row=unknown[nodes[i]];row==0 && continue
+            rhs[row]+=load[i]
+            for j in 1:n
+                column=unknown[nodes[j]];column==0 && continue
+                push!(rows,row);push!(columns,column);push!(values,localmatrix[i,j])
+            end
+        end
+    end
+    solution=_fem_solve_spd(count,rows,columns,values,rhs)
+    distance=zeros(nnodes(mesh))
+    # A disconnected natural-only component has the exact constant solution
+    # s=1. Handle it directly, including when 1/mu^2 underflows to zero.
+    for node in eachindex(active)
+        if active[node] && !anchored[_plugin_distance_root(parents,node)]
+            distance[node]=_plugin_distance_product(-log1p(-0.9999),mu,lengthscale)
+        end
+    end
+    for node in eachindex(unknown)
+        row=unknown[node];row==0 && continue
+        value=solution[row]
+        s=mu>=1 ? (value*invmu)*invmu : value
+        if s>=0.9999
+            distance[node]=_plugin_distance_product(-log1p(-0.9999),mu,lengthscale)
+        elseif mu>=1
+            ratio=s==0 ? 1.0 : -log1p(-s)/s
+            distance[node]=_plugin_distance_product(value,invmu,ratio,lengthscale)
+        else
+            distance[node]=_plugin_distance_product(-log1p(-s),mu,lengthscale)
+        end
+    end
+    all(isfinite,distance) || throw(ArgumentError(
+        "$caller: diffusion distance exceeds the finite output range"))
+    return distance
+end
 
 # These use the same guarded geometric kernels as DistanceField, without its
 # mesh-size cap: plugin output contains physical distances in model units.
@@ -5316,11 +5485,14 @@ function _plugin_exec_distance(spec::_PluginSpec,caller::AbstractString)
                 "Physical Surface $id_face does not exist")
         end
     else
-        # Upstream HAVE_SOLVER arm: diffusion-PDE distance. Not yet ported —
-        # emit the same empty named view upstream's non-solver build makes.
-        _plugin_publish_list_view!("distance",String[],Dict{String,Int}(),
-            Dict{String,Vector{Float64}}(),[0.0];caller)
-        return nothing
+        solved=_plugin_distance_pde(mesh,slot,total,maxdim,dtype,
+            (id_point,id_line,id_face),caller)
+        if solved===nothing
+            _plugin_publish_list_view!("distance",String[],Dict{String,Int}(),
+                Dict{String,Vector{Float64}}(),[0.0];caller)
+            return nothing
+        end
+        best=solved
     end
     # `distanceMap`: vertices untouched by any boundary element keep 0.
     dist=[isfinite(best[k]) ? best[k] : 0.0 for k in 1:nn]
