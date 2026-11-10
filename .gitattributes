@@ -575,3 +575,7 @@ test/data/native_hybrid_import_events_4152_v1/native_hybrid_import_source_4152_v
 /validation/occ_shape_registry/occ_zero_msh_roundtrip_primary_v1_3.msh -text
 /validation/occ_shape_registry/occ_zero_surface_literal_v1.jl -text
 /validation/weighted_matching/corpus.tsv -text
+
+# Preserve native BREP fixture bytes, including writer-emitted terminal spaces.
+/test/fixtures/brep_native_pcurve_edge_*.brep -text whitespace=-blank-at-eol
+/test/fixtures/brep_native_trimmed_planar_curve.brep -text whitespace=-blank-at-eol

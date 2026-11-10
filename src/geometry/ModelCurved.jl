@@ -1161,9 +1161,10 @@ function _occ_geometry_checked(m::GeoModel, tag::Int, caller::AbstractString)
     return g
 end
 
-# Rim samples standing in for the vertices an OCC circle collapses: a plane
-# bounded by a single closed circle still yields three non-collinear points
-# for the exact fit. Returns (coordinates, stand-in point tags) pairs.
+# Geometric witnesses supplement topological endpoints when a closed OCC
+# boundary has only one Vertex. Evaluate copied curves on their actual
+# trimmed knot spans; unused support controls need not lie in the Face's
+# plane. No extra CAD Points are introduced.
 function _occ_surface_samples(m::GeoModel, surface::Int,
                               caller::AbstractString)
     samples=NTuple{3,Float64}[]
@@ -1172,16 +1173,26 @@ function _occ_surface_samples(m::GeoModel, surface::Int,
         curve=abs(signed)
         occ=_occ_geometry_checked(m,curve,caller)
         occ===nothing && continue
-        source=occ.occ===:copied_curve ? get(occ,:converted_from,nothing) :
-            occ.occ
+        if occ.occ===:copied_curve
+            a,_=m.curves[curve]
+            native=occ.curve.curve
+            cuts=sort!(unique!(Float64[occ.t0;
+                [knot for knot in native.knots if occ.t0<knot<occ.t1];occ.t1]))
+            count=max(3,native.degree)
+            for index in 1:length(cuts)-1,ordinal in 0:count
+                parameter=_convex_coordinate(cuts[index],cuts[index+1],ordinal/count)
+                push!(samples,_model_occ_curve_d2(occ.curve,parameter)[1])
+                push!(tags,a)
+            end
+            continue
+        end
+        source=occ.occ
         source in (:circle,:ellipse) || continue
         a,_=m.curves[curve]
         for k in 0:2
             t=occ.t0+(occ.t1-occ.t0)*(k/3)
-            push!(samples,occ.occ===:copied_curve ?
-                _model_occ_curve_d2(occ.curve,t)[1] :
-                occ.occ===:circle ? _occ_circle_point(occ,t) :
-                                   _occ_ellipse_point(occ,t))
+            push!(samples,occ.occ===:circle ? _occ_circle_point(occ,t) :
+                _occ_ellipse_point(occ,t))
             push!(tags,a)
         end
     end

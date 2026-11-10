@@ -155,9 +155,10 @@ function _occ_pcurve_d2(pc::NamedTuple{(:brep_inverse2d,)},t::Float64)
         regular ? ((c*x-b*y)/determinant,(a*y-b*x)/determinant) :
             a>=c && a>0 ? (x/a,0.0) : c>0 ? (0.0,y/c) : (0.0,0.0)
     end
-    first=solve(tangent)
-    correction=ntuple(i->acceleration[i]-duu[i]*first[1]^2-
-        dvv[i]*first[2]^2-2duv[i]*first[1]*first[2],3)
+    tangent_uv=solve(tangent)
+    correction=ntuple(i->acceleration[i]-duu[i]*tangent_uv[1]^2-
+        dvv[i]*tangent_uv[2]^2-2duv[i]*tangent_uv[1]*tangent_uv[2],3)
+    first=tangent_uv
     second=solve(correction)
     if !regular
         # Resolve the invisible pole coordinate by the one-sided regular

@@ -454,17 +454,14 @@ end
 
 function _occ_pcurve_d2(pc::NamedTuple{(:brep_conic2d,)},t::Float64)
     curve=pc.brep_conic2d
-    if curve.kind==4
+    values=if curve.kind==4
         curve.a>0 || throw(ArgumentError("BREP parabola focal length must be positive"))
-        x=t*t/(4curve.a); y=t
-        dx=t/(2curve.a); dy=1.0
-        ddx=1/(2curve.a); ddy=0.0
+        (t*t/(4curve.a),t,t/(2curve.a),1.0,1/(2curve.a),0.0)
     else
         s=Base.sinh(t); c=Base.cosh(t)
-        x=curve.a*c; y=curve.b*s
-        dx=curve.a*s; dy=curve.b*c
-        ddx=x; ddy=y
+        (curve.a*c,curve.b*s,curve.a*s,curve.b*c,curve.a*c,curve.b*s)
     end
+    x,y,dx,dy,ddx,ddy=values
     p=ntuple(i->curve.center[i]+x*curve.X[i]+y*curve.Y[i],2)
     d=ntuple(i->dx*curve.X[i]+dy*curve.Y[i],2)
     dd=ntuple(i->ddx*curve.X[i]+ddy*curve.Y[i],2)
@@ -797,13 +794,31 @@ function _model_occ_import_brep_source(m::GeoModel,source::String;
                 parameter_maps[result]=(1.0,0.0)
                 result
             else
-                ri===nothing && throw(ArgumentError(
-                    "$caller: native BREP edge without a 3-D curve is not implemented"))
-                r=records[ri]
-                curve=_occ_brep_lookup(parsed.curves3,r.curve,caller,"3-D curve")
-                original=_occ_brep_curve_geometry(curve,r.lo,r.hi,caller)
+                if ri===nothing
+                    primary=findfirst(r->r.kind in (2,3),records)
+                    primary===nothing && throw(ArgumentError(
+                        "$caller: regular BREP edge has no curve representation"))
+                    r=records[primary]
+                    pc=_occ_brep_lookup(parsed.curves2,r.curve,caller,"2-D curve")
+                    surface=_occ_brep_lookup(parsed.surfaces,r.surface,caller,"surface")
+                    original=_occ_brep_trace_curve(surface,pc,r.lo,r.hi,caller)
+                else
+                    r=records[ri]
+                    curve=_occ_brep_lookup(parsed.curves3,r.curve,caller,"3-D curve")
+                    original=_occ_brep_curve_geometry(curve,r.lo,r.hi,caller)
+                end
                 trsf=_occ_brep_affine(placed(location_key,r.location))
                 g=_transform_occ_curve_record(scratch,0,original,trsf,caller,"BREP edge")
+                if ri===nothing
+                    for (vertex,parameter) in ((a,g.t0),(b,g.t1))
+                        expected=kernel.shapes[vertex].geometry.point
+                        actual=_occ_brep_edge_d2(g,parameter)[1]
+                        tolerance=max(8max(data.tolerance,_OCC_CONFUSION),
+                            64eps(Float64)*max(1.,maximum(abs,expected)))
+                        hypot((actual[axis]-expected[axis] for axis in 1:3)...)<=tolerance ||
+                            throw(ArgumentError("$caller: BREP surface trace misses its edge vertex"))
+                    end
+                end
                 result=bind(1,(kind=g.occ,geometry=g),UInt64[a,b])
                 alpha=(r.hi-r.lo)/(g.t1-g.t0)
                 reflected=original.occ in (:circle,:ellipse) &&
@@ -1080,3 +1095,4 @@ end
 
 include("ModelOCCBREPTrace.jl")
 include("ModelOCCBREPNatural.jl")
+include("ModelOCCBREPEdge.jl")

@@ -6982,10 +6982,31 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     # the first writer of a uv position owns the metadata too.
     vertex_meta=Dict{NTuple{2,Float64},
         Tuple{Tuple{Int,Int32},Union{Nothing,Vector{Float64}}}}()
+    # Writer-rounded pcurves of the same cylindrical seam corner can
+    # disagree by a few parameter ulps (e.g. 2π versus its decimal record).
+    # Reconcile only repeated actual lower-node identities. Distinct CAD
+    # entities and the two chart representatives separated by a period keep
+    # their own vertices.
+    lower_preimages=Dict{Tuple{Int,Int32,Float64},Vector{NTuple{2,Float64}}}()
+    uv_tolerance=occ===:cylinder ?
+        (128eps(Float64)*period,128eps(Float64)*abs(sg.height)) : (0.,0.)
     function emit(uv,p3,owner,param)
-        return get!(index,uv) do
-            push!(xs,uv[1]);push!(ys,uv[2]);push!(lift,p3)
-            vertex_meta[uv]=(owner,param)
+        adjusted=uv
+        if occ===:cylinder && (owner[1]==0 || owner[1]==1 && length(param)==1)
+            key=(owner[1],owner[2],owner[1]==0 ? 0. : param[1])
+            preimages=get!(()->NTuple{2,Float64}[],lower_preimages,key)
+            for previous in preimages
+                adjusted=(abs(adjusted[1]-previous[1])<=uv_tolerance[1] ?
+                    previous[1] : adjusted[1],
+                    abs(adjusted[2]-previous[2])<=uv_tolerance[2] ?
+                    previous[2] : adjusted[2])
+            end
+            adjusted in preimages || push!(preimages,adjusted)
+        end
+        position=adjusted
+        return get!(index,position) do
+            push!(xs,position[1]);push!(ys,position[2]);push!(lift,p3)
+            vertex_meta[position]=(owner,param)
             return length(xs)
         end
     end
