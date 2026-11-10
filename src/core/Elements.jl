@@ -1617,6 +1617,16 @@ end
 _scaled_mesh_copy(m,sf)=throw(ArgumentError(
     "_scaled_mesh_copy: unsupported mesh type $(typeof(m))"))
 
+@noinline function _barycentric_mean_exact(values)
+    R=Rational{BigInt}
+    return Float64(sum(R,values)/length(values))
+end
+
+@inline function _barycentric_mean(total::Float64,values)
+    isfinite(total) && return total/length(values)
+    return _barycentric_mean_exact(values)
+end
+
 """
     barycentric_refine(m::MixedMesh) -> MixedMesh
 
@@ -1684,10 +1694,12 @@ function barycentric_refine(m::MixedMesh)
         for j in 1:ncell
             v=block.nodes[:,j]
             center=ntuple(d->begin
-                acc=Float64(m.coords[d,v[1]])+Float64(m.coords[d,v[2]])+
-                    Float64(m.coords[d,v[3]])
-                degree==4 && (acc+=Float64(m.coords[d,v[4]]))
-                acc/degree
+                coordinate_three=(m.coords[d,v[1]],m.coords[d,v[2]],m.coords[d,v[3]])
+                coordinate_values=degree==4 ?
+                    (coordinate_three...,m.coords[d,v[4]]) : coordinate_three
+                acc=coordinate_values[1]+coordinate_values[2]+coordinate_values[3]
+                degree==4 && (acc+=coordinate_values[4])
+                _barycentric_mean(acc,coordinate_values)
             end,3)
             push!(appends,center)
             cindex=Int32(ncoords+length(appends))
@@ -1701,14 +1713,16 @@ function barycentric_refine(m::MixedMesh)
                 param=nothing
                 if all(k->data.node_entities[v[k]]==(model_dim,parent_entity),
                        1:degree)
-                    parents=(data.node_parametric[v[1]],
-                             data.node_parametric[v[2]],
-                             data.node_parametric[v[3]])
-                    degree==4 &&
-                        (parents=(parents...,data.node_parametric[v[4]]))
-                    all(p->p!==nothing && length(p)==model_dim,parents) &&
-                        (param=[sum(getindex.(parents,i))/degree
-                                for i in 1:model_dim])
+                    first_three=(data.node_parametric[v[1]],
+                                 data.node_parametric[v[2]],
+                                 data.node_parametric[v[3]])
+                    parents=degree==4 ? (first_three...,data.node_parametric[v[4]]) : first_three
+                    if all(p->p!==nothing && length(p)==model_dim,parents)
+                        param=map(1:model_dim) do i
+                            values=map(p->(p::Vector{Float64})[i],parents)
+                            _barycentric_mean(sum(values),values)
+                        end
+                    end
                 end
                 push!(append_parametric,param)
                 push!(append_tags,next_node_tag+=UInt64(1))
@@ -1774,10 +1788,12 @@ function barycentric_refine(m::Mesh)
         for j in 1:ncell
             v=nodes[:,j]
             center=ntuple(d->begin
-                acc=Float64(m.coords[d,v[1]])+Float64(m.coords[d,v[2]])+
-                    Float64(m.coords[d,v[3]])
-                degree==4 && (acc+=Float64(m.coords[d,v[4]]))
-                acc/degree
+                coordinate_three=(m.coords[d,v[1]],m.coords[d,v[2]],m.coords[d,v[3]])
+                coordinate_values=degree==4 ?
+                    (coordinate_three...,m.coords[d,v[4]]) : coordinate_three
+                acc=coordinate_values[1]+coordinate_values[2]+coordinate_values[3]
+                degree==4 && (acc+=coordinate_values[4])
+                _barycentric_mean(acc,coordinate_values)
             end,3)
             push!(appends,center)
             cindex=Int32(size(m.coords,2)+length(appends))
