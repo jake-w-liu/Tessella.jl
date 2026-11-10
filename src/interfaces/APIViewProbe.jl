@@ -205,14 +205,20 @@ function _view_probe_coordinates(record,point)
         _view_probe_precise_coordinates!(location,record)===nothing && return nothing
         return location
     end
+    location=_ViewProbeLocation(coordinates,point,nothing)
+    # Rounded reconstruction can equal the original point while hiding an
+    # error amplified by a thin map. Share the field's exact-tail residual and
+    # intrinsic accuracy budget before filtering the rounded reference point.
+    if SizeField._pv_query_roundtrip_differs(point,query,base,scale)
+        derivatives=SizeField._pv_scheme_jacobian(cell,coordinates...,base,scale)
+        if SizeField._pv_normalization_needs_precision(coordinates,point,query,
+                base,scale,derivatives,record.dim)
+            _view_probe_precise_coordinates!(location,record)===nothing && return nothing
+            return location
+        end
+    end
     SizeField._pv_scheme_inside(cell.kind,coordinates...,
         MeshPointLocation.STRICT_REFERENCE_TOLERANCE) || return nothing
-    location=_ViewProbeLocation(coordinates,point,nothing)
-    # Reconstructing the physical query catches a small endpoint offset lost
-    # by normalization about a far-away first node.
-    if any(axis->muladd(query[axis],scale,base[axis])!=point[axis],1:3)
-        _view_probe_precise_coordinates!(location,record)===nothing && return nothing
-    end
     return location
 end
 

@@ -3113,6 +3113,7 @@ function _pv_rebased_geometry_bounds(cell)
     mu=nextfloat(operations*(eps(Float64)/2))
     isfinite(mu) && mu<0.5 || return full
     gamma=nextfloat(mu/prevfloat(1.0-mu))
+    roundoff_operations=operations
     bounds=ntuple(3) do axis
         if all(term->iszero(geometry.coefficients[axis,term]),axes(geometry.coefficients,2))
             value=geometry.origin[axis]
@@ -3132,7 +3133,7 @@ function _pv_rebased_geometry_bounds(cell)
             lo=prevfloat(lo+lower);hi=nextfloat(hi+upper)
             mass=nextfloat(mass+abs(c))
         end
-        norm_floor=nextfloat(nextfloat(0.0)*operations)
+        norm_floor=nextfloat(nextfloat(0.0)*roundoff_operations)
         norm_floor=nextfloat(norm_floor*nextfloat(mass+1.0))
         norm_error=nextfloat(nextfloat(gamma*mass)+norm_floor)
         lo=prevfloat(lo-norm_error);hi=nextfloat(hi+norm_error)
@@ -3142,7 +3143,7 @@ function _pv_rebased_geometry_bounds(cell)
         # translations perpendicular to an otherwise very thin element.
         magnitude=nextfloat(abs(origin)+nextfloat(scale*mass))
         floor=nextfloat(nextfloat(0.0)*max(1.0,scale))
-        floor=nextfloat(nextfloat(floor*operations)*nextfloat(mass+1.0))
+        floor=nextfloat(nextfloat(floor*roundoff_operations)*nextfloat(mass+1.0))
         error=nextfloat(nextfloat(gamma*magnitude)+floor)
         lower=prevfloat(lo-error);upper=nextfloat(hi+error)
         return isfinite(lower) && isfinite(upper) ? (lower,upper) : (-extent,extent)
@@ -4805,8 +4806,11 @@ function _pv_scheme_precise_certificate(cell,coordinates,query,base,scale,tolera
             normal=derivatives[axis]
             denominator=sum(abs2,normal)
             denominator>0 || return nothing
-            reference[axis]=sum(residual[i]*normal[i] for i in 1:3)/denominator
-            residual=ntuple(i->residual[i]-reference[axis]*normal[i],3)
+            reference[axis]=(residual[1]*normal[1]+residual[2]*normal[2]+
+                residual[3]*normal[3])/denominator
+            residual=(residual[1]-reference[axis]*normal[1],
+                residual[2]-reference[axis]*normal[2],
+                residual[3]-reference[axis]*normal[3])
         end
     end
     all(isfinite,reference) || return nothing
