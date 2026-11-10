@@ -179,6 +179,8 @@ end
         @test A.mesh.get_nodes()[2]==source
         @test_throws ArgumentError run_layers("1";thickness=0.)
         @test_throws ArgumentError run_layers("1";ratio=1e-300)
+        @test A._bl_layer_offsets(.03,.01,1.,"test")≈[.01,.02,.03]
+        @test_throws ArgumentError A._bl_layer_offsets(2.,1e-5,1.,"test")
         empty=counts()
         @test empty[1]==16 && empty[2]==44 && get(empty,3,0)==0
         @test A.mesh.get_nodes()[1]==tags

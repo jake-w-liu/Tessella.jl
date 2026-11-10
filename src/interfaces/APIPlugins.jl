@@ -2189,7 +2189,10 @@ end
 # model view's scalar values in this mode; with no OtherView it is a no-op.
 function _plugin_warp_model!(numbers,tag,view,caller)
     factor=_mesh_query_coordinate(numbers["Factor"],caller,"Factor")
-    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    raw_step=numbers["TimeStep"]
+    (isfinite(raw_step) && raw_step==floor(raw_step)) || throw(ArgumentError(
+        "$caller: TimeStep must be an integer"))
+    timestep=Int(raw_step)
     raw_other=numbers["OtherView"]
     raw_other<0 && return nothing
     raw_other==floor(raw_other) || throw(ArgumentError(
@@ -2205,13 +2208,16 @@ function _plugin_warp_model!(numbers,tag,view,caller)
     key=(timestep,"NodeData")
     haskey(other.model_data,key) || throw(ArgumentError(
         "$caller: Invalid TimeStep ($timestep) in View[$otag]"))
-    tags,values,nc=other.model_data[key]
-    nc==3 || throw(ArgumentError(
-        "$caller: model Warp OtherView must have three components"))
     _slot_capture_locked!()
     index=_current_slot_index_locked()
     index==0 && throw(ArgumentError("$caller: no current model"))
     slot=MODEL_SLOTS[index]
+    context=other.model_contexts[key]
+    context.model_slot===slot || throw(ArgumentError(
+        "$caller: OtherView step $timestep belongs to a different model"))
+    tags,values,nc=other.model_data[key]
+    nc==3 || throw(ArgumentError(
+        "$caller: model Warp OtherView must have three components"))
     cached=slot.mesh
     if cached isa MixedMesh && cached.entity_data===nothing &&
             (!isempty(cached.periodic_links) ||
@@ -9637,7 +9643,13 @@ function _bl_layer_offsets(thickness,size,ratio,caller)
         (isfinite(quotient) && quotient<=max_layers) || throw(ArgumentError(
             "$caller: layer count exceeds the supported bound $max_layers"))
         count=floor(Int,quotient+8eps(Float64))
-        return Float64[size*k for k in 1:count]
+        offsets=Float64[]
+        for k in 1:count
+            next=size*k
+            (isfinite(next) && next<=thickness*(1+8eps(Float64))) || return offsets
+            push!(offsets,next)
+        end
+        return offsets
     elseif ratio<1.0
         # The widths form a finite geometric series; an unreachable
         # thickness must fail instead of underflowing to a zero width.
@@ -9714,9 +9726,9 @@ function _bl_segment_normal(mixed,blocks,data,a,b,selected_surfaces,caller)
     starts=mixed.coords[:,a];finishes=mixed.coords[:,b]
     tangent=_bl_sub(finishes,starts)
     tangent=_bl_unit(tangent,caller)
-    midpoint=_bl_scale(_bl_add(starts,finishes),.5)
+    midpoint=_bl_add(starts,_bl_scale(tangent,.5))
     accumulator=(0.,0.,0.);surface=0;physical=Int32(0)
-    reference=nothing;surfaces=Set{Int}()
+    reference=nothing;surfaces=Set{Int}();incident_cells=0
     for (bi,block) in enumerate(blocks)
         msh_dimension(block.msh)==2 || continue
         for column in axes(block.nodes,2)
@@ -9724,11 +9736,17 @@ function _bl_segment_normal(mixed,blocks,data,a,b,selected_surfaces,caller)
             _bl_has_edge(nodes,a,b) || continue
             owner=Int(data.block_entities[bi][column])
             isempty(selected_surfaces) || owner in selected_surfaces || continue
-            centroid=ntuple(axis->sum(mixed.coords[axis,nodes])/length(nodes),3)
+            incident_cells+=1
+            # Relative to the segment start so large absolute coordinates
+            # do not overflow the centroid sum.
+            centroid=ntuple(axis->starts[axis]+
+                sum(mixed.coords[axis,node]-starts[axis] for node in nodes)/
+                length(nodes),3)
             direction=_bl_sub(centroid,midpoint)
             projected=_bl_sub(direction,_bl_scale(tangent,_bl_dot(direction,tangent)))
             norm=hypot(projected...)
-            norm>1e-12*max(hypot(direction...),eps(Float64)) || continue
+            scale=hypot(direction...)
+            (scale>0 && norm>1e-12*scale) || continue
             accumulator=_bl_add(accumulator,_bl_scale(projected,1/norm))
             push!(surfaces,owner)
             if surface==0
@@ -9741,6 +9759,8 @@ function _bl_segment_normal(mixed,blocks,data,a,b,selected_surfaces,caller)
     end
     surface==0 && throw(ArgumentError(
         "$caller: selected curve segment is not on a surface boundary"))
+    incident_cells==1 || throw(ArgumentError(
+        "$caller: selected curve lies on an internal or crease edge; name Surfaces"))
     length(surfaces)==1 || throw(ArgumentError(
         "$caller: selected curve lies on an internal or crease edge; name Surfaces"))
     reference===nothing && throw(ArgumentError(
@@ -9815,6 +9835,9 @@ function _plugin_exec_boundarylayer(spec::_PluginSpec,caller::AbstractString)
     data=mixed.entity_data
     any(block->msh_dimension(block.msh)==3,mixed.blocks) && throw(ArgumentError(
         "$caller: volumetric boundary layers are not supported"))
+    any(block->msh_dimension(block.msh)==2 && !(block.msh in (2,3)),
+        mixed.blocks) && throw(ArgumentError(
+        "$caller: higher-order surface boundary layers are not supported"))
     offsets=_bl_layer_offsets(spec.numbers["Thickness"],spec.numbers["Size"],
         spec.numbers["Ratio"],caller)
     isempty(offsets) && return nothing

@@ -32,11 +32,15 @@ function _plugin_model_smooth!(view,caller)
             next=Base.checked_add(offset,width)
             next<=length(values)+1 || throw(ArgumentError(
                 "$caller: malformed model data row extents"))
-            view.model_kind=="ElementNodeData" && width%nc!=0 &&
-                throw(ArgumentError(
+            if view.model_kind=="ElementData"
+                width==nc || throw(ArgumentError(
                     "$caller: malformed model data row extents"))
+            else
+                width%nc==0 || throw(ArgumentError(
+                    "$caller: malformed model data row extents"))
+            end
             index=_plugin_element_index(mesh,source.public,tag)
-            if index!=0 && (view.model_kind=="ElementNodeData" || width>=nc)
+            if index!=0
                 record=mesh_element_record(mesh,index)
                 # Short ElementNodeData rows leave trailing node positions
                 # undefined; skip those positions rather than averaging a

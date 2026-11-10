@@ -138,6 +138,9 @@ end
         A.plugin.set_number("Warp","TimeStep",5.)
         @test_throws ArgumentError A.plugin.run("Warp")
         @test coords()==before
+        A.plugin.set_number("Warp","TimeStep",1.5)
+        @test_throws ArgumentError A.plugin.run("Warp")
+        @test coords()==before
         A.plugin.set_number("Warp","TimeStep",0.)
         bad=A.view.add("bad")
         A.view.add_model_data(bad,0,"warp","NodeData",[999],

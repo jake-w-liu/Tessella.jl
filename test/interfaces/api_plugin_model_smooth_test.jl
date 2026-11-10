@@ -138,6 +138,23 @@ end
     end
 end
 
+@testset "Malformed ElementData rows are rejected atomically" begin
+    session() do
+        A.model.add("partial element")
+        A.model.add_discrete_entity(2,1)
+        A.mesh.add_nodes(2,1,[1,2,3],
+            [0.,0.,0.,1.,0.,0.,0.,1.,0.])
+        A.mesh.add_elements_by_type(1,2,[11],[1,2,3])
+        view=A.view.add("v")
+        A.view.add_model_data(view,0,"partial element","ElementData",[11],
+            [[1.,2.,3.]],0.0,2)
+        before=A.view.get_model_data(view,0)
+        A.plugin.set_number("Smooth","View",view)
+        @test_throws ArgumentError A.plugin.run("Smooth")
+        @test A.view.get_model_data(view,0)==before
+    end
+end
+
 @testset "Steps, times, partitions and multiple models survive projection" begin
     session() do
         tri3()
