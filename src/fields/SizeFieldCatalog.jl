@@ -1892,15 +1892,16 @@ end
 function _lonlat_value(field::LonLatField,x,y,z,entity)
     x=_float_value(x,"LonLatField","x"); y=_float_value(y,"LonLatField","y")
     z=_float_value(z,"LonLatField","z")
-    if field.from_stereo
-        r2=field.radius*field.radius
-        den=4*r2+x*x+y*y
-        den==0 && return GMSH_MAX_SIZE
-        X=4*r2*x/den; Y=4*r2*y/den
-        Z=field.radius*(4*r2-x*x-y*y)/den
-        x,y,z=X,Y,Z
+    az=if field.from_stereo
+        scale=max(abs(x),abs(y),field.radius)
+        sx=x/scale;sy=y/scale;diameter=2*(field.radius/scale)
+        radial=sx*sx+sy*sy;polar=diameter*diameter
+        # The common positive stereographic scale does not change longitude.
+        # Form latitude directly from bounded dimensionless components.
+        (polar-radial)/(polar+radial)
+    else
+        z/field.radius
     end
-    az=z/field.radius
     # Gmsh's asin produces an invalid sample outside the sphere; represent the
     # resulting unconstrained field explicitly instead of leaking NaN.
     abs(az)<=1 || return GMSH_MAX_SIZE
@@ -2076,30 +2077,80 @@ function StructuredField(path::AbstractString; text::Bool=true, outside=nothing,
         rethrow()
     end
 end
+function _structured_axis(field,coordinate,axis)
+    count=(field.nx,field.ny,field.nz)[axis]
+    count==1 && return (1,1,0.0,false,false)
+    origin=field.origin[axis];delta=field.delta[axis]
+    difference=coordinate-origin;t=difference/delta
+    if !isfinite(difference) || (t==0 && difference!=0) || 0<abs(t)<floatmin(Float64)
+        return (1,1,0.0,false,true)
+    end
+    if field.outside!==nothing
+        t<0 && return (1,1,0.0,true,false)
+        if t>=count-1
+            endpoint_residual=_pv_normalization_residual(coordinate,
+                Float64(count-1),origin,delta)
+            isfinite(endpoint_residual) || return (1,1,0.0,false,true)
+            before_endpoint=endpoint_residual!=0 &&
+                signbit(endpoint_residual)!=signbit(delta)
+            # Division can round an interior coordinate to the upper endpoint.
+            # Only its exact-tail signed residual can certify OutsideValue.
+            return (1,1,0.0,!before_endpoint,before_endpoint)
+        end
+    end
+    t<0 && return (1,1,0.0,false,false)
+    lower=floor(Int,clamp(t,0.0,Float64(count-1)))
+    residual=_pv_normalization_residual(coordinate,Float64(lower),origin,delta)
+    isfinite(residual) || return (1,1,0.0,false,true)
+    fraction=residual/delta
+    if lower==count-1
+        return (count,count,0.0,false,fraction<0)
+    end
+    if !isfinite(fraction) || fraction<0 || fraction>1 ||
+            (fraction==0 && residual!=0) || 0<abs(fraction)<floatmin(Float64)
+        return (1,1,0.0,false,true)
+    end
+    return (lower+1,lower+2,fraction,false,false)
+end
+
+@noinline function _structured_value_exact(field,point)
+    R=Rational{BigInt}
+    axes=ntuple(3) do axis
+        count=(field.nx,field.ny,field.nz)[axis]
+        count==1 && return (1,1,R(0),false)
+        t=(R(point[axis])-R(field.origin[axis]))/R(field.delta[axis])
+        field.outside!==nothing && (t<0 || t>=count-1) && return (1,1,R(0),true)
+        t=clamp(t,R(0),R(count-1))
+        lower=floor(Int,t);upper=min(lower+1,count-1)
+        return (lower+1,upper+1,t-lower,false)
+    end
+    any(axis->axis[4],axes) && return field.outside::Float64
+    value=R(0)
+    for i in 0:1,j in 0:1,k in 0:1
+        indices=(axes[1][i+1],axes[2][j+1],axes[3][k+1])
+        weights=(i==0 ? 1-axes[1][3] : axes[1][3],
+                 j==0 ? 1-axes[2][3] : axes[2][3],
+                 k==0 ? 1-axes[3][3] : axes[3][3])
+        value+=R(field.data[indices...])*weights[1]*weights[2]*weights[3]
+    end
+    return Float64(value)
+end
+
 function field_value(field::StructuredField,x,y,z)
     x=_float_value(x,"StructuredField","x"); y=_float_value(y,"StructuredField","y")
     z=_float_value(z,"StructuredField","z")
-    xyz=(x,y,z); id0=Vector{Int}(undef,3); id1=Vector{Int}(undef,3); ξ=Vector{Float64}(undef,3)
-    @inbounds for i in 1:3
-        t=(xyz[i]-field.origin[i])/field.delta[i]
-        i0=floor(Int,t); i1=i0+1; n=(field.nx,field.ny,field.nz)[i]
-        if field.outside!==nothing && n>1 && (i0<0 || i1>=n)
-            return field.outside::Float64
-        end
-        i0=clamp(i0,0,n-1); i1=clamp(i1,0,n-1)
-        id0[i]=i0+1; id1[i]=i1+1
-        ξ[i]=clamp((xyz[i]-(field.origin[i]+i0*field.delta[i]))/field.delta[i],0.0,1.0)
+    point=(x,y,z);axes=ntuple(axis->_structured_axis(field,point[axis],axis),3)
+    any(axis->axis[5],axes) && return _checked_field_result(
+        _structured_value_exact(field,point),"StructuredField",x,y,z)
+    any(axis->axis[4],axes) && return field.outside::Float64
+    a,b,c=axes
+    @inbounds begin
+        x00=_field_lerp(field.data[a[1],b[1],c[1]],field.data[a[2],b[1],c[1]],a[3])
+        x10=_field_lerp(field.data[a[1],b[2],c[1]],field.data[a[2],b[2],c[1]],a[3])
+        x01=_field_lerp(field.data[a[1],b[1],c[2]],field.data[a[2],b[1],c[2]],a[3])
+        x11=_field_lerp(field.data[a[1],b[2],c[2]],field.data[a[2],b[2],c[2]],a[3])
     end
-    v=0.0
-    @inbounds for a in 0:1, b in 0:1, c in 0:1
-        ia=a==0 ? id0[1] : id1[1]
-        ib=b==0 ? id0[2] : id1[2]
-        ic=c==0 ? id0[3] : id1[3]
-        wa=a==0 ? 1-ξ[1] : ξ[1]
-        wb=b==0 ? 1-ξ[2] : ξ[2]
-        wc=c==0 ? 1-ξ[3] : ξ[3]
-        v+=field.data[ia,ib,ic]*wa*wb*wc
-    end
+    v=_field_lerp(_field_lerp(x00,x10,b[3]),_field_lerp(x01,x11,b[3]),c[3])
     return _checked_field_result(v,"StructuredField",x,y,z)
 end
 
@@ -2337,6 +2388,13 @@ end
 
 field_value(::ExtendField,x,y,z)=GMSH_MAX_SIZE
 field_value(::ExtendField,x,y,z,::Nothing)=GMSH_MAX_SIZE
+
+@noinline function _extend_value_exact(sample,factor,global_factor,weight,size_max)
+    R=Rational{BigInt}
+    return Float64(R(weight)*R(sample)/(R(factor)*R(global_factor))+
+        (1-R(weight))*R(size_max))
+end
+
 function field_value(field::ExtendField,x,y,z,entity::Tuple{T,U}) where
         {T<:Integer,U<:Integer}
     p=(_float_value(x,"ExtendField","x"),_float_value(y,"ExtendField","y"),
@@ -2348,9 +2406,17 @@ function field_value(field::ExtendField,x,y,z,entity::Tuple{T,U}) where
     best>=field.dist_max && return field.size_max
     f=(field.dist_max-best)/field.dist_max
     field.power!=1 && (f=f^field.power)
-    factor=get(field.entity_factors,(dim,tag),1.0)*field.global_factor
+    isfinite(f) || return _checked_field_result(f,"ExtendField",p...;positive=true)
+    entity_factor=get(field.entity_factors,(dim,tag),1.0)
+    factor=entity_factor*field.global_factor
     boundary_size=samples.sizes[ibest]/factor
-    value=f*boundary_size+(1-f)*field.size_max
+    value=if !isfinite(factor) || factor<floatmin(Float64) ||
+            !isfinite(boundary_size) || boundary_size==0
+        _extend_value_exact(samples.sizes[ibest],entity_factor,
+            field.global_factor,f,field.size_max)
+    else
+        _field_lerp(field.size_max,boundary_size,f)
+    end
     return _checked_field_result(value,"ExtendField",p...;positive=true)
 end
 
