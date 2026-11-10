@@ -57,9 +57,11 @@ the full per-row ledger remains authoritative for additional subitems:
   minimal-compiler GmshLibm diagnoses against current source.
 - Natural finite sphere/torus/B-spline/plane faces, closed natural solids,
   crossed-cylinder seams/fuse images, centroidal CAD measures and the wedge
-  orientation are now implemented and default-wired. Remaining BREP families
-  include nondegenerate pcurve-only edges, hyperbolas/general offsets and
-  internal/external orientations and translation-stable natural-solid moments;
+  orientation are now implemented and default-wired. Native pcurve-only edges
+  also retain their exact composed geometry, derivatives, affine images and
+  trimmed planar witnesses. Natural-solid moments retain a nearby frame and
+  rational faces use bounded adaptive quadrature. Remaining BREP families
+  include hyperbolas/general offsets and internal/external orientations;
   general quadric-bounded shell inertia still rejects rather than approximating.
 - Full-quad and anisotropic integration with embedded, transfinite, smoothing,
   periodic/compound, and curved/scalar-field contexts.

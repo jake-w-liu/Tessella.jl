@@ -6,17 +6,17 @@
 # `degenerate` collapses to (0, point). Faces measure per-record: the
 # plane's pcurve shoelace with conic-segment corrections and the
 # outer-minus-holes convention, closed-form `∫P·dA` over canonical
-# cylinder/cone/sphere/torus domains, and full-knot-domain tensor
-# quadrature for NURBS patches (OCC tensor faces always cover their
-# whole patch). Solids measure through the compact `primitive` record
-# where present, the torus-sector Pappus integrals, or the divergence
-# theorem over all-plane shells — anything else rejects loudly rather
-# than approximating, per the codebase's reject-before-wrong-answer
-# convention. Entities outside dims 1:3 follow upstream: the switch
+# cylinder/cone/sphere/torus domains, and tensor or trimmed-chart
+# quadrature for NURBS patches. Solids use compact primitive records,
+# torus-sector Pappus integrals, plane/cylinder boundary moments, or
+# divergence quadrature on finite natural domains. Natural-solid moments
+# retain a nearby reference frame through their centroidal integration.
+# Entities outside dims 1:3 follow upstream: the switch
 # never fires, so the empty GProp reports mass 0 and centre (0,0,0).
 
 # 8-point Gauss-Legendre abscissae/weights on [-1,1] — exact for
-# polynomials through degree 15, ample for the conic/spline measures.
+# polynomials through degree 15. Natural NURBS faces select higher orders
+# and bounded refinement below according to their degree and weights.
 const _OCC_GL_T=(0.9602898564975363,0.7966664774136267,
                  0.5255324099163290,0.1834346424956498)
 const _OCC_GL_W=(0.1012285362903763,0.2223810344533745,
@@ -881,7 +881,7 @@ end
 function _model_occ_face_measure(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     if hasproperty(rec,:natural_bounds)
-        integrals=_occ_natural_surface_integrals(rec)
+        integrals=_occ_natural_surface_integrals(rec;fields=(:area,:first))
         integrals.area>0 || throw(ArgumentError("OCC.get_mass: natural face has zero area"))
         return integrals.area,_occ3_scale(integrals.first,1/integrals.area)
     end
@@ -1296,6 +1296,56 @@ function _occ_torus_sector_window(kernel,fid,rec)
     return (umin,umax)
 end
 
+# Divergence moments belong in a nearby coordinate frame. Integrating
+# world-coordinate first moments and then dividing cancels terms of size
+# |origin|²; a rounded erroneous centroid also corrupts centered inertia.
+# Keep the local centroid separate until the public world-coordinate return.
+function _model_occ_natural_solid_stats(kernel,uses;want_centroid=true,want_second=false)
+    bounds=_MODEL_EMPTY_BOUNDS
+    for (fid,_) in uses
+        rec=kernel.shapes[fid].geometry.geometry
+        bounds=_model_bounds_union(bounds,_occ_natural_surface_bbox(rec))
+    end
+    all(isfinite,bounds) || throw(ArgumentError(
+        "OCC measures: natural solid has no finite bounds"))
+    finite_bounds=bounds
+    origin=ntuple(axis->_convex_coordinate(finite_bounds[axis],finite_bounds[axis+3],.5),3)
+    identity=(1.,0.,0.,0.,1.,0.,0.,0.,1.)
+    offset=.-origin
+    transform=_AffineTransform(identity,offset,NTuple{16,Float64}[],
+        (linear=identity,loc=offset))
+    local_faces=Tuple{Any,Float64}[]
+    volume=0.;first=(0.,0.,0.)
+    for (fid,reversed) in uses
+        rec=kernel.shapes[fid].geometry.geometry
+        geometry=_transform_occ_surface_record(rec,transform,
+            "OCC measures","natural face")
+        sign=reversed ? -1. : 1.
+        fields=(want_centroid || want_second) ? (:volume,:div_first) : (:volume,)
+        integrals=_occ_natural_surface_integrals(geometry;fields)
+        volume+=sign*integrals.volume
+        (want_centroid || want_second) &&
+            (first=_occ3_add(first,_occ3_scale(integrals.div_first,sign)))
+        want_second && push!(local_faces,(geometry,sign))
+    end
+    # A length tolerance cannot classify a nonzero volume as empty. Small
+    # representable solids retain their own centroid and nonzero inertia.
+    total_first=first;total_volume=volume
+    centroid=(want_centroid || want_second) && !iszero(total_volume) ?
+        ntuple(axis->(total_first[axis]/total_volume)/4,3) : (0.,0.,0.)
+    second=zeros(3,3)
+    if want_second && !iszero(volume)
+        for (geometry,sign) in local_faces
+            integrals=_occ_natural_surface_integrals(geometry;
+                centered=true,center=centroid,fields=(:centered_div_second,))
+            for i in 1:3,j in 1:3
+                second[i,j]+=sign*integrals.centered_div_second[i,j]
+            end
+        end
+    end
+    return (volume=total_volume,origin=origin,centroid=centroid,second=second)
+end
+
 function _model_occ_solid_measure(kernel,id;want_centroid=true)
     shape=kernel.shapes[id]; g=shape.geometry
     if haskey(g,:sector)
@@ -1337,6 +1387,11 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
         end
     end
     isempty(uses) && return 0.0,(0.0,0.0,0.0)
+    if all(use->hasproperty(kernel.shapes[use[1]].geometry.geometry,:natural_bounds),uses)
+        stats=_model_occ_natural_solid_stats(kernel,uses;want_centroid)
+        center=want_centroid ? _occ3_add(stats.origin,stats.centroid) : (0.,0.,0.)
+        return stats.volume,center
+    end
     face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
     torus=count(u->face_kind(u)===:torus,uses)
     if torus==1 && all(u->face_kind(u)===:torus ||
@@ -1687,7 +1742,8 @@ end
 function _model_occ_face_moment2(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     hasproperty(rec,:natural_bounds) &&
-        return _occ_natural_surface_integrals(rec;centered=true).centered_second
+        return _occ_natural_surface_integrals(rec;centered=true,
+            fields=(:centered_second,)).centered_second
     occ=get(rec,:occ,nothing)
     if occ===:plane
         _,_,T=_model_occ_plane_stats(kernel,id;want_tensor=true,
@@ -1809,6 +1865,9 @@ function _model_occ_solid_moment2(kernel,id)
         end
     end
     isempty(uses) && return m
+    if all(use->hasproperty(kernel.shapes[use[1]].geometry.geometry,:natural_bounds),uses)
+        return _model_occ_natural_solid_stats(kernel,uses;want_second=true).second
+    end
     face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
     face_ok=u->begin
         rec=kernel.shapes[u[1]].geometry.geometry

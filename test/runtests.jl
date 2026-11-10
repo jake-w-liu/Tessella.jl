@@ -77,6 +77,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_curve_bounds_test.jl",
         "interfaces/api_occ_natural_seam_test.jl",
         "interfaces/api_occ_inertia_test.jl",
+        "interfaces/api_occ_natural_measures_translation_test.jl",
         "interfaces/api_occ_wedge_test.jl",
         "interfaces/api_occ_boolean_seam_test.jl",
         "interfaces/api_occ_fuse_images_test.jl",

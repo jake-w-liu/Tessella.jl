@@ -33,41 +33,75 @@ function _occ_brep_natural_bounds(surface,caller)
     throw(ArgumentError("$caller: BREP face has an unbounded natural surface domain"))
 end
 
-function _occ_natural_surface_integrals(g;centered=false,center=nothing)
-    lo,hi=g.natural_bounds
-    function panels(axis)
-        lower,upper=lo[axis],hi[axis]
-        if _model_nurbs_surface(g)
-            knots=axis==1 ? g.patch.surface.knots_u : g.patch.surface.knots_v
-            return _model_occ_span_cuts(knots,lower,upper)
+const _OCC_NATURAL_GAUSS_RULES=Dict{Int,Tuple{Vector{Float64},Vector{Float64}}}()
+const _OCC_NATURAL_GAUSS_LOCK=ReentrantLock()
+
+function _occ_natural_gauss_rule(order)
+    order in (8,16,32,64,128) || throw(ArgumentError(
+        "OCC natural face: unsupported quadrature order"))
+    order==8 && return (_OCC_GL_T,_OCC_GL_W)
+    lock(_OCC_NATURAL_GAUSS_LOCK) do
+        get!(_OCC_NATURAL_GAUSS_RULES,order) do
+            # Legendre's orthonormal three-term recurrence gives this
+            # symmetric Jacobi matrix (Golub-Welsch quadrature).
+            # https://dlmf.nist.gov/3.5.vi
+            offdiagonal=Float64[index/sqrt(4index^2-1) for index in 1:order-1]
+            decomposition=LinearAlgebra.eigen(LinearAlgebra.SymTridiagonal(
+                zeros(order),offdiagonal))
+            nodes=Float64[(decomposition.values[order+1-index]-
+                decomposition.values[index])/2 for index in 1:order÷2]
+            weights=Float64[decomposition.vectors[1,index]^2+
+                decomposition.vectors[1,order+1-index]^2 for index in 1:order÷2]
+            weights./=sum(weights)
+            return nodes,weights
         end
-        span=upper-lower
-        isfinite(span) && span>0 || throw(ArgumentError(
-            "OCC natural face: domain width exceeds Float64"))
-        count=span<=π/2 ? 1 : ceil(Int,min(span/(π/2),4097.0))
-        count<=4096 || throw(ArgumentError("OCC natural face: quadrature capacity exceeded"))
-        cuts=Float64[(1-i/count)*lower+(i/count)*upper for i in 0:count]
-        return collect(zip(cuts[1:end-1],cuts[2:end]))
     end
-    upanels=panels(1);vpanels=panels(2)
+end
+
+function _occ_natural_measure_panels(g,axis)
+    lo,hi=g.natural_bounds
+    lower,upper=lo[axis],hi[axis]
+    if _model_nurbs_surface(g)
+        knots=axis==1 ? g.patch.surface.knots_u : g.patch.surface.knots_v
+        return _model_occ_span_cuts(knots,lower,upper)
+    end
+    span=upper-lower
+    isfinite(span) && span>0 || throw(ArgumentError(
+        "OCC natural face: domain width exceeds Float64"))
+    count=span<=π/2 ? 1 : ceil(Int,min(span/(π/2),4097.0))
+    count<=4096 || throw(ArgumentError("OCC natural face: quadrature capacity exceeded"))
+    cuts=Float64[_convex_coordinate(lower,upper,i/count) for i in 0:count]
+    return collect(zip(cuts[1:end-1],cuts[2:end]))
+end
+
+function _occ_natural_surface_integrals_rule(g,upanels,vpanels,nodes,weights;
+        centered=false,center=nothing)
     length(upanels)<=div(65536,max(1,length(vpanels))) || throw(ArgumentError(
         "OCC natural face: quadrature capacity exceeded"))
     area=0.0;first=(0.0,0.0,0.0);second=zeros(3,3)
     volume=0.0;div_first=(0.0,0.0,0.0);div_second=zeros(3,3)
+    absolute_first=(0.0,0.0,0.0);absolute_second=zeros(3,3)
+    absolute_volume=0.0;absolute_div_first=(0.0,0.0,0.0)
+    absolute_div_second=zeros(3,3)
     for (ua,ub) in upanels,(va,vb) in vpanels
         hu=ub/2-ua/2;mu=ua/2+ub/2;hv=vb/2-va/2;mv=va/2+vb/2
-        for i in 1:4,si in (-1,1),j in 1:4,sj in (-1,1)
-            u=mu+si*hu*_OCC_GL_T[i];v=mv+sj*hv*_OCC_GL_T[j]
+        for i in eachindex(nodes),si in (-1,1),j in eachindex(nodes),sj in (-1,1)
+            u=mu+si*hu*nodes[i];v=mv+sj*hv*nodes[j]
             p,du,dv=_occ_surface_d1(g,u,v)
             normal=_occ_cross(du,dv)
-            weight=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
+            weight=weights[i]*weights[j]*hu*hv
             wa=weight*_occ_modulus(normal);rn=weight*_dot3(p,normal)
             area+=wa;volume+=rn/3
             first=_occ3_add(first,_occ3_scale(p,wa))
             div_first=_occ3_add(div_first,_occ3_scale(p,rn))
+            absolute_volume+=abs(rn/3)
+            absolute_first=_occ3_add(absolute_first,abs.(_occ3_scale(p,wa)))
+            absolute_div_first=_occ3_add(absolute_div_first,abs.(_occ3_scale(p,rn)))
             for a in 1:3,b in 1:3
-                second[a,b]+=wa*p[a]*p[b]
-                div_second[a,b]+=rn*p[a]*p[b]/5
+                surface_term=wa*p[a]*p[b];volume_term=rn*p[a]*p[b]/5
+                second[a,b]+=surface_term;div_second[a,b]+=volume_term
+                absolute_second[a,b]+=abs(surface_term)
+                absolute_div_second[a,b]+=abs(volume_term)
             end
         end
     end
@@ -76,26 +110,106 @@ function _occ_natural_surface_integrals(g;centered=false,center=nothing)
     # far from the origin do not lose accuracy to subtraction.
     centered_second=zeros(3,3)
     centered_div_second=zeros(3,3)
+    absolute_centered_second=zeros(3,3)
+    absolute_centered_div_second=zeros(3,3)
     if centered && area>0
         c=center===nothing ? _occ3_scale(first,1/area) : center
         for (ua,ub) in upanels,(va,vb) in vpanels
             hu=ub/2-ua/2;mu=ua/2+ub/2;hv=vb/2-va/2;mv=va/2+vb/2
-            for i in 1:4,si in (-1,1),j in 1:4,sj in (-1,1)
-                u=mu+si*hu*_OCC_GL_T[i];v=mv+sj*hv*_OCC_GL_T[j]
+            for i in eachindex(nodes),si in (-1,1),j in eachindex(nodes),sj in (-1,1)
+                u=mu+si*hu*nodes[i];v=mv+sj*hv*nodes[j]
                 p,du,dv=_occ_surface_d1(g,u,v)
-                weight=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
+                weight=weights[i]*weights[j]*hu*hv
                 normal=_occ_cross(du,dv)
                 d=_occ3_sub(p,c);wa=weight*_occ_modulus(normal)
                 rn=weight*_dot3(d,normal)
                 for a in 1:3,b in 1:3
-                    centered_second[a,b]+=wa*d[a]*d[b]
-                    centered_div_second[a,b]+=rn*d[a]*d[b]/5
+                    surface_term=wa*d[a]*d[b];volume_term=rn*d[a]*d[b]/5
+                    centered_second[a,b]+=surface_term
+                    centered_div_second[a,b]+=volume_term
+                    absolute_centered_second[a,b]+=abs(surface_term)
+                    absolute_centered_div_second[a,b]+=abs(volume_term)
                 end
             end
         end
     end
+    absolute=(area=area,first=absolute_first,second=absolute_second,
+        centered_second=absolute_centered_second,
+        centered_div_second=absolute_centered_div_second,
+        volume=absolute_volume,div_first=absolute_div_first,
+        div_second=absolute_div_second)
     return (;area,first,second,centered_second,centered_div_second,
-        volume,div_first,div_second)
+        volume,div_first,div_second,absolute)
+end
+
+function _occ_natural_integrals_converged(previous,current,fields)
+    for field in (:area,:first,:second,:volume,:div_first,:div_second,
+                  :centered_second,:centered_div_second)
+        fields===nothing || field in fields || continue
+        a=getproperty(previous,field);b=getproperty(current,field)
+        bound_a=getproperty(previous.absolute,field)
+        bound_b=getproperty(current.absolute,field)
+        for (x,y,ba,bb) in zip(a isa Number ? (a,) : a,b isa Number ? (b,) : b,
+                bound_a isa Number ? (bound_a,) : bound_a,
+                bound_b isa Number ? (bound_b,) : bound_b)
+            # Equal signed infinities represent an out-of-range result;
+            # NaNs and inconsistent rules never establish convergence.
+            isinf(x) && x==y && continue
+            isfinite(x) && isfinite(y) || return false
+            isfinite(ba) && isfinite(bb) || return false
+            # Absolute quadrature contributions supply a component's own
+            # cancellation scale. A diameter power can overflow or swamp the
+            # finite volume of a long, thin solid.
+            tolerance=1e-12*max(ba,bb)+1e-11*max(abs(x),abs(y))
+            abs(x-y)<=tolerance || return false
+        end
+    end
+    return true
+end
+
+function _occ_natural_surface_integrals(g;centered=false,center=nothing,fields=nothing)
+    upanels=_occ_natural_measure_panels(g,1);vpanels=_occ_natural_measure_panels(g,2)
+    if !_model_nurbs_surface(g)
+        return _occ_natural_surface_integrals_rule(g,upanels,vpanels,
+            _OCC_GL_T,_OCC_GL_W;centered,center)
+    end
+    surface=g.patch.surface
+    # A polynomial tensor's divergence second moments have degree at most
+    # 5p-1 on each knot span. Rational patches additionally compare increasing
+    # orders and refine their spans instead of trusting a fixed GL8 rule.
+    required=cld(5max(surface.degree_u,surface.degree_v),2)
+    rational=any(!=(first(surface.weights)),surface.weights)
+    order=8
+    while order<max(required,rational ? 16 : 8);order*=2;end
+    pairs=length(upanels)*length(vpanels)
+    pairs<=div(33554432,order^2) || throw(ArgumentError(
+        "OCC natural face: adaptive quadrature capacity exceeded"))
+    work=pairs*order^2
+    nodes,weights=_occ_natural_gauss_rule(order)
+    previous=_occ_natural_surface_integrals_rule(g,upanels,vpanels,nodes,weights;centered,center)
+    order*=2
+    nodes,weights=_occ_natural_gauss_rule(order)
+    for refinement in 0:8
+        pairs=length(upanels)*length(vpanels)
+        pairs<=div(33554432-work,order^2) || throw(ArgumentError(
+            "OCC natural face: adaptive quadrature capacity exceeded"))
+        work+=pairs*order^2
+        current=_occ_natural_surface_integrals_rule(g,upanels,vpanels,nodes,weights;centered,center)
+        _occ_natural_integrals_converged(previous,current,fields) && return current
+        refinement<8 || break
+        previous=current
+        for panels in (upanels,vpanels)
+            refined=Tuple{Float64,Float64}[]
+            for (lower,upper) in panels
+                middle=_convex_coordinate(lower,upper,.5)
+                lower<middle<upper || throw(ArgumentError(
+                    "OCC natural face: no representable quadrature subdivision"))
+                push!(refined,(lower,middle),(middle,upper))
+            end
+            empty!(panels);append!(panels,refined)
+        end
+    end
+    throw(ArgumentError("OCC natural face: quadrature did not converge"))
 end
 
 function _occ_natural_surface_bbox(g)
