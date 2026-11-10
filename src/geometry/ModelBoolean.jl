@@ -7290,8 +7290,13 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
         # fan preimages between sheets; that result is not a UV triangulation.
         # Preserve actual boundary coordinates and provenance until the
         # adaptive producer performs its own final quotient and certificates.
+        world=NTuple{3,Float64}[Tuple(coords[:,k]) for k in axes(coords,2)]
+        if hasproperty(sg,:natural_bounds)
+            tris_uv=_occ_natural_surface_cover!(sg,uxs,uys,world,tris_uv,
+                pre_owner,pre_param,t,caller)
+        end
         unwrapped=(u=uxs,v=uys,cells=tris_uv,owners=pre_owner,params=pre_param,
-            world=NTuple{3,Float64}[Tuple(coords[:,k]) for k in axes(coords,2)],
+            world=world,
             period=period)
         return nothing,nothing,nothing,unwrapped
     end

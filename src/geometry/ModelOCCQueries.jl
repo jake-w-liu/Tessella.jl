@@ -89,7 +89,7 @@ function _model_occ_shape_bbox(kernel,id)
         end
         # :copied_curve — the trimmed sub-range stays inside the full
         # control hull.
-        return _model_occ_controls_box(rec.curve.curve.controls)
+        return _model_occ_curve_bbox(rec.curve)
     elseif d==2
         rec=g.geometry
         hasproperty(rec,:natural_bounds) && return _occ_natural_surface_bbox(rec)

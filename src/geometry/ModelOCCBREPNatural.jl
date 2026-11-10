@@ -130,18 +130,10 @@ function _occ_natural_collapsed_sides(g)
             push!(sides,(2,v,point))
         end
     elseif _model_nurbs_surface(g)
-        surface=g.patch.surface
         for axis in 1:2,upper in (false,true)
-            knots=axis==1 ? surface.knots_u : surface.knots_v
-            degree=axis==1 ? surface.degree_u : surface.degree_v
             value=upper ? hi[axis] : lo[axis]
-            terminal=upper ? knots[end-degree:end] : knots[1:degree+1]
-            all(==(value),terminal) || continue
-            index=upper ? size(surface.controls,axis) : 1
-            poles=axis==1 ? @view(surface.controls[index,:]) :
-                           @view(surface.controls[:,index])
-            point=first(poles)
-            all(==(point),poles) && push!(sides,(axis,value,point))
+            point=_model_nurbs_collapsed_iso_point(g,axis,value)
+            point===nothing || push!(sides,(axis,value,point))
         end
     end
     return sides
@@ -152,12 +144,12 @@ function _occ_natural_surface_point(g,u,v,up=_brep_uperiod(g),vp=_brep_vperiod(g
     for (axis,value,point) in g.natural_collapsed
         (axis==1 ? u : v)==value && return point
     end
-    up>0 && hi[1]-lo[1]>=up-64eps(up) && u==hi[1] && (u=lo[1])
-    vp>0 && hi[2]-lo[2]>=vp-64eps(vp) && v==hi[2] && (v=lo[2])
-    if g.occ===:sphere && abs(v)==π/2
-        return ntuple(i->g.center[i]+copysign(g.radius,v)*g.axis[i],3)
+    canonical_u=up>0 && hi[1]-lo[1]>=up-64eps(up) && u==hi[1] ? lo[1] : u
+    canonical_v=vp>0 && hi[2]-lo[2]>=vp-64eps(vp) && v==hi[2] ? lo[2] : v
+    if g.occ===:sphere && abs(canonical_v)==π/2
+        return ntuple(i->g.center[i]+copysign(g.radius,canonical_v)*g.axis[i],3)
     end
-    return _occ_surface_point(g,Float64(u),Float64(v))
+    return _occ_surface_point(g,Float64(canonical_u),Float64(canonical_v))
 end
 
 function _occ_natural_uv_lerp(a,b,fraction)
@@ -191,14 +183,14 @@ function _occ_natural_surface_scaffold!(m,t,g,emit,segs,options,caller)
     # they receive the same subdivision and close with literal world rows.
     corners=((lo[1],lo[2]),(hi[1],lo[2]),(hi[1],hi[2]),(lo[1],hi[2]))
     count=Ref(0)
-    function append_edge(a,b,depth)
+    function append_edge(visit,a,b,depth)
         if score(a,b)>.6
             depth<20 || throw(ArgumentError(
                 "$caller: natural Surface[$t] boundary exceeds subdivision capacity"))
             mid=_occ_natural_uv_lerp(a,b,.5)
             (mid==a || mid==b) && throw(ArgumentError(
                 "$caller: natural Surface[$t] boundary has no representable subdivision"))
-            append_edge(a,mid,depth+1);append_edge(mid,b,depth+1)
+            visit(visit,a,mid,depth+1);visit(visit,mid,b,depth+1)
             return nothing
         end
         count[]<65536 || throw(ArgumentError(
@@ -214,7 +206,7 @@ function _occ_natural_surface_scaffold!(m,t,g,emit,segs,options,caller)
         for station in 0:3
             p=_occ_natural_uv_lerp(a,b,station/4)
             q=_occ_natural_uv_lerp(a,b,(station+1)/4)
-            append_edge(p,q,0)
+            append_edge(append_edge,p,q,0)
         end
     end
     return nothing
@@ -231,6 +223,88 @@ function _occ_natural_collapsed_groups(g,parameters,coordinates)
         end
     end
     return groups
+end
+
+# A natural rectangle has only Surface-owned chart cuts. Certify its
+# physical quotient before adaptation: repeated pole preimages disappear,
+# while every surviving triangle must be nondegenerate and embedded.
+function _occ_natural_cover_certificate(cells,world,caller)
+    incidence=_metric_surface_incidence(cells,caller)
+    boundary=Set(edge for (edge,hits) in incidence if length(hits)==1)
+    _metric_surface_quotient_ok(cells,world,boundary) || return false
+    lookup=Dict{NTuple{3,Float64},Int32}()
+    rows=Int32[get!(lookup,p,Int32(length(lookup)+1)) for p in world]
+    triangles=NTuple{3,Int32}[]
+    for cell in cells
+        a,b,c=(rows[row] for row in cell)
+        (a==b || b==c || c==a) && continue
+        triangle_area((world[row] for row in cell)...)>0 || return false
+        push!(triangles,(a,b,c))
+    end
+    points=Matrix{Float64}(undef,3,length(lookup))
+    for (point,row) in lookup;points[:,row].=point;end
+    connectivity=Matrix{Int32}(undef,3,length(triangles))
+    for (column,cell) in enumerate(triangles);connectivity[:,column].=cell;end
+    return _plc_self_intersection3(Mesh(points;tris=connectivity))===nothing
+end
+
+function _occ_natural_grid_stations(g,axis,values)
+    lo,hi=g.natural_bounds
+    stations=Float64[values;[_convex_coordinate(lo[axis],hi[axis],i/4) for i in 0:4]]
+    if _model_nurbs_surface(g)
+        surface=g.patch.surface
+        knots=axis==1 ? surface.knots_u : surface.knots_v
+        reparam=get(g,:reparam,nothing)
+        mapping=reparam===nothing ? nothing : axis==1 ? reparam.u : reparam.v
+        bounds=_model_nurbs_surface_bounds(g)
+        for knot in knots
+            bounds[1][axis]<=knot<=bounds[2][axis] || continue
+            value=mapping===nothing ? knot : _occ_conic_reparam_inv(mapping,knot)
+            lo[axis]<value<hi[axis] && push!(stations,value)
+        end
+    end
+    return sort!(unique!(stations))
+end
+
+# If a sparse CDT shortcuts a periodic or collapsed chart, rebuild genuine
+# parameter rings. Aligned rings make polar fans and both seam partitions
+# conform before the size-field producer performs its local adaptation.
+# Existing embedded covers are retained verbatim.
+function _occ_natural_surface_cover!(g,u,v,world,cells,owners,parameters,tag,caller)
+    _occ_natural_cover_certificate(cells,world,caller) && return cells
+    lo,hi=g.natural_bounds
+    us=_occ_natural_grid_stations(g,1,
+        Float64[u[row] for row in eachindex(u) if v[row]==lo[2] || v[row]==hi[2]])
+    vs=_occ_natural_grid_stations(g,2,
+        Float64[v[row] for row in eachindex(v) if u[row]==lo[1] || u[row]==hi[1]])
+    up=_brep_uperiod(g);vp=_brep_vperiod(g)
+    capacity=max(65536,length(world))
+    for attempt in 0:16
+        length(us)<=div(capacity,length(vs)) || break
+        empty!(u);empty!(v);empty!(world);empty!(owners);empty!(parameters)
+        for second in vs,first in us
+            point=_occ_natural_surface_point(g,first,second,up,vp)
+            all(isfinite,point) || throw(ArgumentError(
+                "$caller: natural Surface chart exceeds Float64"))
+            push!(u,first);push!(v,second);push!(world,point)
+            push!(owners,(2,Int32(tag)));push!(parameters,[first,second])
+        end
+        cells=NTuple{3,Int32}[]
+        count=length(us)
+        for j in 1:length(vs)-1,i in 1:count-1
+            a=Int32((j-1)*count+i);b=a+Int32(1);c=a+Int32(count);d=c+Int32(1)
+            push!(cells,(a,b,d),(a,d,c))
+        end
+        _occ_natural_cover_certificate(cells,world,caller) && return cells
+        attempt<16 || break
+        for stations in (us,vs)
+            midpoints=Float64[_convex_coordinate(stations[index],stations[index+1],.5)
+                for index in 1:length(stations)-1]
+            append!(stations,midpoints)
+            sort!(unique!(stations))
+        end
+    end
+    throw(ArgumentError("$caller: natural Surface cover exceeds quotient subdivision capacity"))
 end
 
 function _occ_natural_surface_closed(g)

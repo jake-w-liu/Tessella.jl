@@ -221,6 +221,8 @@ function _model_curve_bounding_box(
         end,caller,"Curve[$curve]")
     end
     occ=_occ_geometry_checked(m,curve,caller)
+    occ!==nothing && occ.occ===:copied_curve && return _model_bounds_checked(
+        _model_occ_curve_bbox(occ.curve),caller,"Curve[$curve]")
     if occ!==nothing && occ.occ===:surface_iso
         surface=occ.face.patch.surface
         controls=occ.axis==1 ? @view(surface.controls[:,occ.fixed==first(surface.knots_v) ? 1 : size(surface.controls,2)]) :

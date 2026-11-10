@@ -57,6 +57,10 @@ function _model_occ_curve_bounds(geometry::_ModelOCCNURBSCurve)
     return curve.knots[curve.degree+1],curve.knots[end-curve.degree]
 end
 
+# A copied curve's control hull bounds its entire parameter domain, including
+# interior extrema that are absent from its topological endpoint Points.
+_model_occ_curve_bbox(geometry)=_model_occ_controls_box(geometry.curve.controls)
+
 function _model_occ_curve_geometry(family,controls;degree=3,weights=Float64[],
                                    knots=Float64[],multiplicities=Int[],
                                    caller="OCC Curve")
