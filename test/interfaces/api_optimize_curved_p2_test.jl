@@ -86,6 +86,8 @@ end
         elastic=_oc_nodes()
         @test count(tag->elastic[tag]!=relocated[tag],keys(before))>0
         @test api.mesh.optimize("HighOrder")===nothing
+        # Dedicated high-order methods use their own stage options; upstream
+        # still runs elastic smoothing when niter=0.
         @test api.mesh.optimize("HighOrderElastic",false,0)===nothing
 
         # Entity selection stays unsupported-but-tolerated, like upstream's
@@ -95,8 +97,9 @@ end
         # "Netgen" is a supported region optimizer: a surface-only cache has
         # no regions, so the call is accepted without work (upstream iterates
         # model regions; there are none to optimize).
+        before_netgen=_oc_nodes()
         @test api.mesh.optimize("Netgen")===nothing
-        @test _oc_nodes()==relocated
+        @test _oc_nodes()==before_netgen
         # Unsupported kernels keep their atomic rejection.
         @test_throws r"unknown or unsupported optimizer" (
             api.mesh.optimize("Pachyderm"))
