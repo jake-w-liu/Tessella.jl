@@ -4,13 +4,13 @@ function _native_model_vtk_lagrange_lattice(family,p)
     nodes=NTuple{3,Int}[]
     family in (:tri,:tet,:pyr) && p==0 && return NTuple{3,Int}[(0,0,0)]
     if family in (:tri,:tet)
-        vertices=NTuple{3,Int}[(0,0,0),(p,0,0),(0,p,0)]
-        family===:tet && push!(vertices,(0,0,p))
-        append!(nodes,vertices)
+        simplex_vertices=NTuple{3,Int}[(0,0,0),(p,0,0),(0,p,0)]
+        family===:tet && push!(simplex_vertices,(0,0,p))
+        append!(nodes,simplex_vertices)
         edges=family===:tri ? ((1,2),(2,3),(3,1)) :
             ((1,2),(2,3),(3,1),(1,4),(2,4),(3,4))
         for (a,b) in edges,i in 1:p-1
-            push!(nodes,ntuple(axis->((p-i)*vertices[a][axis]+i*vertices[b][axis])÷p,3))
+            push!(nodes,ntuple(axis->((p-i)*simplex_vertices[a][axis]+i*simplex_vertices[b][axis])÷p,3))
         end
         if family===:tri && p>=3
             append!(nodes,((x+1,y+1,0) for (x,y,_) in _native_model_vtk_lagrange_lattice(:tri,p-3)))
@@ -19,7 +19,7 @@ function _native_model_vtk_lagrange_lattice(family,p)
                 for (a,b,c) in ((1,2,4),(3,4,2),(1,4,3),(1,3,2)),
                     (x,y,_) in _native_model_vtk_lagrange_lattice(:tri,p-3)
                     u=x+1;v=y+1
-                    push!(nodes,ntuple(axis->((p-u-v)*vertices[a][axis]+u*vertices[b][axis]+v*vertices[c][axis])÷p,3))
+                    push!(nodes,ntuple(axis->((p-u-v)*simplex_vertices[a][axis]+u*simplex_vertices[b][axis]+v*simplex_vertices[c][axis])÷p,3))
                 end
             end
             p>=4 && append!(nodes,((x+1,y+1,z+1) for (x,y,z) in _native_model_vtk_lagrange_lattice(:tet,p-4)))
@@ -53,17 +53,17 @@ function _native_model_vtk_lagrange_lattice(family,p)
         # base face, then the interior. The integer reference lattice is
         # {(i,j,k) : 0<=i,j<=k<=p} with the apex at (0,0,0) and the base at
         # k=p; node (i,j,k) sits at ((2i-k)/p,(2j-k)/p,1-k/p).
-        vertices=NTuple{3,Int}[(0,0,p),(p,0,p),(p,p,p),(0,p,p),(0,0,0)]
-        append!(nodes,vertices)
+        pyramid_vertices=NTuple{3,Int}[(0,0,p),(p,0,p),(p,p,p),(0,p,p),(0,0,0)]
+        append!(nodes,pyramid_vertices)
         for (a,b) in ((1,2),(2,3),(3,4),(4,1),(1,5),(2,5),(3,5),(4,5)),i in 1:p-1
-            push!(nodes,ntuple(axis->((p-i)*vertices[a][axis]+i*vertices[b][axis])÷p,3))
+            push!(nodes,ntuple(axis->((p-i)*pyramid_vertices[a][axis]+i*pyramid_vertices[b][axis])÷p,3))
         end
         if p>=3
             for (a,b,c) in ((1,2,5),(2,3,5),(3,4,5),(4,1,5)),
                 (x,y,_) in _native_model_vtk_lagrange_lattice(:tri,p-3)
                 u=x+1;v=y+1
-                push!(nodes,ntuple(axis->((p-u-v)*vertices[a][axis]+u*vertices[b][axis]+
-                    v*vertices[c][axis])÷p,3))
+                push!(nodes,ntuple(axis->((p-u-v)*pyramid_vertices[a][axis]+u*pyramid_vertices[b][axis]+
+                    v*pyramid_vertices[c][axis])÷p,3))
             end
         end
         p>=2 && append!(nodes,((x,y,p) for y in 1:p-1 for x in 1:p-1))
@@ -71,19 +71,19 @@ function _native_model_vtk_lagrange_lattice(family,p)
             for (x,y,z) in _native_model_vtk_lagrange_lattice(:pyr,p-3)))
         return nodes
     elseif family===:pri
-        vertices=((0,0),(p,0),(0,p));edges=((1,2),(2,3),(3,1))
-        append!(nodes,((x,y,z) for z in (0,p) for (x,y) in vertices))
+        prism_vertices=((0,0),(p,0),(0,p));edges=((1,2),(2,3),(3,1))
+        append!(nodes,((x,y,z) for z in (0,p) for (x,y) in prism_vertices))
         for z in (0,p),(a,b) in edges,i in 1:p-1
-            push!(nodes,(((p-i)*vertices[a][1]+i*vertices[b][1])÷p,
-                         ((p-i)*vertices[a][2]+i*vertices[b][2])÷p,z))
+            push!(nodes,(((p-i)*prism_vertices[a][1]+i*prism_vertices[b][1])÷p,
+                         ((p-i)*prism_vertices[a][2]+i*prism_vertices[b][2])÷p,z))
         end
-        append!(nodes,((x,y,z) for (x,y) in vertices for z in 1:p-1))
+        append!(nodes,((x,y,z) for (x,y) in prism_vertices for z in 1:p-1))
         # Wedge interiors use flat triangle rows, unlike recursive Tri cells.
         interior=[(x,y) for y in 1:p-2 for x in 1:p-y-1]
         append!(nodes,((x,y,z) for z in (0,p) for (x,y) in interior))
         for (a,b) in edges,z in 1:p-1,i in 1:p-1
-            push!(nodes,(((p-i)*vertices[a][1]+i*vertices[b][1])÷p,
-                         ((p-i)*vertices[a][2]+i*vertices[b][2])÷p,z))
+            push!(nodes,(((p-i)*prism_vertices[a][1]+i*prism_vertices[b][1])÷p,
+                         ((p-i)*prism_vertices[a][2]+i*prism_vertices[b][2])÷p,z))
         end
         append!(nodes,((x,y,z) for z in 1:p-1 for (x,y) in interior))
         return nodes

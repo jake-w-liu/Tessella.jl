@@ -199,8 +199,8 @@ function _native_model_view_vtk_payload(dataset,kind,caller)
         # Duplicate cell points and keep unreferenced model nodes explicitly.
         points=Int32[];connectivity=Vector{Int}[];used=Set{Int32}()
         for (cell,layout) in zip(cells,layouts)
-            offset=length(points);append!(points,cell.nodes);union!(used,cell.nodes)
-            push!(connectivity,[offset+slot-1 for slot in layout.order])
+            point_offset=length(points);append!(points,cell.nodes);union!(used,cell.nodes)
+            push!(connectivity,[point_offset+slot-1 for slot in layout.order])
         end
         append!(points,(Int32(row) for row in axes(mesh.coords,2) if !(Int32(row) in used)))
     else
