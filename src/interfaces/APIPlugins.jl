@@ -5262,6 +5262,27 @@ function _plugin_distance_root(parents,node)
     return node
 end
 
+function _plugin_distance_relative_mu(dtype,boundary_scale,component_scale)
+    product=dtype*boundary_scale
+    value=product/component_scale
+    if isfinite(product) && abs(product)>=floatmin(Float64) &&
+            isfinite(value) && abs(value)>=floatmin(Float64)
+        return value
+    end
+    R=Rational{BigInt}
+    return Float64(R(dtype)*R(boundary_scale)/R(component_scale))
+end
+
+function _plugin_distance_scaled_solution(value,ratio,scale,dtype,boundary_scale)
+    a=value*ratio;b=a*scale;c=b*scale;denominator=dtype*boundary_scale
+    result=c/denominator
+    if all(x->isfinite(x) && abs(x)>=floatmin(Float64),(a,b,c,denominator,result))
+        return result
+    end
+    R=Rational{BigInt}
+    return Float64(R(value)*R(ratio)*R(scale)^2/(R(dtype)*R(boundary_scale)))
+end
+
 function _plugin_distance_pde(mesh,slot,total,maxdim,mu,ids,caller)
     active=falses(nnodes(mesh));fixed=falses(nnodes(mesh))
     parents=collect(1:nnodes(mesh))
@@ -5294,12 +5315,45 @@ function _plugin_distance_pde(mesh,slot,total,maxdim,mu,ids,caller)
     iszero(lengthscale) && return zeros(nnodes(mesh))
     isfinite(lengthscale) && lengthscale>0 || throw(ArgumentError(
         "$caller: diffusion distance needs a finite positive model extent"))
-    origin=ntuple(axis->bounds[axis][1],3)
-    unknown=zeros(Int,nnodes(mesh));count=0
-    for node in eachindex(active)
-        if active[node] && !fixed[node] && anchored[_plugin_distance_root(parents,node)]
-            count+=1;unknown[node]=count
+    groups=Dict{Int,Vector{Int}}()
+    for index in 1:total
+        record=mesh_element_record(mesh,index)
+        record.dimension==maxdim || continue
+        root=_plugin_distance_root(parents,Int(first(record.node_tags)))
+        push!(get!(groups,root,Int[]),index)
+    end
+    unknown=zeros(Int,nnodes(mesh));distance=zeros(nnodes(mesh))
+    references=Dict{Int,NTuple{2,NTuple{3,Vector{Float64}}}}()
+    for root in sort!(collect(keys(groups)))
+        indices=groups[root]
+        nodes=sort!(unique!([Int(node) for index in indices
+            for node in mesh_element_record(mesh,index).node_tags]))
+        # A natural-only component has the exact constant solution s=1.
+        if !anchored[root]
+            value=_plugin_distance_product(-log1p(-0.9999),mu,lengthscale)
+            for node in nodes;distance[node]=value;end
+            continue
         end
+        _plugin_distance_component!(distance,unknown,mesh,indices,nodes,fixed,
+            maxdim,mu,lengthscale,references,caller)
+    end
+    all(isfinite,distance) || throw(ArgumentError(
+        "$caller: diffusion distance exceeds the finite output range"))
+    return distance
+end
+
+function _plugin_distance_component!(distance,unknown,mesh,indices,component_nodes,
+        fixed,maxdim,dtype,boundary_scale,references,caller)
+    origin=ntuple(axis->mesh.coords[axis,first(component_nodes)],3)
+    lengthscale=maximum(abs(mesh.coords[axis,node]-origin[axis])
+        for node in component_nodes for axis in 1:3)
+    isfinite(lengthscale) && lengthscale>0 || throw(ArgumentError(
+        "$caller: invalid diffusion component extent"))
+    mu=_plugin_distance_relative_mu(dtype,boundary_scale,lengthscale)
+    count=0
+    for node in component_nodes
+        unknown[node]=0
+        if !fixed[node];count+=1;unknown[node]=count;end
     end
     rows=Int[];columns=Int[];values=Float64[];rhs=zeros(count)
     # For mu>=1 solve for w=mu^2*s. This keeps a finite small distance
@@ -5307,10 +5361,8 @@ function _plugin_distance_pde(mesh,slot,total,maxdim,mu,ids,caller)
     invmu=1/mu
     root_diffusion=mu>=1 ? 1.0 : mu
     reaction=mu>=1 ? invmu*invmu : 1.0
-    references=Dict{Int,NTuple{2,NTuple{3,Vector{Float64}}}}()
-    for index in 1:total
+    for index in indices
         record=mesh_element_record(mesh,index)
-        record.dimension==maxdim || continue
         any(node->unknown[Int(node)]!=0,record.node_tags) || continue
         element_type=Int(record.element_type);spec=msh_spec(element_type)
         reference=get!(references,element_type) do
@@ -5328,7 +5380,10 @@ function _plugin_distance_pde(mesh,slot,total,maxdim,mu,ids,caller)
         nodes=Int.(record.node_tags);n=length(nodes)
         coordinates=Matrix{Float64}(undef,3,n)
         for node in 1:n,axis in 1:3
-            coordinates[axis,node]=(mesh.coords[axis,nodes[node]]-origin[axis])/lengthscale
+            # Subtract a nearby element point before normalization; a distant
+            # component origin can erase a small representable edge.
+            coordinates[axis,node]=(mesh.coords[axis,nodes[node]]-
+                mesh.coords[axis,first(nodes)])/lengthscale
         end
         localmatrix=zeros(n,n);load=zeros(n)
         derivatives=Matrix{Float64}(undef,maxdim,n)
@@ -5371,30 +5426,20 @@ function _plugin_distance_pde(mesh,slot,total,maxdim,mu,ids,caller)
         end
     end
     solution=_fem_solve_spd(count,rows,columns,values,rhs)
-    distance=zeros(nnodes(mesh))
-    # A disconnected natural-only component has the exact constant solution
-    # s=1. Handle it directly, including when 1/mu^2 underflows to zero.
-    for node in eachindex(active)
-        if active[node] && !anchored[_plugin_distance_root(parents,node)]
-            distance[node]=_plugin_distance_product(-log1p(-0.9999),mu,lengthscale)
-        end
-    end
-    for node in eachindex(unknown)
+    for node in component_nodes
         row=unknown[node];row==0 && continue
         value=solution[row]
         s=mu>=1 ? (value*invmu)*invmu : value
         if s>=0.9999
-            distance[node]=_plugin_distance_product(-log1p(-0.9999),mu,lengthscale)
+            distance[node]=_plugin_distance_product(-log1p(-0.9999),dtype,boundary_scale)
         elseif mu>=1
             ratio=s==0 ? 1.0 : -log1p(-s)/s
-            distance[node]=_plugin_distance_product(value,invmu,ratio,lengthscale)
+            distance[node]=_plugin_distance_scaled_solution(value,ratio,lengthscale,dtype,boundary_scale)
         else
-            distance[node]=_plugin_distance_product(-log1p(-s),mu,lengthscale)
+            distance[node]=_plugin_distance_product(-log1p(-s),dtype,boundary_scale)
         end
     end
-    all(isfinite,distance) || throw(ArgumentError(
-        "$caller: diffusion distance exceeds the finite output range"))
-    return distance
+    return nothing
 end
 
 # These use the same guarded geometric kernels as DistanceField, without its

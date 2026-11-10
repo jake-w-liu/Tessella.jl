@@ -259,4 +259,38 @@ end
         end
     end
 end
+
+@testset "Disconnected PDE domains preserve local geometry and global physical mu" begin
+    for (epsilon,dtype) in ((1e-20,1.),(1e-100,1.),(1e-300,1e-300))
+        session() do _
+            fixture(:tri)
+            for (uid,x,y) in ((11,-10.,0.),(21,-9.,0.),(31,-9.,1.),
+                    (41,-10.,1.),(51,-9.5,.5))
+                A.mesh.set_node(uid,[x,y,0.])
+            end
+            for tag in 21:24;A.model.add_discrete_entity(1,tag);end
+            A.model.add_discrete_entity(2,17)
+            points=[(0.,0.,0.),(epsilon,0.,0.),(epsilon,epsilon,0.),
+                (0.,epsilon,0.),(.5epsilon,.5epsilon,0.)]
+            A.mesh.add_nodes(2,17,[1011,1021,1031,1041,1051],collect(Iterators.flatten(points)))
+            for (tag,nodes) in zip(21:24,([1011,1021],[1021,1031],[1031,1041],[1041,1011]))
+                A.mesh.add_elements_by_type(tag,1,[2000+tag],nodes)
+            end
+            A.mesh.add_elements_by_type(17,2,[1301,1302,1303,1304],
+                [1011,1021,1051,1021,1031,1051,1031,1041,1051,1041,1011,1051])
+            before=(A.mesh.get_nodes(),A.mesh.get_elements())
+            _,values=samples(output(dtype))
+            expected=setprecision(BigFloat,512) do
+                e=BigFloat(epsilon)
+                physical_mu=BigFloat(dtype)*hypot(BigFloat(10)+e,BigFloat(1))
+                s=(e^2/3)/(4physical_mu^2+e^2/6)
+                Float64(-physical_mu*log1p(-s))
+            end
+            @test values[(.5epsilon,.5epsilon,0.)]≈expected rtol=2e-11
+            @test expected>0.
+            @test values[(-10.,0.,0.)]==0.
+            @test (A.mesh.get_nodes(),A.mesh.get_elements())==before
+        end
+    end
+end
 end
