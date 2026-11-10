@@ -31,6 +31,7 @@ include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity m
 include("core/MeshEntityTopology.jl") # P5: deterministic global edge and face catalogs
 include("core/MeshQuadrature.jl") # P5: bounded Gmsh-shaped reference quadrature
 include("core/MeshReferenceGeometry.jl") # P5: robust Gmsh-shaped linear-simplex Jacobians
+include("core/FEMLinearSolvers.jl") # shared sparse native FEM solver
 include("core/MeshFunctionSpaces.jl") # P5: arbitrary-order nodal and order-one H1/simplex-H(curl) bases
 include("meshing/WeightedMatching.jl") # checked BSD general minimum-cost matching
 include("meshing/OrderedMatching.jl") # directed ordered perfect-matching adapter
