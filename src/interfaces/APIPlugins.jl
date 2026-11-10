@@ -117,9 +117,9 @@
 #
 # Session views carry no per-element visibility flags, so the upstream `Visible`
 # options are accepted and stored but currently never hide an element.
-# `Skin` only covers list-based views (`FromMesh = 1`, which would publish
-# discrete model boundary entities, rejects) and `Transform`/`Remove`/`Smooth`/
-# `Warp`/`SphericalRaise` reject model-based views — upstream in-place writers
+# `Skin FromMesh` publishes discrete boundary entities while retaining source
+# node ownership. `Transform`/`Remove`/`Smooth`/`Warp`/`SphericalRaise` reject
+# model-based views — upstream in-place writers
 # mutate `PViewDataList`. CutSphere and Isosurface register `RecurLevel`/
 # `TargetError` like upstream;
 # they steer the adaptive subdivision of *curved* elements, which our linear
@@ -1075,11 +1075,71 @@ const _PLUGIN_SKIN_FACETS=(
     prism=((1,2,5,4),(1,4,6,3),(2,3,6,5),(1,3,2),(4,5,6)),
     pyramid=((1,4,3,2),(1,2,5),(1,5,4),(2,3,5),(3,4,5)))
 
+# Mesh extraction keeps node identities; coincident but distinct nodes do not
+# cancel. Boundary factories emit primary (linear) facets of higher-order cells.
+const _PLUGIN_MESH_SKIN_FACETS=(
+    tri=_PLUGIN_SKIN_FACETS.triangle,
+    qua=_PLUGIN_SKIN_FACETS.quadrangle,
+    tet=((1,3,2),(1,2,4),(1,4,3),(4,2,3)),
+    hex=_PLUGIN_SKIN_FACETS.hexahedron,
+    pri=_PLUGIN_SKIN_FACETS.prism,
+    pyr=((1,4,3,2),(1,2,5),(4,1,5),(2,3,5),(3,4,5)),
+    trih=((1,2,3,4),(1,4,2),(2,4,3)))
+
+function _plugin_skin_from_mesh!(numbers,caller)
+    model=_model_locked()
+    dimension=model_dimension(model)
+    dimension in (2,3) || return nothing
+    entities=model_entities(model)
+    held=Dict{Tuple{Vararg{UInt64}},Vector{UInt64}}()
+    for (dim,owner) in entities
+        dim==dimension || continue
+        !iszero(numbers["Visible"]) &&
+            iszero(get(model.entity_visibility,(dim,Int(owner)),1)) && continue
+        types,_,blocks=_get_elements(dim,owner)
+        for (type,nodes) in zip(types,blocks)
+            shape=msh_spec(Int(type))
+            facets=get(_PLUGIN_MESH_SKIN_FACETS,shape.family,())
+            for first in 1:shape.nnodes:length(nodes),facet in facets
+                boundary=UInt64[nodes[first+node-1] for node in facet]
+                key=Tuple(sort(boundary))
+                if haskey(held,key)
+                    delete!(held,key)
+                else
+                    held[key]=boundary
+                end
+            end
+        end
+    end
+    # Triangles precede quadrangles, with deterministic node-identity order in
+    # each family. Allocate every boundary cell before publishing any records.
+    ordered=sort!(collect(keys(held));by=key->(length(key),key))
+    output_dimension=dimension-1
+    output_tag=maximum((Int(tag) for (dim,tag) in entities
+        if dim==output_dimension);init=0)+1
+    kinds=Int[];tags=Vector{UInt64}[];connectivity=Vector{UInt64}[]
+    next_uid=ELEMENT_TAG_MAX[]
+    for key in ordered
+        kind=length(key)==2 ? 1 : length(key)==3 ? 2 : 3
+        if isempty(kinds) || last(kinds)!=kind
+            push!(kinds,kind);push!(tags,UInt64[]);push!(connectivity,UInt64[])
+        end
+        next_uid=_native_mesh_next_uid(next_uid,caller)
+        push!(last(tags),next_uid)
+        append!(last(connectivity),held[key])
+    end
+    known_nodes=_record_edit_cache_nodes()
+    _edit_mesh_records_locked!() do staged
+        add_discrete_entity!(staged,output_dimension,output_tag)
+        add_discrete_elements!(staged,output_dimension,output_tag,kinds,tags,
+            connectivity;_known_node_tags=known_nodes)
+    end
+    return nothing
+end
+
 function _plugin_exec_skin(spec::_PluginSpec,caller::AbstractString)
     numbers=spec.numbers
-    iszero(numbers["FromMesh"]) || throw(ArgumentError(
-        "$caller: Skin FromMesh=1 (discrete model boundary extraction) " *
-        "is not supported; run on a list-based view"))
+    iszero(numbers["FromMesh"]) || return _plugin_skin_from_mesh!(numbers,caller)
     tag,view=_plugin_view(numbers,caller)
     view.model_kind===nothing || throw(ArgumentError(
         "$caller: Skin requires a list-based view"))
