@@ -413,33 +413,36 @@ end
 
 function _view_probe_find(records,point,dimension,element_coords;
         reverse_order=false,exact_match=true,nearest_match=true)
-    selected=collect(eachindex(records))
+    selected=eachindex(records)
     if reverse_order
-        sort!(selected;by=i->(-get(_PLUGIN_SEARCH_RANK,records[i].kind,0),-i))
+        selected=sort!(collect(selected);by=i->(-get(_PLUGIN_SEARCH_RANK,records[i].kind,0),-i))
     end
-    nearest=nothing;distance=Inf
+    nearest_index=0;nearest_point=(0.0,0.0,0.0);distance=Inf
     for index in selected
         record=records[index]
+        coordinates_matrix=record.coords::Matrix{Float64}
         dimension>=0 && record.dim!=dimension && continue
-        element_coords===nothing || record.coords==element_coords || continue
+        element_coords===nothing || coordinates_matrix==element_coords || continue
         coordinates=exact_match ? _view_probe_coordinates(record,point) : nothing
         coordinates===nothing || return (record,coordinates),0.0
         nearest_match || continue
-        for node in axes(record.coords,2)
-            candidate=hypot((point.-Tuple(record.coords[:,node]))...)
-            closer=nearest===nothing || candidate<distance
+        for node in axes(coordinates_matrix,2)
+            node_point=ntuple(axis->coordinates_matrix[axis,node],3)
+            candidate=hypot((point.-node_point)...)
+            closer=nearest_index==0 || candidate<distance
             if !closer && isinf(candidate) && isinf(distance)
                 R=Rational{BigInt}
-                trial=sum((R(point[axis])-R(record.coords[axis,node]))^2 for axis in 1:3)
-                previous=sum((R(point[axis])-R(nearest[2][axis]))^2 for axis in 1:3)
+                trial=sum((R(point[axis])-R(coordinates_matrix[axis,node]))^2 for axis in 1:3)
+                previous_point=nearest_point
+                previous=sum((R(point[axis])-R(previous_point[axis]))^2 for axis in 1:3)
                 closer=trial<previous
             end
             if closer
-                distance=candidate;nearest=(record,Tuple(record.coords[:,node]))
+                distance=candidate;nearest_index=index;nearest_point=node_point
             end
         end
     end
-    return nearest,distance
+    return nearest_index==0 ? (nothing,distance) : ((records[nearest_index],nearest_point),distance)
 end
 
 function _view_probe(model_name,tag,x,y,z)
