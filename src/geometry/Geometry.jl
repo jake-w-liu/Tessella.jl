@@ -1,8 +1,7 @@
 """
     Geometry
 
-Stage-5 native constructive primitives (PLAN.md §3 "Geometry", §5 native CSG
-path). Each builder returns a **closed, manifold, outward-oriented** triangle
+Native constructive primitives. Each builder returns a **closed, manifold, outward-oriented** triangle
 [`Mesh`](@ref) — a boundary surface ready for [`Mesh3D.tetrahedralize`](@ref) /
 [`mesh_volume`](@ref). All are verified `Heal.is_meshable` and, when filled, to
 reproduce the exact analytic volume.

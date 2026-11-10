@@ -1,8 +1,7 @@
 """
     Heal
 
-Stage-5 "heal, don't fail" — the *detection* half (PLAN.md §3 "Heal", principle
-3). Before a boundary surface is handed to the 3-D mesher it must be a valid
+Boundary-surface defect detection. Before a boundary surface is handed to the 3-D mesher it must be a valid
 closed manifold; a defect (open edge, non-manifold edge, degenerate/duplicate
 triangle, near-coincident vertices, inconsistent orientation) is exactly what
 produces "invalid boundary mesh / overlapping facets" downstream. This module
