@@ -44,14 +44,17 @@ struct _PrimaryPlaneEvaluation
 end
 @inline (plane::_PrimaryPlaneEvaluation)(u,v)=ntuple(axis->
     plane.origin[axis]+plane.first[axis]*u+plane.second[axis]*v,3)
-@inline function _primary_plane_parameters(plane::_PrimaryPlaneEvaluation,point)
+@inline function _primary_surface_parameters(plane::_PrimaryPlaneEvaluation,point)
     delta=ntuple(axis->point[axis]-plane.origin[axis],3)
     return (_dot3(delta,plane.first),_dot3(delta,plane.second))
 end
-struct _PrimaryBlockedSurfaceEvaluation
-    message::String
+struct _PrimaryParametricEvaluation{V,U}
+    value::V
+    inverse::U
 end
-(evaluation::_PrimaryBlockedSurfaceEvaluation)(u,v)=throw(ArgumentError(evaluation.message))
+@inline (evaluation::_PrimaryParametricEvaluation)(u,v)=evaluation.value(u,v)
+@inline _primary_surface_parameters(evaluation::_PrimaryParametricEvaluation,point)=
+    evaluation.inverse(point)
 
 function _primary_relocation_fraction(quality_at)
     target=quality_at(0.0)
@@ -180,7 +183,7 @@ function _primary_relocate!(coords,triangles,quadrangles,context::_PrimarySurfac
                 context.project,triangles_at[vertex],quads_at[vertex])
             # A subsequently moved parameterized neighbor reparametrizes this
             # vertex from its current XYZ; this local cache is never raw storage.
-            uv=_primary_plane_parameters(context.evaluate,ntuple(axis->coords[axis,vertex],3))
+            uv=_primary_surface_parameters(context.evaluate,ntuple(axis->coords[axis,vertex],3))
             context.parameters[1,vertex]=uv[1];context.parameters[2,vertex]=uv[2]
         end
     end
@@ -259,7 +262,7 @@ end
 function _primary_collapse_diamonds!(coords,triangles,quadrangles,tags,births,
                                      context::_PrimarySurfaceContext,sources)
     removed=falses(size(coords,2));moved=falses(size(coords,2));changes=0
-    context.evaluate isa _PrimaryPlaneEvaluation || return (
+    context.evaluate===nothing && return (
         quadrangles=quadrangles,tags=tags,births=births,removed=removed,moved=moved,changes=changes)
     adjacency=[Int[] for _ in axes(coords,2)]
     for (column,cell) in enumerate(quadrangles),node in cell
@@ -297,7 +300,7 @@ function _primary_collapse_diamonds!(coords,triangles,quadrangles,tags,births,
         new_keys=[Tuple(sort(collect(nodes))) for nodes in replacements]
         allunique(new_keys) || continue
         any(key->key in keys && !(key in old_keys),new_keys) && continue
-        # UV averaging stays on the actual Plane; divide before adding so
+        # UV averaging is lifted through the actual surface; divide before adding so
         # opposite finite coordinates cannot overflow the midpoint.
         u=context.parameters[1,keep]*0.5+context.parameters[1,drop]*0.5
         v=context.parameters[2,keep]*0.5+context.parameters[2,drop]*0.5

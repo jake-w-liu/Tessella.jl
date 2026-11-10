@@ -2,8 +2,8 @@
 # identities and raw mesh-vertex parameters; strict MSH metadata keeps its
 # separate owner-dimensional parameter projection. It never publishes state.
 using ..Recombine: _primary_recombine_mixed, _PrimarySurfaceContext,
-    _PrimaryPlaneEvaluation, _PrimaryBlockedSurfaceEvaluation,
-    _primary_plane_parameters, _primary_bipartite_raw, _PRIMARY_BIPARTITE_EMPTY_ERROR
+    _PrimaryPlaneEvaluation, _PrimaryParametricEvaluation,
+    _primary_surface_parameters, _primary_bipartite_raw, _PRIMARY_BIPARTITE_EMPTY_ERROR
 
 function _api_native_recombine_option_integer(options,name,default,caller)
     value=get(options,name,default)
@@ -191,6 +191,32 @@ function _api_native_recombine_primitive_surface(m,surface)
     return false
 end
 
+function _api_native_recombine_parametric_evaluation(model,surface,old_ruled,caller)
+    value_at=(u,v)->begin
+        point=Model.model_value(model,2,surface,[u,v];old_ruled_surface=old_ruled)
+        length(point)==3 && all(isfinite,point) || throw(ArgumentError(
+            "$caller: Surface evaluation must produce three finite coordinates"))
+        (point[1],point[2],point[3])
+    end
+    inverse_at=point->begin
+        uv=Model.model_parametrization(model,2,surface,collect(point);
+            old_ruled_surface=old_ruled)
+        length(uv)==2 && all(isfinite,uv) || throw(ArgumentError(
+            "$caller: Surface inversion must produce two finite parameters"))
+        (uv[1],uv[2])
+    end
+    return _PrimaryParametricEvaluation(value_at,inverse_at)
+end
+
+function _api_native_recombine_surface_projection(model,surface,caller)
+    return point->begin
+        closest=first(Model.model_closest_point(model,2,surface,collect(point)))
+        length(closest)==3 && all(isfinite,closest) || throw(ArgumentError(
+            "$caller: Surface projection must produce three finite coordinates"))
+        (closest[1],closest[2],closest[3])
+    end
+end
+
 function _api_native_recombine_surface_context(m,source,owner,rows,settings,
         topology_admitted,boundary_layer_context,caller)
     data=source.mesh.entity_data
@@ -202,16 +228,16 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
         nothing
     elseif model_entity_type(m,2,Int(owner))!="Plane" ||
            haskey(m.surface_geometry,Int(owner)) || _api_native_recombine_primitive_surface(m,Int(owner))
-        _PrimaryBlockedSurfaceEvaluation("$caller: native relocation for this nonlinear or primitive Surface context is not implemented")
+        _api_native_recombine_parametric_evaluation(m,Int(owner),
+            !iszero(OPTIONS["Geometry.OldRuledSurface"]),caller)
     else
         plane=Model._model_plane_frame(m,Int(owner),caller)
         _PrimaryPlaneEvaluation(plane.origin,plane.first_direction,plane.second_direction)
     end
     relocate=settings.reposition && settings.smoothing>0
     diamond_parameters=settings.topology_passes>0 && topology_admitted &&
-        evaluate isa _PrimaryPlaneEvaluation
+        evaluate!==nothing
     if (relocate || diamond_parameters) && !discrete && any(value->value[1]==2,owners)
-        evaluate isa _PrimaryPlaneEvaluation || throw(ArgumentError(evaluate.message))
         relocate && boundary_layer_context && throw(ArgumentError(
             "$caller: native relocation with active boundary-layer context is not implemented"))
         missing_face_parameters=any(enumerate(rows)) do (local_row,row)
@@ -220,9 +246,13 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
             return parameter===nothing || isempty(parameter)
         end
         if missing_face_parameters
-            lower,upper=Model._model_plane_parameter_bounds(plane,caller)
-            frame=plane
-            project=point->first(Model._model_closest_plane_native(frame,point,lower,upper))
+            project=if plane===nothing
+                _api_native_recombine_surface_projection(m,Int(owner),caller)
+            else
+                lower,upper=Model._model_plane_parameter_bounds(plane,caller)
+                frame=plane
+                point->first(Model._model_closest_plane_native(frame,point,lower,upper))
+            end
         end
         for (local_row,row) in enumerate(rows)
             dimension,entity=owners[local_row]
@@ -232,7 +262,7 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
                     "$caller: native relocation across Surface parameter owners is not implemented"))
                 if parameter===nothing || isempty(parameter)
                     parameter_present[local_row]=false
-                    _primary_plane_parameters(evaluate,(source.mesh.coords[1,row],
+                    _primary_surface_parameters(evaluate,(source.mesh.coords[1,row],
                         source.mesh.coords[2,row],source.mesh.coords[3,row]))
                 else
                     length(parameter)==2 && all(isfinite,parameter) || throw(ArgumentError(
@@ -240,13 +270,10 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
                     (parameter[1],parameter[2])
                 end
             elseif !relocate
-                _primary_plane_parameters(evaluate,(source.mesh.coords[1,row],
+                _primary_surface_parameters(evaluate,(source.mesh.coords[1,row],
                     source.mesh.coords[2,row],source.mesh.coords[3,row]))
             elseif dimension==0
-                point=get(m.points,Int(entity),nothing)
-                point!==nothing || throw(ArgumentError(
-                    "$caller: native relocation with a non-CAD Point boundary is not implemented"))
-                _primary_plane_parameters(evaluate,(source.mesh.coords[1,row],
+                _primary_surface_parameters(evaluate,(source.mesh.coords[1,row],
                     source.mesh.coords[2,row],source.mesh.coords[3,row]))
             elseif dimension==1
                 (parameter===nothing || isempty(parameter) ||
@@ -262,7 +289,7 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
                 # at that value; the missing raw parameter storage stays empty.
                 u=parameter===nothing || isempty(parameter) ? 0.0 : parameter[1]
                 point=ntuple(axis->a[axis]+u*(b[axis]-a[axis]),3)
-                _primary_plane_parameters(evaluate,point)
+                _primary_surface_parameters(evaluate,point)
             else
                 throw(ArgumentError("$caller: native relocation with Volume-owned Surface support is not implemented"))
             end
@@ -463,7 +490,7 @@ function _api_native_recombine_plan(m,cached,class,caller;
         owner=output_data.node_entities[row]
         context=owner[1]==2 ? get(contexts,owner[2],nothing) : nothing
         moved=(context!==nothing && context.reposition && context.smoothing>0 &&
-            context.evaluate isa _PrimaryPlaneEvaluation) ||
+            context.evaluate!==nothing) ||
             (hasproperty(result,:topology_moved_tags) && tag in result.topology_moved_tags)
         push!(runtime,moved ? deepcopy(output_data.node_parametric[row]) :
             deepcopy(source.runtime_parameters[source_positions[tag]]))
