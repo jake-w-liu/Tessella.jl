@@ -279,17 +279,24 @@ function _api_native_recombine_surface_context(m,source,owner,rows,settings,
                 (parameter===nothing || isempty(parameter) ||
                  (length(parameter)==1 && all(isfinite,parameter))) ||
                     throw(ArgumentError("$caller: native relocation requires one finite stored Curve parameter"))
-                haskey(m.curves,Int(entity)) && Model._curve_type(m,Int(entity))===:line &&
-                    Model._occ_geometry(m,Int(entity))===nothing &&
-                    isempty(get(m.curve_control_points,Int(entity),Int[])) || throw(ArgumentError(
-                    "$caller: native relocation for this Curve evaluation context is not implemented"))
-                first,last=m.curves[Int(entity)];a=m.points[first];b=m.points[last]
-                # Base native MVertex::getParameter writes zero before returning
-                # false. The relocation caller still uses Curve reparametrization
-                # at that value; the missing raw parameter storage stays empty.
+                # Missing raw U retains the base vertex's zero-valued Curve
+                # reparametrization contract. Evaluate native pcurves for
+                # nonlinear/periodic boundaries instead of replacing U by a
+                # projection of the stored Cartesian point.
                 u=parameter===nothing || isempty(parameter) ? 0.0 : parameter[1]
-                point=ntuple(axis->a[axis]+u*(b[axis]-a[axis]),3)
-                _primary_surface_parameters(evaluate,point)
+                if haskey(m.curves,Int(entity)) && Model._curve_type(m,Int(entity))===:line &&
+                        Model._occ_geometry(m,Int(entity))===nothing &&
+                        isempty(get(m.curve_control_points,Int(entity),Int[]))
+                    first,last=m.curves[Int(entity)];a=m.points[first];b=m.points[last]
+                    point=ntuple(axis->a[axis]+u*(b[axis]-a[axis]),3)
+                    _primary_surface_parameters(evaluate,point)
+                else
+                    uv=Model.model_reparametrize_on_surface(m,1,Int(entity),[u],Int(owner);
+                        old_ruled_surface=!iszero(OPTIONS["Geometry.OldRuledSurface"]))
+                    length(uv)==2 && all(isfinite,uv) || throw(ArgumentError(
+                        "$caller: Curve reparametrization must produce two finite Surface parameters"))
+                    (uv[1],uv[2])
+                end
             else
                 throw(ArgumentError("$caller: native relocation with Volume-owned Surface support is not implemented"))
             end
