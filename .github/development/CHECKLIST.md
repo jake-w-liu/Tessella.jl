@@ -48,7 +48,7 @@ upstream context.
 
 ## Residuals requiring current verification
 
-The latest handoff explicitly leaves the following areas for investigation;
+Current source audits retain the following areas for investigation;
 the full per-row ledger remains authoritative for additional subitems:
 
 - Broader closed-Face native mean-plane frame contexts. The direct-model
@@ -59,8 +59,8 @@ the full per-row ledger remains authoritative for additional subitems:
   crossed-cylinder seams/fuse images, centroidal CAD measures and the wedge
   orientation are now implemented and default-wired. Remaining BREP families
   include nondegenerate pcurve-only edges, hyperbolas/general offsets and
-  internal/external orientations; general quadric-bounded shell inertia still
-  rejects rather than approximating.
+  internal/external orientations and translation-stable natural-solid moments;
+  general quadric-bounded shell inertia still rejects rather than approximating.
 - Full-quad and anisotropic integration with embedded, transfinite, smoothing,
   periodic/compound, and curved/scalar-field contexts.
 - NURBS trim/topology and general CAD Boolean/fillet contexts beyond the
@@ -87,7 +87,7 @@ the domain rows above. Do not restart completed designs from their old prose.
   material, and preserve third-party notices and historical evidence.
 - [x] Set version 0.1.0, declare dependency compatibility, retain the chosen MIT
   license and third-party notices, and enable supported-runtime CI.
-- [x] Run final ordinary `Pkg.test()` on Julia 1.12 and 1.13; separately record
+- [ ] Run final ordinary `Pkg.test()` on the final source on Julia 1.12 and 1.13; separately record
   any optimized compiler checks. Push verified source normally to `main` and
   verify the exact remote SHA.
 - [ ] Disclose substantial AI assistance and verify the maintainer's human
