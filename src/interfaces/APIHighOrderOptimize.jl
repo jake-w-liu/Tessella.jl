@@ -730,16 +730,17 @@ function _surface_optimize_good_move(coords,uv_for,node,incident,cells,
     points(cell)=ntuple(i->(coords[1,cell[2][i]],coords[2,cell[2][i]],
         coords[3,cell[2][i]]),length(cell[2]))
     function sweep(probe)
-        surface=0.0;minq=1.0
+        surface=0.0;minimum_quality=1.0
         for index in incident
             cell=cells[index]
             cell_uvs=Union{Nothing,Vector{Float64}}[
                 slot==node ? probe : uv_for(slot) for slot in cell[2]]
             any(u->u===nothing,cell_uvs) && continue
             surface+=_surface_uv_cell_area(cell_uvs)
-            minq=min(minq,_surface_optimize_cell_eta(cell[1],points(cell)))
+            minimum_quality=min(minimum_quality,
+                _surface_optimize_cell_eta(cell[1],points(cell)))
         end
-        return surface,minq
+        return surface,minimum_quality
     end
     surface_old,minq=sweep(uv_for(node))
     px,py,pz=coords[1,node],coords[2,node],coords[3,node]
@@ -834,18 +835,18 @@ function _surface_relocate_vertex!(coords,uv_for,node,incident,cells,
     points(cell)=ntuple(i->(coords[1,cell[2][i]],coords[2,cell[2][i]],
         coords[3,cell[2][i]]),length(cell[2]))
     objective=function(point_at,xi)
-        xyz=point_at(xi)
-        xyz===nothing && return -1.0
+        trial_xyz=point_at(xi)
+        trial_xyz===nothing && return -1.0
         px,py,pz=coords[1,node],coords[2,node],coords[3,node]
-        coords[1,node],coords[2,node],coords[3,node]=xyz
-        worst=1.0
+        coords[1,node],coords[2,node],coords[3,node]=trial_xyz
+        minimum_quality=1.0
         for index in incident
             cell=cells[index]
-            worst=min(worst,_surface_optimize_cell_objective(
+            minimum_quality=min(minimum_quality,_surface_optimize_cell_objective(
                 cell[1],points(cell)))
         end
         coords[1,node],coords[2,node],coords[3,node]=px,py,pz
-        return worst
+        return minimum_quality
     end
     p2=uv_for(node)
     if p2===nothing
@@ -856,24 +857,24 @@ function _surface_relocate_vertex!(coords,uv_for,node,incident,cells,
             counter+=1
         end
         counter==0 && return nothing
-        cx/=counter;cy/=counter;cz/=counter
-        point_at=function(xi)
-            q=Float64[cx*(1.0-xi)+coords[1,node]*xi,
-                      cy*(1.0-xi)+coords[2,node]*xi,
-                      cz*(1.0-xi)+coords[3,node]*xi]
+        centroid_xyz=(cx/counter,cy/counter,cz/counter)
+        world_point_at=function(xi)
+            q=Float64[centroid_xyz[1]*(1.0-xi)+coords[1,node]*xi,
+                      centroid_xyz[2]*(1.0-xi)+coords[2,node]*xi,
+                      centroid_xyz[3]*(1.0-xi)+coords[3,node]*xi]
             closest,_=try
                 Model.model_closest_point(model,2,tag,q)
             catch err
                 (err isa InterruptException||err isa OutOfMemoryError)&&rethrow()
                 return nothing
             end
-            (length(closest)>=3&&all(isfinite,view(closest,1:3)))||return nothing
+            (length(closest)>=3&&all(isfinite,Base.view(closest,1:3)))||return nothing
             return (closest[1],closest[2],closest[3])
         end
-        worst=objective(point_at,0.0)
+        worst=objective(world_point_at,0.0)
         xi_final=worst>0.5 ? 0.0 :
-            _surface_golden_search(xi->objective(point_at,xi),1e-6,worst)
-        xyz=point_at(xi_final)
+            _surface_golden_search(xi->objective(world_point_at,xi),1e-6,worst)
+        xyz=world_point_at(xi_final)
         xyz===nothing && return nothing
         coords[1,node],coords[2,node],coords[3,node]=xyz
         return true
@@ -884,16 +885,17 @@ function _surface_relocate_vertex!(coords,uv_for,node,incident,cells,
         uv===nothing || (cu+=uv[1];cv+=uv[2];counter+=1)
     end
     counter==0 && return nothing
-    cu/=counter;cv/=counter
-    point_at=function(xi)
-        uv=Float64[cu*(1.0-xi)+p2[1]*xi,cv*(1.0-xi)+p2[2]*xi]
-        return _surface_optimize_lift(model,tag,uv)
+    centroid_uv=(cu/counter,cv/counter)
+    uv_point_at=function(xi)
+        trial_uv=Float64[centroid_uv[1]*(1.0-xi)+p2[1]*xi,
+                        centroid_uv[2]*(1.0-xi)+p2[2]*xi]
+        return _surface_optimize_lift(model,tag,trial_uv)
     end
-    worst=objective(point_at,0.0)
+    worst=objective(uv_point_at,0.0)
     xi_final=worst>0.5 ? 0.0 :
-        _surface_golden_search(xi->objective(point_at,xi),1e-6,worst)
-    uv=Float64[cu*(1.0-xi_final)+p2[1]*xi_final,
-               cv*(1.0-xi_final)+p2[2]*xi_final]
+        _surface_golden_search(xi->objective(uv_point_at,xi),1e-6,worst)
+    uv=Float64[centroid_uv[1]*(1.0-xi_final)+p2[1]*xi_final,
+               centroid_uv[2]*(1.0-xi_final)+p2[2]*xi_final]
     xyz=_surface_optimize_lift(model,tag,uv)
     xyz===nothing && return nothing
     coords[1,node],coords[2,node],coords[3,node]=xyz

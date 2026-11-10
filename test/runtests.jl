@@ -88,6 +88,7 @@ include("functional/fixtures.jl")
         "interfaces/api_native_pyramid_apex_test.jl",
         "interfaces/api_view_inverse_recovery_test.jl",
         "interfaces/api_native_recombine_diamond_test.jl",
+        "interfaces/api_surface_optimizer_capture_test.jl",
         "interfaces/api_view_normalization_test.jl",
         "interfaces/api_plugin_normalized_probe_test.jl",
         "functional/model_merge_smoke.jl",
