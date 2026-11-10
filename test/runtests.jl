@@ -160,6 +160,7 @@ include("functional/fixtures.jl")
         "interfaces/api_model_postview_field_test.jl",
         "interfaces/api_view_probe_basis_test.jl",
         "interfaces/api_view_nearest_resource_test.jl",
+        "interfaces/api_view_nearest_dimension_test.jl",
         "interfaces/api_view_probe_raw_arithmetic_test.jl",
         "interfaces/api_plugin_model_probe_test.jl",
         "interfaces/api_metric_surface_embedded_test.jl",

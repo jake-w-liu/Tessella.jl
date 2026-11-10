@@ -25,7 +25,9 @@ tangential gradient.
 Exact element matches take precedence. A positive `distanceMax` enables
 nearest-node sampling within that inclusive radius; a negative value enables it
 without a radius limit. An ordinary automatic miss still reports the nearest
-distance. A class-filtered miss with no radius request returns empty values and
+node distance over the whole view, including nodes of dimensions excluded from
+the value search. Dimension and element filters apply when sampling at that
+nearest node. A class-filtered miss with no radius request returns empty values and
 distance -1. Supplying `xElemCoord`, `yElemCoord`, and `zElemCoord` restricts the
 search to the ordered element coordinates supplied by the caller.
 

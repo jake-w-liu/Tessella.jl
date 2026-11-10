@@ -520,7 +520,10 @@ function _view_probe_native(tag,x,y,z,step=-1,num_comp=-1,gradient=false,
             # Explicit class-only searches do not request a nearest distance
             # until a nonzero radius enables the common nearest-node search.
             wanted>0 && radius==0 && return Float64[],-1.0
-            nearest,distance=_view_probe_find(records,point,dim,element_coords;
+            # The nearest distance belongs to the whole view. Apply the
+            # requested dimension and element filter only when sampling at
+            # that node, just as for the original exact query above.
+            nearest,distance=_view_probe_find(records,point,-1,nothing;
                 reverse_order=true,exact_match=false)
             nearest===nothing && return Float64[],-1.0
             (radius<0 || (radius>0 && distance<=radius)) || return Float64[],distance

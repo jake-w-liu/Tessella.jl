@@ -56,7 +56,7 @@ end
   @test A.view.probe(v,1.5,0.,0.;distanceMax=.5)==([2.,0.,6.],.5)
   @test A.view.probe(v,1.5,0.,0.;distanceMax=-1)==([2.,0.,6.],.5)
   @test A.view.probe(v,.25,0.,0.;numComp=3)==(Float64[],-1.)
-  @test A.view.probe(v,.25,0.,0.;dim=2)==(Float64[],-1.)
+  @test A.view.probe(v,.25,0.,0.;dim=2)==(Float64[],.25)
   @test_throws ArgumentError A.view.probe(v,.25,0.,0.;step=3)
   @test_throws ArgumentError A.view.probe(v,NaN,0.,0.)
  end
