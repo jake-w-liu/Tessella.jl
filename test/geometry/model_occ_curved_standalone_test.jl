@@ -73,16 +73,16 @@ _error(f)=try;f();nothing catch err;err end
     end
 
     # NURBS-converted lateral: `convertToNURBS` rebinds the face to a
-    # quadratic-rational patch while the public (angle,height) parameters —
-    # and every stored pcurve — stay bitwise. The kernel's `_occ_surface_point`
-    # lift evaluates the patch through `_model_nurbs_surface_d2`.
+    # quadratic-rational patch and transports every boundary pcurve into
+    # its rational chart. The kernel's `_occ_surface_point` lift evaluates
+    # the patch through `_model_nurbs_surface_d2`.
     mn=GeoModel()
     M._model_occ_add_cylinder!(mn,0.0,0.0,0.0,0.0,0.0,2.0,1.0;tag=1)
     M._model_occ_convert_to_nurbs!(mn,[(3,1)],"test")
     M._model_occ_synchronize!(mn)
     nlat=findfirst(==(:cylinder),mn.surface_types)
     ng=mn.surface_geometry[nlat]
-    @test hasproperty(ng,:patch) && hasproperty(ng,:reparam)
+    @test hasproperty(ng,:patch) && hasproperty(ng,:analytic_chart)
     nmesh=M.mesh_model_surface(mn,nlat)
     @test MT.validate(nmesh).ok
     @test MT.ntris(nmesh)>0

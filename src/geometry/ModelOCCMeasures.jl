@@ -520,7 +520,7 @@ function _occ_cyl_chord_integrals!(acc::AbstractDict,a,b)
 end
 
 function _model_occ_cyl_face_integrals(kernel,fid)
-    shape=kernel.shapes[fid]; rec=shape.geometry.geometry
+    shape=kernel.shapes[fid]; rec=_model_occ_analytic_surface_record(shape.geometry.geometry)
     totals=Dict(name=>0.0 for name in _OCC_CYL_INTEGRALS)
     for (wi,wire_id) in enumerate(shape.children)
         uses=kernel.shapes[wire_id].geometry.uses
@@ -588,7 +588,7 @@ end
 # frame handedness, shell orientation and radius.
 function _model_occ_cyl_face_moment_terms(kernel,fid,offset)
     J=_model_occ_cyl_face_integrals(kernel,fid)
-    rec=kernel.shapes[fid].geometry.geometry
+    rec=_model_occ_analytic_surface_record(kernel.shapes[fid].geometry.geometry)
     R=rec.radius;X=rec.X;Y=rec.Y;Z=rec.axis
     C=_occ3_sub(rec.center,offset)
     Cx=_dot3(C,X);Cy=_dot3(C,Y)
@@ -858,27 +858,9 @@ function _model_occ_face_measure(kernel,id)
         # the sampled uv boundary like the other trimmed bases.
         (get(rec,:trimmed,false) && haskey(rec,:pcurves)) &&
             return _model_occ_trimmed_face_measure(kernel,id)
-        # NURBS tensor face — OCC tensor faces cover the full knot
-        # domain. GL8 per nonzero knot span in each direction keeps the
-        # piecewise-smooth patch integrand at machine precision.
-        surface=rec.patch.surface
-        (u0,v0),(u1,v1)=_model_nurbs_surface_bounds(rec)
-        uspans=_model_occ_span_cuts(surface.knots_u,u0,u1)
-        vspans=_model_occ_span_cuts(surface.knots_v,v0,v1)
-        A=0.0; M=(0.0,0.0,0.0)
-        for (ua,ub) in uspans, (va,vb) in vspans
-            hu=(ub-ua)/2; mu=(ua+ub)/2; hv=(vb-va)/2; mv=(va+vb)/2
-            for i in 1:4, si in (-1,1), j in 1:4, sj in (-1,1)
-                u=mu+si*hu*_OCC_GL_T[i]; v=mv+sj*hv*_OCC_GL_T[j]
-                w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
-                p,du,dv,_,_,_=_model_nurbs_surface_d2(rec,u,v)
-                dA=_occ_modulus(_occ_cross(du,dv))
-                A+=w*dA; M=_occ3_add(M,_occ3_scale(p,w*dA))
-            end
-        end
-        A>_OCC_CONFUSION || throw(ErrorException(
-            "OCC.get_mass: NURBS face has zero area"))
-        return A,_occ3_scale(M,1.0/A)
+        integrals=_model_occ_full_patch_integrals(rec;fields=(:area,:first))
+        integrals.area>0 || throw(ArgumentError("OCC.get_mass: NURBS face has zero area"))
+        return integrals.area,_occ3_scale(integrals.first,1/integrals.area)
     end
     if get(rec,:trimmed,false)
         return _model_occ_trimmed_face_measure(kernel,id)
@@ -956,24 +938,9 @@ end
 # caller folds in the use sign and the global 1/4.
 function _model_occ_patch_face_div(kernel,id;want_centroid=true)
     rec=kernel.shapes[id].geometry.geometry
-    surface=rec.patch.surface
-    (u0,v0),(u1,v1)=_model_nurbs_surface_bounds(rec)
-    uspans=_model_occ_span_cuts(surface.knots_u,u0,u1)
-    vspans=_model_occ_span_cuts(surface.knots_v,v0,v1)
-    V=0.0; M=(0.0,0.0,0.0)
-    for (ua,ub) in uspans, (va,vb) in vspans
-        hu=(ub-ua)/2; mu=(ua+ub)/2; hv=(vb-va)/2; mv=(va+vb)/2
-        for i in 1:4, si in (-1,1), j in 1:4, sj in (-1,1)
-            u=mu+si*hu*_OCC_GL_T[i]; v=mv+sj*hv*_OCC_GL_T[j]
-            w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
-            p,du,dv,_,_,_=_model_nurbs_surface_d2(rec,u,v)
-            rn=_dot3(p,_occ_cross(du,dv))
-            V+=w*rn/3
-            want_centroid &&
-                (M=_occ3_add(M,_occ3_scale(p,w*rn)))
-        end
-    end
-    return V,M
+    fields=want_centroid ? (:volume,:div_first) : (:volume,)
+    integrals=_model_occ_full_patch_integrals(rec;fields)
+    return integrals.volume,integrals.div_first
 end
 
 # ∬_F r⊗r dA · n contraction for one plane face: T·n̂ accumulated during
@@ -1693,24 +1660,8 @@ function _model_occ_face_moment2(kernel,id)
         return _model_occ_trimmed_face_moment2(kernel,id;centroid)
     end
     if haskey(rec,:patch)
-        surface=rec.patch.surface
-        (u0,v0),(u1,v1)=_model_nurbs_surface_bounds(rec)
-        uspans=_model_occ_span_cuts(surface.knots_u,u0,u1)
-        vspans=_model_occ_span_cuts(surface.knots_v,v0,v1)
-        for (ua,ub) in uspans, (va,vb) in vspans
-            hu=(ub-ua)/2; mu=(ua+ub)/2; hv=(vb-va)/2; mv=(va+vb)/2
-            for i in 1:4, si in (-1,1), j in 1:4, sj in (-1,1)
-                u=mu+si*hu*_OCC_GL_T[i]; v=mv+sj*hv*_OCC_GL_T[j]
-                w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
-                p,du,dv,_,_,_=_model_nurbs_surface_d2(rec,u,v)
-                dA=_occ_modulus(_occ_cross(du,dv))
-                d=_occ3_sub(p,centroid)
-                for i2 in 1:3,j2 in 1:3
-                    m[i2,j2]+=w*dA*d[i2]*d[j2]
-                end
-            end
-        end
-        return m
+        return _model_occ_full_patch_integrals(rec;centered=true,
+            center=centroid,fields=(:centered_second,)).centered_second
     end
     # Quadric patches over their canonical domains — 8×8 GL8 panels,
     # matching the curve-panel resolution for these smooth integrands.

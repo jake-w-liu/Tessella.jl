@@ -20,7 +20,7 @@
 #   ExtractElements value/dimension filtered elements into `*_ExtractElements`,
 #   Transform       in-place affine map of list or source-model node coordinates,
 #   Remove          in-place element-class/string removal,
-#   Smooth          in-place coincident-node value averaging,
+#   Smooth          coincident list-value averaging or model nodal projection,
 #   NewView         constant `NodeData` model view over the current mesh,
 #   Gradient        per-node spatial gradient of scalar data into `*_Gradient`
 #                   vector records,
@@ -119,7 +119,7 @@
 # Session views carry no per-element visibility flags, so the upstream `Visible`
 # options are accepted and stored but currently never hide an element.
 # `Skin FromMesh` publishes discrete boundary entities while retaining source
-# node ownership. `Remove`/`Smooth`/`Warp` currently reject model-based views;
+# node ownership. `Remove`/`Warp` currently reject model-based views;
 # their remaining successful native model-data contexts require qualification. CutSphere and Isosurface register `RecurLevel`/
 # `TargetError` like upstream;
 # they steer the adaptive subdivision of *curved* elements, which our linear
@@ -1343,6 +1343,7 @@ function _plugin_exec_extract_elements(spec::_PluginSpec,caller::AbstractString)
 end
 
 include("APIPluginsModelGeometry.jl")
+include("APIPluginsModelSmooth.jl")
 
 # ---- Transform ------------------------------------------------------------------------
 
@@ -1442,8 +1443,7 @@ end
 function _plugin_exec_smooth(spec::_PluginSpec,caller::AbstractString)
     numbers=spec.numbers
     tag,view=_plugin_view(numbers,caller)
-    view.model_kind===nothing || throw(ArgumentError(
-        "$caller: Smooth rewrites list data only; model views are unsupported"))
+    view.model_kind===nothing || return _plugin_model_smooth!(view,caller)
     steps=_plugin_list_steps(view,caller)
     sums=Dict{NTuple{3,Float64},Vector{Float64}}()
     members=Dict{NTuple{3,Float64},Int}()
@@ -2184,11 +2184,75 @@ function _plugin_facet_normal(data,base::Int,arity::Int)
     return (n[1]/s,n[2]/s,n[3]/s)
 end
 
+# Model-view Warp: a vector NodeData OtherView displaces the current mesh
+# nodes by Factor times its three components. Upstream ignores the target
+# model view's scalar values in this mode; with no OtherView it is a no-op.
+function _plugin_warp_model!(numbers,tag,view,caller)
+    factor=_mesh_query_coordinate(numbers["Factor"],caller,"Factor")
+    timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
+    raw_other=numbers["OtherView"]
+    raw_other<0 && return nothing
+    raw_other==floor(raw_other) || throw(ArgumentError(
+        "$caller: OtherView tag must be an integer"))
+    otag=Int(raw_other)
+    haskey(SESSION_VIEWS,otag) || throw(ArgumentError(
+        "$caller: unknown view tag $otag"))
+    other=_session_view_data(otag,caller)
+    other.model_kind=="NodeData" || throw(ArgumentError(
+        "$caller: model Warp requires a NodeData vector OtherView"))
+    timestep>=0 || throw(ArgumentError(
+        "$caller: Invalid TimeStep ($timestep) in View[$otag]"))
+    key=(timestep,"NodeData")
+    haskey(other.model_data,key) || throw(ArgumentError(
+        "$caller: Invalid TimeStep ($timestep) in View[$otag]"))
+    tags,values,nc=other.model_data[key]
+    nc==3 || throw(ArgumentError(
+        "$caller: model Warp OtherView must have three components"))
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    cached=slot.mesh
+    if cached isa MixedMesh && cached.entity_data===nothing &&
+            (!isempty(cached.periodic_links) ||
+             !isempty(cached.ancillary_sections) ||
+             !isempty(cached.data_sections))
+        throw(ArgumentError(
+            "$caller: Warp cannot retain mesh sections without entity metadata"))
+    end
+    # Coordinate-only Warp keeps every retained section and periodic link by
+    # rebuilding the actual cache mesh, not the tag-normalized writer view.
+    mixed=cached isa MixedMesh && cached.entity_data!==nothing ? cached :
+        _native_view_writer_mesh(slot,caller)
+    public=_cache_public_tags(mixed;caller="model Warp")
+    positions=public.node_indices
+    coordinates=copy(mixed.coords)
+    for (row,tag_uid) in enumerate(tags)
+        position=get(positions,UInt64(tag_uid),0)
+        position==0 && throw(ArgumentError(
+            "$caller: OtherView references unknown node $tag_uid"))
+        for axis in 1:3
+            value=coordinates[axis,position]+
+                factor*values[3(row-1)+axis]
+            isfinite(value) || throw(ArgumentError(
+                "$caller: Warp displacement exceeds the finite range"))
+            coordinates[axis,position]=value
+        end
+    end
+    replacement=_mixed_with_coordinates(mixed,coordinates)
+    class=mixed===cached ? _cached_classification_locked(cached) : nothing
+    newclass=class===nothing ? _higher_classification_from_data(replacement,caller) :
+        _mixed_rebind_class(class,replacement;node_parametric=class.node_parametric)
+    _replace_mesh_cache_locked!(replacement,newclass;preserve_visibility=true)
+    _native_lookup_reset_locked!()
+    _slot_capture_locked!()
+    return nothing
+end
+
 function _plugin_exec_warp(spec::_PluginSpec,caller::AbstractString)
     numbers=spec.numbers
     tag,view=_plugin_view(numbers,caller)
-    view.model_kind===nothing || throw(ArgumentError(
-        "$caller: Warp rewrites list data only; model views are unsupported"))
+    view.model_kind===nothing || return _plugin_warp_model!(numbers,tag,view,caller)
     factor=_mesh_query_coordinate(numbers["Factor"],caller,"Factor")
     timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
     tol=_mesh_query_coordinate(numbers["SmoothingAngle"],caller,"SmoothingAngle")
@@ -5342,6 +5406,34 @@ function _plugin_distance_pde(mesh,slot,total,maxdim,mu,ids,caller)
     return distance
 end
 
+# Factor a positive determinant as mantissa·2^exponent without forming the
+# product, which can underflow on a valid thin element (h² at h=1e-200). The
+# caller applies one power-of-two scale to the whole component so stiffness,
+# reaction and load stay in range together; the solution is invariant.
+function _plugin_distance_measure_factors(diagonal)
+    mantissa=1.0
+    exponent=0
+    for value in diagonal
+        (isfinite(value) && value>0) || return 0.0,0
+        mant,power=frexp(value)
+        mantissa*=mant
+        exponent+=power
+    end
+    return mantissa,exponent
+end
+
+function _plugin_distance_scaled_measure(mantissa,exponent,common_exponent,caller)
+    shift=exponent-common_exponent
+    value=ldexp(mantissa,shift)
+    (isfinite(value) && value>0) || throw(ArgumentError(
+        "$caller: diffusion element measure is outside the finite range"))
+    half=fld(shift,2)
+    root=ldexp(sqrt(mantissa)*(isodd(shift) ? sqrt(2.0) : 1.0),half)
+    (isfinite(root) && root>0) || throw(ArgumentError(
+        "$caller: diffusion element root measure is outside the finite range"))
+    return value,root
+end
+
 function _plugin_distance_component!(distance,unknown,mesh,indices,component_nodes,
         fixed,maxdim,dtype,boundary_scale,references,caller)
     origin=ntuple(axis->mesh.coords[axis,first(component_nodes)],3)
@@ -5361,6 +5453,7 @@ function _plugin_distance_component!(distance,unknown,mesh,indices,component_nod
     invmu=1/mu
     root_diffusion=mu>=1 ? 1.0 : mu
     reaction=mu>=1 ? invmu*invmu : 1.0
+    common_measure_exponent=nothing
     for index in indices
         record=mesh_element_record(mesh,index)
         any(node->unknown[Int(node)]!=0,record.node_tags) || continue
@@ -5395,9 +5488,16 @@ function _plugin_distance_component!(distance,unknown,mesh,indices,component_nod
                 end
                 jacobian=coordinates*transpose(derivatives)
                 triangular=Matrix(LinearAlgebra.qr(jacobian).R)
-                measure=prod(abs(triangular[axis,axis]) for axis in 1:maxdim)
-                isfinite(measure) && measure>0 || throw(ArgumentError(
+                # The determinant product can underflow on a valid thin
+                # element while the solution ratio remains representable.
+                mantissa,exponent=_plugin_distance_measure_factors(
+                    (abs(triangular[axis,axis]) for axis in 1:maxdim))
+                (isfinite(mantissa) && mantissa>0) || throw(ArgumentError(
                     "$caller: degenerate diffusion element"))
+                common_measure_exponent===nothing &&
+                    (common_measure_exponent=exponent)
+                measure,root_measure=_plugin_distance_scaled_measure(
+                    mantissa,exponent,common_measure_exponent,caller)
                 weight=weights[q]*measure
                 if part==2
                     for i in 1:n;load[i]+=weight*basis[offset+i];end
@@ -5406,7 +5506,6 @@ function _plugin_distance_component!(distance,unknown,mesh,indices,component_nod
                 # Weight before squaring or dividing: the unweighted gradient
                 # can be enormous on a valid thin element. Keep mu unsquared
                 # here so a small diffusion coefficient survives amplification.
-                root_measure=prod(sqrt(abs(triangular[axis,axis])) for axis in 1:maxdim)
                 physical=(transpose(triangular)\(derivatives.*root_measure)).*root_diffusion
                 for i in 1:n,j in i:n
                     stiffness=sum(physical[axis,i]*physical[axis,j] for axis in 1:maxdim)
@@ -9521,24 +9620,487 @@ function _bl_parse_ints(text::AbstractString)
     return out
 end
 
-function _plugin_exec_boundarylayer(spec::_PluginSpec,caller::AbstractString)
-    m=_model_locked()
-    # Upstream `parse` + `getXByTag` resolution: non-numeric words and unknown
-    # entity tags are silently skipped. The resolution is preserved here so
-    # the selection strings are interpreted exactly like upstream before the
-    # documented reject below.
-    selected=NTuple{2,Int}[]
-    for (dim,opt) in ((0,"Points"),(1,"Curves"),(2,"Surfaces"),(3,"Volumes"))
-        for tag in _bl_parse_ints(spec.strings[opt])
-            _model_entity_known(m,dim,tag) && push!(selected,(dim,tag))
-        end
+# Fan offsets: first width `size`, each next multiplied by `ratio`, stopping
+# before the cumulative thickness exceeds `thickness`. This reproduces the
+# upstream plugin's .01/.012/.0144 -> .01/.022/.0364 unit-square example.
+function _bl_layer_offsets(thickness,size,ratio,caller)
+    (isfinite(thickness) && thickness>0) || throw(ArgumentError(
+        "$caller: Thickness must be finite and positive"))
+    (isfinite(size) && size>0) || throw(ArgumentError(
+        "$caller: Size must be finite and positive"))
+    (isfinite(ratio) && ratio>0) || throw(ArgumentError(
+        "$caller: Ratio must be finite and positive"))
+    thickness>=size || return Float64[]
+    max_layers=10_000
+    if ratio==1.0
+        quotient=thickness/size
+        (isfinite(quotient) && quotient<=max_layers) || throw(ArgumentError(
+            "$caller: layer count exceeds the supported bound $max_layers"))
+        count=floor(Int,quotient+8eps(Float64))
+        return Float64[size*k for k in 1:count]
+    elseif ratio<1.0
+        # The widths form a finite geometric series; an unreachable
+        # thickness must fail instead of underflowing to a zero width.
+        finite_total=size/(1-ratio)
+        thickness<finite_total*(1+8eps(Float64)) || throw(ArgumentError(
+            "$caller: Thickness exceeds the finite sum of a decreasing Ratio"))
+    end
+    offsets=Float64[];total=0.0;width=size
+    for _ in 1:max_layers
+        (isfinite(width) && width>0) || return offsets
+        next=total+width
+        next<=thickness*(1+8eps(Float64)) || return offsets
+        isfinite(next) || throw(ArgumentError(
+            "$caller: layer offset exceeds the finite range"))
+        push!(offsets,next);total=next;width*=ratio
+        # A non-finite or non-advancing next width cannot add another layer
+        # within the representable range; the valid prefix is the answer.
+        (isfinite(width) && width>0 && total+width>total) || return offsets
     end
     throw(ArgumentError(
-        "$caller: Plugin(BoundaryLayer) mesh modification is not implemented " *
-        "in Tessella — the upstream plugin grows boundary-layer quads on " *
-        "$(length(selected)) selected entities and retimes curve nodes in " *
-        "place, which requires mesh-mutation support outside the " *
-        "discrete-entity records"))
+        "$caller: layer count exceeds the supported bound $max_layers"))
+end
+
+_bl_cross2(a,b)=a[1]*b[2]-a[2]*b[1]
+
+# Normalized-edge Newell normal of a planar polygonal cell. Subtracting the
+# first vertex and normalizing each edge keeps the direction stable under
+# large translations and very small or large coordinate scales.
+function _bl_cell_normal(coords,cell)
+    origin=ntuple(axis->coords[axis,cell[1]],3)
+    normal=(0.,0.,0.)
+    for i in 2:length(cell)-1
+        a=ntuple(axis->coords[axis,cell[i]]-origin[axis],3)
+        b=ntuple(axis->coords[axis,cell[i+1]]-origin[axis],3)
+        la=hypot(a...);lb=hypot(b...)
+        (la>0 && lb>0) || return (0.,0.,0.)
+        a=ntuple(axis->a[axis]/la,3);b=ntuple(axis->b[axis]/lb,3)
+        normal=_bl_add(normal,(a[2]*b[3]-a[3]*b[2],
+            a[3]*b[1]-a[1]*b[3],a[1]*b[2]-a[2]*b[1]))
+    end
+    return normal
+end
+function _bl_cell_positive(coords,cell,reference)
+    normal=_bl_cell_normal(coords,cell)
+    length=sqrt(sum(abs2,normal))
+    return isfinite(length) && length>0 && _bl_dot(normal,reference)>0
+end
+
+function _bl_unit(vector,caller)
+    length=hypot(vector...)
+    isfinite(length) && length>0 || throw(ArgumentError(
+        "$caller: boundary layer normal is degenerate"))
+    return ntuple(i->vector[i]/length,3)
+end
+_bl_dot(a,b)=a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+_bl_sub(a,b)=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
+_bl_add(a,b)=(a[1]+b[1],a[2]+b[2],a[3]+b[3])
+_bl_scale(a,s)=(a[1]*s,a[2]*s,a[3]*s)
+
+function _bl_has_edge(nodes,a,b)
+    for i in eachindex(nodes)
+        j=i==length(nodes) ? 1 : i+1
+        (nodes[i]==a && nodes[j]==b) || (nodes[i]==b && nodes[j]==a) || continue
+        return true
+    end
+    return false
+end
+
+# Inward normal of boundary segment (a,b) from the centroid of the unique
+# adjacent surface cell, projected perpendicular to the segment. The segment
+# must be an actual cell edge (not a diagonal), and `selected_surfaces`
+# resolves crease ambiguity when the caller names Surfaces.
+function _bl_segment_normal(mixed,blocks,data,a,b,selected_surfaces,caller)
+    starts=mixed.coords[:,a];finishes=mixed.coords[:,b]
+    tangent=_bl_sub(finishes,starts)
+    tangent=_bl_unit(tangent,caller)
+    midpoint=_bl_scale(_bl_add(starts,finishes),.5)
+    accumulator=(0.,0.,0.);surface=0;physical=Int32(0)
+    reference=nothing;surfaces=Set{Int}()
+    for (bi,block) in enumerate(blocks)
+        msh_dimension(block.msh)==2 || continue
+        for column in axes(block.nodes,2)
+            nodes=@view block.nodes[:,column]
+            _bl_has_edge(nodes,a,b) || continue
+            owner=Int(data.block_entities[bi][column])
+            isempty(selected_surfaces) || owner in selected_surfaces || continue
+            centroid=ntuple(axis->sum(mixed.coords[axis,nodes])/length(nodes),3)
+            direction=_bl_sub(centroid,midpoint)
+            projected=_bl_sub(direction,_bl_scale(tangent,_bl_dot(direction,tangent)))
+            norm=hypot(projected...)
+            norm>1e-12*max(hypot(direction...),eps(Float64)) || continue
+            accumulator=_bl_add(accumulator,_bl_scale(projected,1/norm))
+            push!(surfaces,owner)
+            if surface==0
+                surface=owner;physical=block.tags[column]
+                cell=Int32.(nodes)
+                candidate=_bl_cell_normal(mixed.coords,cell)
+                sqrt(sum(abs2,candidate))>0 && (reference=candidate)
+            end
+        end
+    end
+    surface==0 && throw(ArgumentError(
+        "$caller: selected curve segment is not on a surface boundary"))
+    length(surfaces)==1 || throw(ArgumentError(
+        "$caller: selected curve lies on an internal or crease edge; name Surfaces"))
+    reference===nothing && throw(ArgumentError(
+        "$caller: selected surface cell is degenerate"))
+    return _bl_unit(accumulator,caller),surface,physical,reference
+end
+
+# Adjacent unselected curve plus the exact line cell incident to the wall
+# node; the caller retimes that cell so the side mesh stays conforming.
+function _bl_adjacent_curve(blocks,data,node,selected)
+    result=0;physical=Int32(0);block_index=0;column_index=0
+    for (bi,block) in enumerate(blocks)
+        msh_dimension(block.msh)==1 && block.msh==1 || continue
+        for column in axes(block.nodes,2)
+            any(==(node),@view block.nodes[:,column]) || continue
+            owner=Int(data.block_entities[bi][column])
+            owner in selected && continue
+            if result==0
+                result=owner;physical=block.tags[column]
+                block_index=bi;column_index=column
+            end
+        end
+    end
+    return result,physical,block_index,column_index
+end
+
+function _plugin_exec_boundarylayer(spec::_PluginSpec,caller::AbstractString)
+    m=_model_locked()
+    selected_curves=Set{Int}()
+    selected_points=Set{Int}()
+    for tag in _bl_parse_ints(spec.strings["Points"])
+        _model_entity_known(m,0,tag) && push!(selected_points,tag)
+    end
+    for tag in _bl_parse_ints(spec.strings["Curves"])
+        _model_entity_known(m,1,tag) && push!(selected_curves,tag)
+    end
+    selected_surfaces=Set{Int}()
+    for tag in _bl_parse_ints(spec.strings["Surfaces"])
+        _model_entity_known(m,2,tag) && push!(selected_surfaces,tag)
+    end
+    for tag in _bl_parse_ints(spec.strings["Volumes"])
+        _model_entity_known(m,3,tag)
+    end
+    if isempty(selected_curves)
+        if isempty(selected_points)
+            return nothing
+        end
+        throw(ArgumentError(
+            "$caller: point-only boundary-layer collapse requires selected curves"))
+    end
+    _slot_capture_locked!()
+    index=_current_slot_index_locked()
+    index==0 && throw(ArgumentError("$caller: no current model"))
+    slot=MODEL_SLOTS[index]
+    source=slot.mesh
+    if source isa MixedMesh
+        # Topology replacement cannot keep index-based periodic links or
+        # retained data sections consistent; reject rather than silently
+        # publishing a mesh that lost them.
+        isempty(source.periodic_links) || throw(ArgumentError(
+            "$caller: periodic mesh links cannot be retained across a boundary layer"))
+        isempty(source.ancillary_sections) || throw(ArgumentError(
+            "$caller: ancillary mesh sections cannot be retained across a boundary layer"))
+        isempty(source.data_sections) || throw(ArgumentError(
+            "$caller: mesh data sections cannot be retained across a boundary layer"))
+    end
+    mixed=_native_view_writer_mesh(slot,caller)
+    mixed.entity_data===nothing && throw(ArgumentError(
+        "$caller: boundary layer needs a mesh with entity metadata"))
+    mixed.partition_data===nothing || throw(ArgumentError(
+        "$caller: partitioned boundary-layer modification is not supported"))
+    data=mixed.entity_data
+    any(block->msh_dimension(block.msh)==3,mixed.blocks) && throw(ArgumentError(
+        "$caller: volumetric boundary layers are not supported"))
+    offsets=_bl_layer_offsets(spec.numbers["Thickness"],spec.numbers["Size"],
+        spec.numbers["Ratio"],caller)
+    isempty(offsets) && return nothing
+    blocks=mixed.blocks
+    # Collect boundary segments of every selected curve, in mesh order.
+    segments=Tuple{Int32,Int32,Int}[]
+    for (bi,block) in enumerate(blocks)
+        msh_dimension(block.msh)==1 || continue
+        if block.msh!=1
+            # An unrelated higher-order line block is harmless; only a
+            # selected curve must be a straight 2-node boundary.
+            any(column->Int(data.block_entities[bi][column]) in selected_curves,
+                axes(block.nodes,2)) && throw(ArgumentError(
+                "$caller: boundary layer supports straight 2-node boundary curves"))
+            continue
+        end
+        for column in axes(block.nodes,2)
+            owner=Int(data.block_entities[bi][column])
+            owner in selected_curves &&
+                push!(segments,(block.nodes[1,column],block.nodes[2,column],owner))
+        end
+    end
+    isempty(segments) && throw(ArgumentError(
+        "$caller: selected curves have no boundary mesh elements"))
+    # Normals and adjacent surface owner per segment.
+    segment_state=Dict{Tuple{Int32,Int32},
+        Tuple{NTuple{3,Float64},Int,Int32,NTuple{3,Float64}}}()
+    for (a,b,_) in segments
+        key=(a,b)
+        haskey(segment_state,key) && continue
+        segment_state[key]=_bl_segment_normal(mixed,blocks,data,Int(a),Int(b),
+            selected_surfaces,caller)
+    end
+    incident=Dict{Int32,Vector{Tuple{Int32,Int32}}}()
+    for (a,b,_) in segments
+        push!(get!(()->Tuple{Int32,Int32}[],incident,a),(a,b))
+        push!(get!(()->Tuple{Int32,Int32}[],incident,b),(a,b))
+    end
+    # Allocate new UIDs monotonically past every live public tag.
+    used_nodes=Set(data.external_node_tags)
+    used_elements=Set(reduce(vcat,data.external_element_tags;init=UInt64[]))
+    next_node=max(NODE_TAG_MAX[],maximum(data.external_node_tags;init=UInt64(0)))
+    next_element=max(ELEMENT_TAG_MAX[],maximum(used_elements;init=UInt64(0)))
+    function fresh_node()
+        while true
+            next_node=Base.checked_add(next_node,UInt64(1))
+            next_node in used_nodes || break
+        end
+        push!(used_nodes,next_node)
+        return next_node
+    end
+    function fresh_element()
+        while true
+            next_element=Base.checked_add(next_element,UInt64(1))
+            next_element in used_elements || break
+        end
+        push!(used_elements,next_element)
+        return next_element
+    end
+    old_count=nnodes(mixed)
+    wall_nodes=sort!(collect(keys(incident)))
+    next_dense=old_count
+    coordinates=Matrix{Float64}(undef,3,old_count+length(wall_nodes)*length(offsets))
+    coordinates[:,1:old_count].=mixed.coords
+    node_tags=copy(data.external_node_tags)
+    node_entities=copy(data.node_entities)
+    node_parametric=copy(data.node_parametric)
+    # Offset direction per wall node: average inward normal with a miter
+    # correction for corners shared by two selected segments.
+    directions=Dict{Int32,Tuple{NTuple{3,Float64},Float64}}()
+    for node in wall_nodes
+        list=incident[node]
+        sum_normal=(0.,0.,0.)
+        for (a,b) in list
+            sum_normal=_bl_add(sum_normal,segment_state[(a,b)][1])
+        end
+        miter=_bl_unit(sum_normal,caller)
+        scale=0.0
+        for (a,b) in list
+            projection=_bl_dot(miter,segment_state[(a,b)][1])
+            projection>0.05 || throw(ArgumentError(
+                "$caller: boundary-layer corner is too sharp at node $node"))
+            scale=max(scale,1/projection)
+        end
+        scale<=4.0 || throw(ArgumentError(
+            "$caller: boundary-layer corner miter exceeds the supported range"))
+        directions[node]=(miter,scale)
+    end
+    # Create layer nodes. Endpoint layer nodes on a side curve belong to that
+    # curve; interior layer nodes belong to the adjacent surface.
+    front=Dict{Int32,Int32}()
+    layer_nodes=Dict{Tuple{Int32,Int},Int32}()
+    new_quad_cells=Dict{Int,Vector{Int32}}()
+    new_quad_tags=Dict{Int,Vector{UInt64}}()
+    new_quad_physical=Dict{Int,Vector{Int32}}()
+    new_line_cells=Dict{Int,Vector{Int32}}()
+    new_line_tags=Dict{Int,Vector{UInt64}}()
+    new_line_physical=Dict{Int,Vector{Int32}}()
+    endpoint_side=Dict{Int32,Int}()
+    endpoint_physical=Dict{Int32,Int32}()
+    endpoint_cell=Dict{Int32,Tuple{Int,Int}}()
+    for node in wall_nodes
+        adjacent,side_physical,side_block,side_column=
+            _bl_adjacent_curve(blocks,data,node,selected_curves)
+        endpoint_side[node]=adjacent
+        endpoint_physical[node]=side_physical
+        side_block==0 || (endpoint_cell[node]=(side_block,side_column))
+        incident_list=incident[node]
+        surface=segment_state[first(incident_list)][2]
+        owner_dim=adjacent==0 ? 2 : 1
+        owner_tag=adjacent==0 ? surface : adjacent
+        for (layer,offset) in enumerate(offsets)
+            normal,miter=directions[node]
+            point=_bl_add(mixed.coords[:,node],
+                _bl_scale(normal,offset*miter))
+            next_dense+=1
+            coordinates[:,next_dense].=point
+            tag=fresh_node()
+            push!(node_tags,tag)
+            push!(node_entities,(owner_dim,Int32(owner_tag)))
+            push!(node_parametric,nothing)
+            layer_nodes[(node,layer)]=Int32(next_dense)
+        end
+        front[node]=layer_nodes[(node,length(offsets))]
+    end
+    # Quads for each segment and layer.
+    for (a,b,curve) in segments
+        surface=segment_state[(a,b)][2]
+        cells=get!(()->Int32[],new_quad_cells,surface)
+        tags=get!(()->UInt64[],new_quad_tags,surface)
+        physical=get!(()->Int32[],new_quad_physical,surface)
+        reference=segment_state[(a,b)][4]
+        for layer in 1:length(offsets)
+            a0=layer==1 ? a : layer_nodes[(a,layer-1)]
+            b0=layer==1 ? b : layer_nodes[(b,layer-1)]
+            a1=layer_nodes[(a,layer)];b1=layer_nodes[(b,layer)]
+            quad=Int32[a0,b0,b1,a1]
+            _bl_cell_positive(coordinates,quad,reference) || reverse!(quad)
+            _bl_cell_positive(coordinates,quad,reference) || throw(ArgumentError(
+                "$caller: boundary-layer quad is inverted"))
+            append!(cells,quad)
+            push!(tags,fresh_element())
+            push!(physical,segment_state[(a,b)][3])
+        end
+    end
+    # Split the side curves at both endpoints: one line per layer.
+    for node in wall_nodes
+        side=endpoint_side[node]
+        side==0 && continue
+        cells=get!(()->Int32[],new_line_cells,side)
+        tags=get!(()->UInt64[],new_line_tags,side)
+        physical=get!(()->Int32[],new_line_physical,side)
+        previous=node
+        for layer in 1:length(offsets)
+            next=layer_nodes[(node,layer)]
+            append!(cells,Int32[previous,next])
+            push!(tags,fresh_element())
+            push!(physical,endpoint_physical[node])
+            previous=next
+        end
+    end
+    selected_surfaces=Set(state[2] for state in values(segment_state))
+    # Original cell orientation is the certificate reference on any plane.
+    original_normals=Dict{Tuple{Int,Int},NTuple{3,Float64}}()
+    for (bi,block) in enumerate(blocks)
+        msh_dimension(block.msh)==2 || continue
+        for column in axes(block.nodes,2)
+            cell=Int32.(@view block.nodes[:,column])
+            original_normals[(bi,column)]=_bl_cell_normal(mixed.coords,cell)
+        end
+    end
+    # Retime original surface cells from the wall to the last layer front.
+    # Only the actual adjacent surface(s) move; unrelated cells sharing a
+    # coincident wall node retain their connectivity.
+    retimed=ElementBlock[]
+    block_owner_rows=Vector{Vector{Int32}}()
+    element_tag_rows=Vector{Vector{UInt64}}()
+    surface_cells=Tuple{Vector{Int32},NTuple{3,Float64}}[]
+    for (bi,block) in enumerate(blocks)
+        nodes=copy(block.nodes)
+        if msh_dimension(block.msh)==2
+            for column in axes(nodes,2)
+                Int(data.block_entities[bi][column]) in selected_surfaces || continue
+                for row in axes(nodes,1)
+                    mapped=get(front,nodes[row,column],nothing)
+                    mapped===nothing || (nodes[row,column]=mapped)
+                end
+                push!(surface_cells,
+                    (Int32.(@view nodes[:,column]),original_normals[(bi,column)]))
+            end
+        elseif msh_dimension(block.msh)==1
+            # The side-curve element incident to a selected-curve endpoint is
+            # split at the layer front, keeping the 1-D boundary conforming
+            # to the retimed surface.
+            for column in axes(nodes,2)
+                for row in axes(nodes,1)
+                    node=nodes[row,column]
+                    cell=get(endpoint_cell,node,nothing)
+                    cell===nothing && continue
+                    cell==(bi,column) || continue
+                    nodes[row,column]=front[node]
+                end
+            end
+        end
+        push!(retimed,ElementBlock(block.msh,nodes,block.tags))
+        push!(block_owner_rows,copy(data.block_entities[bi]))
+        push!(element_tag_rows,copy(data.external_element_tags[bi]))
+    end
+    for (owner,cells) in sort!(collect(new_quad_cells);by=first)
+        block=ElementBlock(3,reshape(cells,4,:),new_quad_physical[owner])
+        push!(retimed,block)
+        push!(block_owner_rows,fill(Int32(owner),length(cells)÷4))
+        push!(element_tag_rows,new_quad_tags[owner])
+        for column in axes(block.nodes,2)
+            cell=Int32.(@view block.nodes[:,column])
+            push!(surface_cells,(cell,_bl_cell_normal(coordinates,cell)))
+        end
+    end
+    for (owner,cells) in sort!(collect(new_line_cells);by=first)
+        block=ElementBlock(1,reshape(cells,2,:),new_line_physical[owner])
+        push!(retimed,block)
+        push!(block_owner_rows,fill(Int32(owner),length(cells)÷2))
+        push!(element_tag_rows,new_line_tags[owner])
+    end
+    # Positivity certificate before smoothing.
+    for (cell,reference) in surface_cells
+        _bl_cell_positive(coordinates,cell,reference) || throw(ArgumentError(
+            "$caller: boundary-layer insertion inverts a surface cell"))
+    end
+    # Inverse-Laplace (Winslow-style) relaxation of interior and new layer
+    # nodes; every boundary node stays fixed and each step is accepted only
+    # when every surface cell remains positively oriented.
+    boundary=falses(length(node_tags))
+    for block in retimed
+        msh_dimension(block.msh)==1 || continue
+        for column in axes(block.nodes,2),row in axes(block.nodes,1)
+            boundary[Int(block.nodes[row,column])]=true
+        end
+    end
+    neighbours=[Int[] for _ in 1:length(node_tags)]
+    for (cell,_) in surface_cells
+        for i in eachindex(cell),j in eachindex(cell)
+            i==j && continue
+            value=Int(cell[j])
+            value in neighbours[Int(cell[i])] || push!(neighbours[Int(cell[i])],value)
+        end
+    end
+    # Layer nodes retain their exact normal offsets; original interior nodes
+    # relax toward their element neighbours. This keeps the front parallel to
+    # the wall instead of diffusing the layer thickness.
+    free=filter(node->node<=old_count,findall(!,boundary))
+    for _ in 1:8
+        tentative=copy(coordinates)
+        for node in free
+            list=neighbours[node]
+            isempty(list) && continue
+            average=ntuple(axis->sum(coordinates[axis,other] for other in list)/length(list),3)
+            tentative[:,node].=(1-.25).*coordinates[:,node].+0.25.*collect(average)
+        end
+        all(pair->_bl_cell_positive(tentative,pair[1],pair[2]),surface_cells) || continue
+        coordinates=tentative
+    end
+    all(pair->_bl_cell_positive(coordinates,pair[1],pair[2]),surface_cells) ||
+        throw(ArgumentError(
+            "$caller: boundary-layer smoothing lost positive orientation"))
+    # Publish the actual replacement mesh.
+    metadata=Elements.MixedEntityData(data.entities;
+        node_entities=node_entities,node_parametric=node_parametric,
+        external_node_tags=node_tags,
+        block_entities=block_owner_rows,external_element_tags=element_tag_rows,
+        _native_mesh_tags=data.native_mesh_tags)
+    replacement=MixedMesh(coordinates,retimed;
+        physical_names=mixed.physical_names,entity_data=metadata,
+        elementary_entities=block_owner_rows,
+        periodic_links=mixed.periodic_links,
+        ancillary_sections=mixed.ancillary_sections,
+        data_sections=mixed.data_sections)
+    class=_higher_classification_from_data(replacement,caller)
+    _replace_mesh_cache_locked!(replacement,class;preserve_visibility=true)
+    # New public UIDs invalidate the native tag catalogues.
+    _native_lookup_reset_locked!()
+    NODE_TAG_MAX[]=max(NODE_TAG_MAX[],maximum(node_tags;init=UInt64(0)))
+    ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],
+        maximum(reduce(vcat,element_tag_rows;init=UInt64[]);init=UInt64(0)))
+    _slot_capture_locked!()
+    return nothing
 end
 
 # ---- registry --------------------------------------------------------------------------------

@@ -42,6 +42,25 @@ _err_lines(err::AbstractString)=
 _warn_lines(err::AbstractString)=
     [line for line in split(err,'\n') if startswith(line,"Warning :")]
 
+@testset "Unicode whitespace preserves statement byte and line offsets" begin
+    for whitespace in ("\u00a0","\u2003","\u3000")
+        path,(result,err)=_execute_captured(
+            whitespace*"Point(1)={0,0,0,1};\n"*
+            whitespace*"bad=undef;\n"*whitespace*"Point(2)={1,0,0,1};\n")
+        @test result===nothing
+        @test _err_lines(err)==
+            ["Error   : '$path', line 2: Unknown variable 'undef'"]
+        statements,locations=Tessella.GeoExec._geo_exec_statements(
+            IOBuffer(whitespace*"n=7;\n"*whitespace*"\n"*whitespace))
+        @test statements==["n=7;"]
+        @test only(locations)[1]==1
+        statements,locations=Tessella.GeoExec._geo_exec_statements(IOBuffer(whitespace))
+        @test isempty(statements) && isempty(locations)
+        @test_throws ArgumentError Tessella.GeoExec._geo_exec_statements(
+            IOBuffer(whitespace*"n=7"))
+    end
+end
+
 @testset "LF lines report their physical line" begin
     path,(result,err)=_execute_captured(
         "Point(1) = {0, 0, 0, 1};\nbad = undef;\nPoint(2) = {1, 0, 0, 1};\n")

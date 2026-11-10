@@ -2,15 +2,15 @@
 # bound entity: geometry records are replaced by exact NURBS forms under the
 # same tags and topology. Lines become degree-1 B-splines on the identical
 # (arc-length) parametrization; circle and ellipse edges become quadratic-
-# rational B-splines carrying `_ModelOCCConicReparam`, so the public
-# parameter map — and every stored pcurve — is preserved bitwise (upstream
-# refits 2-D curves approximately instead). Hyperbolas expose their actual
-# rational parameter after conversion, with exact pcurve transport. Spline
+# rational B-splines exposing their rational parameter. Conic and hyperbolic
+# pcurves transport the edge parameter and surface chart exactly. Spline
 # edges are already NURBS; vertices and degenerate/iso records pass through.
 # Face, shell and solid closures stage their shared geometry together.
 
+include("ModelOCCChartTransport.jl")
+
 # Rational-quadratic image of a circle/ellipse arc: equal spans of at most
-# π/2, interior poles on the tangent intersections `C + sec(Δ/2)·(p(m)−C)`,
+# 2π/3, interior poles on the tangent intersections `C + sec(Δ/2)·(p(m)−C)`,
 # weights cos(Δ/2). `frame` resolves the eval-consistent record so
 # native-backed circles convert through the frame evaluators actually use.
 function _model_occ_nurbs_conic(geometry,caller)
@@ -20,20 +20,17 @@ function _model_occ_nurbs_conic(geometry,caller)
     t0,t1=geometry.t0,geometry.t1
     span=t1-t0
     span>0.0 || throw(ArgumentError("$caller: degenerate conic range"))
-    n=max(1,ceil(Int,span/(π/2)))
+    n=max(1,ceil(Int,span/(2π/3)))
     δ=span/n
-    quarter=_gm_tan(δ/4)
     weight=_gm_cos(δ/2)
     secant=1/weight
     poles=NTuple{3,Float64}[eval(geometry,t0)]
     weights=Float64[1.0]
-    tanq=Float64[]
     for i in 1:n
         a=t0+(i-1)*δ
         b=i==n ? t1 : t0+i*δ
         m=(a+b)/2
         pm=eval(geometry,m)
-        push!(tanq,quarter)
         push!(poles,ntuple(k->fma(pm[k]-C[k],secant,C[k]),3))
         push!(weights,weight)
         push!(poles,eval(geometry,b))
@@ -46,9 +43,7 @@ function _model_occ_nurbs_conic(geometry,caller)
     end
     append!(knots,(t1,t1,t1))
     curve=NURBS.NURBSCurve(2,knots,poles,weights)
-    inner=_ModelOCCNURBSCurve(:bspline,curve)
-    reparam=_ModelOCCConicReparam(Float64[t0+i*δ for i in 0:n],tanq)
-    return _ModelOCCReparamCurve(:bspline,curve,inner.nets,reparam)
+    return _ModelOCCNURBSCurve(:bspline,curve)
 end
 
 # Degree-1 B-spline on the identical arc-length parametrization — no
@@ -109,11 +104,9 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller;
             "$caller: Unknown OpenCASCADE entity of dimension $dim with tag $tag"))
         push!(roots,id)
     end
-    # Convert each edge/face record in the transitive shape closure once;
-    # the public parametrization is preserved so shared sub-shapes stay
-    # consistent for every referencing face.
+    # Convert each edge/face record in the transitive shape closure once.
     staged=Dict{UInt64,NamedTuple}()
-    curve_maps=Dict{UInt64,_ModelOCCHyperbolicReparam}()
+    curve_maps=Dict{UInt64,Union{_ModelOCCConicReparam,_ModelOCCHyperbolicReparam}}()
     surface_maps=Dict{UInt64,NamedTuple}()
     stack=copy(roots)
     seen=Set{UInt64}()
@@ -133,12 +126,15 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller;
             source=get(record.geometry,:curve,nothing)
             source isa _ModelOCCHyperbolaCurve &&
                 (curve_maps[id]=_occ_hyperbolic_full_map(source.reparam))
+            if record.geometry.occ in (:circle,:ellipse)
+                curve_maps[id]=_model_occ_conic_chart(record.geometry.t0,record.geometry.t1)
+            end
         elseif shape.dimension==2
             record=shape.geometry
             converted=_model_occ_nurbs_surface_record(record.geometry,caller)
             converted===record.geometry && continue
             staged[id]=merge(record,(geometry=converted,))
-            mappings=_occ_hyperbolic_surface_maps(record.geometry)
+            mappings=get(converted,:analytic_chart,_occ_hyperbolic_surface_maps(record.geometry))
             mappings==(u=nothing,v=nothing) || (surface_maps[id]=mappings)
         end
     end
@@ -157,6 +153,13 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller;
         for (tag,entry) in rec.pcurves
             eid=get(kernel.bindings,(1,abs(tag)),UInt64(0))
             input=get(curve_maps,eid,nothing)
+            if input===nothing && eid!=0
+                edge=kernel.shapes[eid].geometry.geometry
+                if edge.occ===:surface_iso && hasproperty(edge,:face) &&
+                        edge.face===face.geometry.geometry
+                    input=edge.axis==1 ? output.u : output.v
+                end
+            end
             if input===nothing && output==(u=nothing,v=nothing)
                 pcurves[tag]=entry
             else
@@ -166,7 +169,20 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller;
                 pcurves[tag]=(fwd=fwd,rev=rev)
             end
         end
-        changed && (staged[fid]=merge(current,(geometry=merge(rec,(pcurves=pcurves,)),)))
+        if changed
+            converted=merge(rec,(pcurves=pcurves,))
+            if output!=(u=nothing,v=nothing) && hasproperty(rec,:vertex_uv)
+                vertices=Dict{Int,NTuple{2,Float64}}()
+                for (tag,uv) in rec.vertex_uv
+                    vertices[tag]=ntuple(2) do axis
+                        map=axis==1 ? output.u : output.v
+                        map===nothing ? uv[axis] : first(_occ_conic_reparam(map,uv[axis]))
+                    end
+                end
+                converted=merge(converted,(vertex_uv=vertices,))
+            end
+            staged[fid]=merge(current,(geometry=converted,))
+        end
     end
     # Member degenerate/surface-iso edges embed their owner face record —
     # rebind each to the converted record so the pcurve lookup and the
@@ -288,7 +304,7 @@ end
 # surface builder.
 function _occ_nurbs_conic_axis(t0,t1)
     span=t1-t0
-    n=max(1,ceil(Int,span/(π/2)))
+    n=max(1,ceil(Int,span/(2π/3)))
     δ=span/n
     secant=1/_gm_cos(δ/2); weight=_gm_cos(δ/2)
     vals=Float64[];qs=Float64[];ws=Float64[]
@@ -438,5 +454,6 @@ function _model_occ_nurbs_surface_record(geometry,caller)
         throw(ArgumentError(
             "$caller: OCC surface kind $(occ) cannot be converted to NURBS"))
     end
-    return merge(geometry,(patch=patch,reparam=reparam))
+    return reparam===nothing ? merge(geometry,(patch=patch,)) :
+        merge(geometry,(patch=patch,analytic_chart=reparam))
 end

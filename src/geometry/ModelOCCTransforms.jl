@@ -33,6 +33,9 @@ end
 # parametrize in angles; cylinders and cones carry physical length in `v`.
 function _model_occ_pcurve_vscale(old,new)
     haskey(old,:occ) || return 1.0
+    # Tensor-pole transforms preserve their knot coordinates, including the
+    # linear height coordinate of a converted cylinder or cone.
+    _model_nurbs_surface(old) && return 1.0
     old.occ===:cylinder && return new.height/old.height
     old.occ===:cone || return 1.0
     sl=_occ_cone_slant(old.height,old.r2-old.r1)

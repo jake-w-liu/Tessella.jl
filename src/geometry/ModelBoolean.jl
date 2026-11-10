@@ -371,11 +371,13 @@ function _brep_edge_curve(m::GeoModel,ctag::Int)
         # locus is bitwise identical.
         return (kind=:line,o=rec.origin,d=rec.dir),rec.t0,rec.t1
     elseif rec.occ===:circle ||
-            (rec.occ===:copied_curve && get(rec,:converted_from,nothing)===:circle)
+            (rec.occ===:copied_curve && rec.curve isa _ModelOCCReparamCurve &&
+             get(rec,:converted_from,nothing)===:circle)
         return (kind=:circle,c=rec.center,n=rec.n,x=rec.X,y=rec.Y,r=rec.r),
                rec.t0,rec.t1
     elseif rec.occ===:ellipse ||
-            (rec.occ===:copied_curve && get(rec,:converted_from,nothing)===:ellipse)
+            (rec.occ===:copied_curve && rec.curve isa _ModelOCCReparamCurve &&
+             get(rec,:converted_from,nothing)===:ellipse)
         # like the converted line/circle shadows above: a NURBS-converted
         # ellipse keeps its analytic record as inert metadata — the same
         # evaluator `_occ_ellipse_point` serves both forms bitwise.

@@ -221,13 +221,14 @@ function _occ_iges_bspline_surf_ent!(ctx::_OCCIgesCtx,
     return ent.id
 end
 
-# An IGES 100 arc → NURBSCurve (quadratic rational segments, ≤ π/2 each).
+# An IGES 100 arc → NURBSCurve (quadratic rational spans ≤ 120 degrees,
+# matching the canonical conic chart used by NURBS conversion).
 function _occ_iges_arc_nurbs(C,X,n,r::Float64,ta::Float64,tb::Float64)
     caller="IGES arc"
     Y=BRep._brep_vcross(n,X)
     span=tb-ta
     span>0 || throw(ArgumentError("$caller: non-positive arc span"))
-    nseg=max(1,ceil(Int,span/(π/2)))
+    nseg=max(1,ceil(Int,span/(2π/3)))
     step=span/nseg
     wc=cos(step/2)
     controls=NTuple{3,Float64}[];weights=Float64[];knots=Float64[]
@@ -387,7 +388,7 @@ function _occ_iges_revolve_surface(gen::NURBS.NURBSCurve,A0,axis,
     span=ea-sa
     (isfinite(span) && span>0) || throw(ArgumentError(
         "$caller: surface of revolution has a non-positive sweep"))
-    nseg=max(1,ceil(Int,span/(π/2)))
+    nseg=max(1,ceil(Int,span/(2π/3)))
     step=span/nseg
     wc=cos(step/2)
     nu=2nseg+1;nv=length(gen.controls)

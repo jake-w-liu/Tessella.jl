@@ -322,7 +322,7 @@ function _model_import_rebind_views!(views,source,target)
     return nothing
 end
 
-function _model_import_publish!(plan;legacy=false)
+function _model_import_publish!(plan;legacy=false,preserve_namespace=legacy)
     if hasproperty(plan.result,:onelab_stage)
         plan.result.onelab_stage.epoch==_ONELAB_SESSION_EPOCH[] || throw(ArgumentError(
             "ONELAB: session was reset during file preparation"))
@@ -367,12 +367,17 @@ function _model_import_publish!(plan;legacy=false)
     hasproperty(plan.result,:onelab_stage) && _onelab_geo_adopt_runner!(plan.result.onelab_stage)
     if hasproperty(plan.result,:geo_namespace_stage)
         _onelab_geo_adopt_namespace!(plan.result.geo_namespace_stage)
-    elseif !legacy
+    elseif !preserve_namespace
         _parser_reset_session!()
         _ONELAB_LIVE_GEO[]=nothing
     end
     return nothing
 end
+
+const _MODEL_IMPORT_EXTENSIONS=(".geo",".msh",".pos",".unv",".mesh",".meshb",
+    ".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",
+    ".vtk",".wrl",".off",".obj",".ply",".ply2",".step",".stp",".igs",".iges",
+    ".xao",".brep",".cdf")
 
 function _model_import_filename(filename,caller;geo_only=false)
     filename isa AbstractString && !isempty(filename) && !occursin('\0',filename) ||
@@ -387,7 +392,7 @@ function _model_import_filename(filename,caller;geo_only=false)
     extension==".cgns" && throw(ArgumentError(
         "$caller: .cgns import requires the CGNS library (upstream Gmsh " *
         "must be compiled with CGNS support), which Tessella does not link"))
-    extension in (geo_only ? (".geo",) : (".geo",".msh",".pos",".unv",".mesh",".meshb",".stl",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",".ir3",".diff",".vtk",".wrl",".off",".obj",".ply",".ply2",".step",".stp",".igs",".iges",".xao",".brep",".cdf")) || throw(ArgumentError(
+    extension in (geo_only ? (".geo",) : _MODEL_IMPORT_EXTENSIONS) || throw(ArgumentError(
         "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff, .vtk, .wrl, .off, .obj, .ply, .ply2, .step, .stp, .igs, .iges, .xao, .brep and .cdf")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
@@ -444,7 +449,9 @@ function open(filename)
                 _current_slot_index_locked()!=0 &&
                 !isempty(Model.model_entities(current))
             plan=_model_merge_prepare(path)
-            _model_import_publish!(plan;legacy=true)
+            # The mesh match reuses the current slot, while opening a new
+            # input still clears the previous GEO language namespace.
+            _model_import_publish!(plan;legacy=true,preserve_namespace=false)
             return nothing
         end
         plan=_model_import_prepare(path,0)

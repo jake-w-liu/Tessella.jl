@@ -4,7 +4,7 @@
 
 module NativeLookupPermanentTestV1
 using Test,Tessella
-const SUPPORT=normpath(joinpath(@__DIR__,"..","..","validation","native_geometry"))
+const SUPPORT=normpath(joinpath(@__DIR__,"..","fixtures","native_lookup"))
 include(joinpath(SUPPORT,"native_lookup_large_tag_v1.jl"))
 include(joinpath(SUPPORT,"native_lookup_lifecycle_v1.jl"))
 include(joinpath(SUPPORT,"native_tri3_mapped_point_v1.jl"))
@@ -28,11 +28,12 @@ end
 end
 
 module APINativeLookupAbortPolicyTestV1
-include("../../validation/native_geometry/native_lookup_abort_policy_controls_v1.jl")
-include("../../validation/native_geometry/native_lookup_abort_neighbors_controls_v1.jl")
+const SUPPORT=normpath(joinpath(@__DIR__,"..","fixtures","native_lookup"))
+include(joinpath(SUPPORT,"native_lookup_abort_policy_controls_v1.jl"))
+include(joinpath(SUPPORT,"native_lookup_abort_neighbors_controls_v1.jl"))
 prefix=get(ENV,"TESSELLA_NATIVE_LOOKUP_ABORT_OUTPUT_PREFIX",joinpath(mktempdir(),"lookup_abort"))
 NativeLookupAbortPolicyV1.run(prefix)
 NativeLookupAbortNeighborsV1.run(prefix)
-include("../../validation/native_geometry/native_lookup_abort_fractional_controls_v1.jl")
+include(joinpath(SUPPORT,"native_lookup_abort_fractional_controls_v1.jl"))
 NativeLookupAbortFractionalV1.run(prefix)
 end

@@ -469,6 +469,52 @@ function _plan_occ_geometry_transforms(m::GeoModel, normalized, t,
     return (curve_plans,surface_plans)
 end
 
+# Reflected conic shadow on the same parameter domain. A nonuniform
+# reflection of a circle is an ellipse; a sheared frame is not representable
+# by an axis-aligned ellipse and is rejected before publication.
+function _reflect_occ_conic_shadow(source,t,caller,what)
+    center=_finite_result(_occ_trsf_apply(t,source.center),caller)
+    Xra=_occ_linear_apply(t,source.X)
+    Yra=_occ_linear_apply(t,source.Y)
+    sx=hypot(Xra...);sy=hypot(Yra...)
+    (sx>0 && sy>0) || throw(ArgumentError(
+        "$caller: reflection collapses $what"))
+    X=(Xra[1]/sx,Xra[2]/sx,Xra[3]/sx)
+    Y=(Yra[1]/sy,Yra[2]/sy,Yra[3]/sy)
+    abs(_dot(X,Y))<=1e-12 || throw(ArgumentError(
+        "$caller: sheared conic reflection is not representable on $what"))
+    # The image-plane normal is X×Y, not a similarity-only image of n.
+    cross=_occ_cross(X,Y)
+    cross_norm=hypot(cross...)
+    cross_norm>0 || throw(ArgumentError(
+        "$caller: reflection collapses $what"))
+    handedness=_dot(source.n,_occ_cross(source.X,source.Y))<0 ? -1.0 : 1.0
+    n=ntuple(axis->handedness*cross[axis]/cross_norm,3)
+    axis_tol=1e-12*max(sx,sy)
+    reflected=if source.occ===:circle
+        if abs(sx-sy)<=axis_tol
+            merge(source,(center=center,X=X,Y=Y,n=n,r=source.r*sx,
+                t0=source.t0,t1=source.t1))
+        else
+            # The exact NURBS poles form an ellipse; keep that analytic form
+            # consistent instead of storing one circular radius.
+            merge(source,(occ=:ellipse,center=center,X=X,Y=Y,n=n,
+                rx=source.r*sx,ry=source.r*sy,
+                t0=source.t0,t1=source.t1))
+        end
+    elseif source.occ===:ellipse
+        merge(source,(center=center,X=X,Y=Y,n=n,
+            rx=source.rx*sx,ry=source.ry*sy,t0=source.t0,t1=source.t1))
+    else
+        return source
+    end
+    if hasproperty(reflected,:native_geometry)
+        native=_reflect_occ_conic_shadow(reflected.native_geometry,t,caller,what)
+        reflected=merge(reflected,(native_geometry=native,))
+    end
+    return reflected
+end
+
 # The transformed OCC curve record for `curve`, or `g` unchanged when the
 # record carries no coordinates.
 function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
@@ -489,16 +535,19 @@ function _transform_occ_curve_record(m::GeoModel, curve::Int, g,
         source_kind=get(g,:converted_from,nothing)
         source_kind===nothing && return merge(g,(curve=new_curve,))
         # NURBS-converted analytic record: keep the inert analytic
-        # metadata consistent with the transformed poles. Under
-        # reflection a closed conic flips its parameter range, which
-        # the preserved reparam cannot represent.
-        _linear_det(t.linear)<0 && throw(ArgumentError(
-            "$caller: reflection of a NURBS-converted $what is " *
-            "not implemented"))
+        # metadata consistent with the transformed poles.
         source=merge(
             Base.structdiff(g,(occ=nothing,curve=nothing,
                 converted_from=nothing)),
             (occ=source_kind,))
+        if _linear_det(t.linear)<0 && source_kind in (:circle,:ellipse)
+            # Reflection preserves the rational curve parameter: the poles
+            # satisfy p'(t)=T·p(t), so the analytic shadow uses the reflected
+            # frame with the SAME [t0,t1] domain (no traversal flip).
+            shadow=_reflect_occ_conic_shadow(source,t,caller,what)
+            return merge(shadow,(occ=:copied_curve,
+                converted_from=source_kind,curve=new_curve))
+        end
         shadow=_transform_occ_curve_record(m,curve,source,t,caller,what;
                                            tensor_cache=tensor_cache)
         return merge(shadow,(occ=:copied_curve,
@@ -554,7 +603,15 @@ function _transform_occ_surface_record(g, t::_AffineTransform, caller, what;tens
             return _ModelNURBSSurface(g.patch.family,updated)
         end
         patch=tensor_cache===nothing ? transform_patch() : get!(transform_patch,tensor_cache,g.patch)
-        out=if hasproperty(g,:reparam)
+        out=if hasproperty(g,:analytic_chart)
+            source=Base.structdiff(g,(patch=nothing,analytic_chart=nothing))
+            analytic=_transform_occ_surface_record(source,t,caller,what;tensor_cache)
+            maps=g.analytic_chart
+            scale=_model_occ_pcurve_vscale(source,analytic)
+            changed=scale==1. ? maps :
+                (u=maps.u,v=_ModelOCCScaledReparam(maps.v,scale))
+            merge(analytic,(patch=patch,analytic_chart=changed))
+        elseif hasproperty(g,:reparam)
             # NURBS-converted analytic record: reflections negate a conic
             # parameter on spheres/tori, which the separable axis reparam
             # cannot represent — keep det>0 transforms exact on both

@@ -34,6 +34,9 @@ function _occ_hyperbolic_inverse_d2(r::_ModelOCCHyperbolicReparam,s)
     return a/2+b/2+2atanh(z),first,first*first*z
 end
 
+_occ_parameter_inverse_d2(mapping::_ModelOCCHyperbolicReparam,s)=
+    _occ_hyperbolic_inverse_d2(mapping,s)
+
 function _occ_hyperbolic_full_map(mapping::_ModelOCCHyperbolicReparam)
     lo,hi=first(mapping.knots),last(mapping.knots)
     return _ModelOCCHyperbolicReparam(Float64[lo,hi],Float64[tanh((hi-lo)/4)])
@@ -91,7 +94,7 @@ end
 
 function _occ_pcurve_d2(pc::NamedTuple{(:brep_conversion2d,)},t::Float64)
     base,input,output=pc.brep_conversion2d
-    parameter,dt,ddt=input===nothing ? (t,1.,0.) : _occ_hyperbolic_inverse_d2(input,t)
+    parameter,dt,ddt=input===nothing ? (t,1.,0.) : _occ_parameter_inverse_d2(input,t)
     point,first,second=_occ_pcurve_d2(base,parameter)
     tangent=ntuple(i->dt*first[i],2)
     acceleration=ntuple(i->ddt*first[i]+dt^2*second[i],2)
@@ -105,6 +108,10 @@ function _occ_pcurve_d2(pc::NamedTuple{(:brep_conversion2d,)},t::Float64)
 end
 
 _occ_pcurve_d0(pc::NamedTuple{(:brep_conversion2d,)},t::Float64)=first(_occ_pcurve_d2(pc,t))
+function _occ_pcurve_d1(pc::NamedTuple{(:brep_conversion2d,)},t::Float64)
+    point,first,_=_occ_pcurve_d2(pc,t)
+    return point,first
+end
 
 struct _ModelOCCHyperbolaCurve{G}
     family::Symbol

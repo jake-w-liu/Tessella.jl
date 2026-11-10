@@ -5,10 +5,10 @@ Command-line façade: `tessella file.geo -1|-2|-3` executes the bounded `.geo`
 subset and writes `file.msh`. Supported periodic and embedded surface entities
 and embedded volume entities, including nested sheet constraints and periodic
 planar boundaries of explicit volume shells, are written with classified MSH4
-metadata. Unknown flags and OCC-only files are blockers.
+metadata. Native CAD and mesh inputs use the same importers as `API.open`.
 
 The session path (`-refine`, `-reclassify`, `-reparam`, `-part`, `-save`,
-`-open`, `-merge`, `-new`, and `.msh`/`.pos` inputs) runs on the `API` session:
+`-open`, `-merge`, `-new`, and native CAD/mesh inputs) runs on the `API` session:
 `API.open`/`API.merge` import the files, `API.mesh.generate`/`refine`/
 `classify_surfaces`/`create_geometry`/`partition` perform the batch action, and
 `API.write` exports the current model mesh — `-o`/`-format` select any
@@ -1259,7 +1259,7 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
         output_seen || format_seen || binary_seen) && throw(ArgumentError(
             "tessella: parse-and-exit cannot be combined with meshing or " *
             "output options"))
-    # `.msh`/`.pos` inputs, multiple files, and post-mesh actions run on the
+    # Native CAD/mesh inputs, multiple files, and post-mesh actions run on the
     # API session. High-order optimization lives in the session meshing plan,
     # so `-optimize_ho`/`-hoOptimize` routes there as well. Non-MSH output
     # (`-o` foreign extensions or a non-MSH `-format` selection) also needs
@@ -1275,7 +1275,8 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
     geo_unrolled_output=effective_format==".geo_unrolled"
     foreign_output=effective_format!==nothing &&
         effective_format in _FOREIGN_OUTPUT_EXTENSIONS
-    session=_reuse_session || extension in (".msh",".pos") || length(files)>1 || refine_seen || combine_seen ||
+    session_input=extension!=".geo" && extension in API._MODEL_IMPORT_EXTENSIONS
+    session=_reuse_session || session_input || length(files)>1 || refine_seen || combine_seen ||
         adapt_seen || barycentric_seen ||
         save_seen || reclassify!==nothing || reparam!==nothing ||
         part!==nothing || foreign_output ||

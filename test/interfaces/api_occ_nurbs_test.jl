@@ -1,12 +1,9 @@
 # `model.occ.convertToNURBS` — `BRepBuilderAPI_NurbsConvert` per bound
 # entity. Edge geometry is replaced by an exact NURBS form under the same
 # tag and topology; lines become degree-1 B-splines on the identical
-# arc-length parametrization, and conics become quadratic-rational
-# B-splines whose `_ModelOCCConicReparam` half-angle map preserves the
-# public angle parametrization exactly — every stored pcurve stays valid
-# bitwise. Faces keep their analytic record as metadata and gain a NURBS
-# `patch` plus per-axis `reparam`; evaluation funnels through
-# `_model_nurbs_surface_d2` while external (u,v) stay identical. Vertices,
+# arc-length parametrization, and conics expose the rational B-spline
+# parameter. Faces keep analytic metadata and gain a NURBS `patch`;
+# boundary traces transport both the edge parameter and the surface chart. Vertices,
 # wires, degenerate and `surface_iso` records pass through; solids convert
 # recursively preserving their primitive encodings.
 
@@ -33,6 +30,24 @@ end
 
 _eval(g,t)=first(M._model_occ_curve_d2(g.curve,t))
 
+function _reference_chart(parameter,lower,upper)
+    count=max(1,ceil(Int,(upper-lower)/(2π/3)))
+    width=(upper-lower)/count
+    index=clamp(floor(Int,(parameter-lower)/width),0,count-1)
+    start=lower+index*width
+    q=tan(width/4);z=(2*(parameter-start)/width-1)*q
+    d=4q/(width*(1+z*z))
+    return start+width/2+2atan(z),d,-d*d*z
+end
+
+function _reference_surface(g,analytic,u,v)
+    lo,hi=M._occ_surface_bounds(g)
+    a,da,dda=_reference_chart(u,lo[1],hi[1])
+    b,db,ddb=g.occ in (:sphere,:torus) ? _reference_chart(v,lo[2],hi[2]) : (v,1.,0.)
+    p,du,dv,duu,dvv,duv=M._occ_surface_d2(analytic,a,b)
+    return p,da.*du,db.*dv,da^2 .*duu.+dda.*du,db^2 .*dvv.+ddb.*dv,(da*db).*duv
+end
+
 @testset "occ.convertToNURBS line (exact arc-length)" begin
     occ=_occ_setup()
     a=occ.add_point(0.0,0.0,0.0); b=occ.add_point(3.0,4.0,0.0)
@@ -50,21 +65,24 @@ _eval(g,t)=first(M._model_occ_curve_d2(g.curve,t))
     end
 end
 
-@testset "occ.convertToNURBS circle (reparam-exact)" begin
+@testset "occ.convertToNURBS circle (rational parameter)" begin
     occ=_occ_setup()
     c=occ.add_circle(1.0,2.0,0.0,2.0)
     occ.convert_to_nurbs([(1,c)])
     occ.synchronize(); m=_current_model()
     g=m.curve_geometry[c]
     @test g.occ===:copied_curve
-    @test g.curve isa M._ModelOCCReparamCurve
+    @test g.curve isa M._ModelOCCNURBSCurve
     @test g.curve.curve.degree==2
-    @test length(g.curve.curve.controls)==9   # 4 quarter spans
+    @test length(g.curve.curve.controls)==7   # 3 rational 120-degree spans
     for t in range(0.02,6.28,25)
         p,d1,d2=M._model_occ_curve_d2(g.curve,t)
-        @test collect(p)≈[1+2cos(t),2+2sin(t),0.0] atol=1e-13
-        @test collect(d1)≈[-2sin(t),2cos(t),0.0] atol=1e-12
-        @test collect(d2)≈[-2cos(t),-2sin(t),0.0] atol=1e-11
+        angle,d,dd=_reference_chart(t,0.,2π)
+        radial=[2cos(angle),2sin(angle),0.]
+        tangent=[-2sin(angle),2cos(angle),0.]
+        @test collect(p)≈[1.,2.,0.].+radial atol=1e-13
+        @test collect(d1)≈d.*tangent atol=1e-12
+        @test collect(d2)≈dd.*tangent.-d*d.*radial atol=1e-11
     end
 end
 
@@ -141,7 +159,7 @@ end
     occ.translate([(1,c)],1.0,2.0,3.0)
     occ.synchronize(); m=_current_model()
     g=m.curve_geometry[c]
-    @test g.curve isa M._ModelOCCReparamCurve
+    @test g.curve isa M._ModelOCCNURBSCurve
     @test collect(_eval(g,0.0))≈[2.0,2.0,3.0] atol=1e-13
     # get_closest_entities materializes through the converted evaluator
     pts,_=occ.get_closest_entities(1.0,2.0,3.0,[(1,c)],1)
@@ -171,7 +189,7 @@ end
 _surf_eval(g,u,v)=M._occ_surface_point(g,u,v)
 _surf_analytic(g)=Base.structdiff(g,(patch=nothing,reparam=nothing))
 
-@testset "occ.convertToNURBS plane + quadrics (exact reparam)" begin
+@testset "occ.convertToNURBS plane + quadrics (rational chart)" begin
     occ=_occ_setup()
     # plane face → bilinear degree-1 patch
     a=occ.add_point(0.0,0.0,0.0); b=occ.add_point(2.0,0.0,0.0)
@@ -205,18 +223,18 @@ _surf_analytic(g)=Base.structdiff(g,(patch=nothing,reparam=nothing))
     for u in (0.37,1.11,2.83,4.4,5.9), v in (0.4,1.7,3.2)
         pu=Float64(u);pv=Float64(v)
         p=_surf_eval(g,pu,pv)
-        pa=M._occ_surface_point(ga,pu,pv)
+        pa=_reference_surface(g,ga,pu,pv)[1]
         @test collect(p)≈collect(pa) atol=1e-12
         _,du,dv=M._occ_surface_d1(g,pu,pv)
-        _,dua,dva=M._occ_surface_d1(ga,pu,pv)
+        _,dua,dva=_reference_surface(g,ga,pu,pv)
         @test collect(du)≈collect(dua) atol=1e-10
         @test collect(dv)≈collect(dva) atol=1e-10
     end
     # u knot locations must also be exact (left-limit at shared knots)
-    for u in (π/2,π,3π/2), v in (1.0,2.5)
+    for u in (2π/3,4π/3), v in (1.0,2.5)
         pu=Float64(u);pv=Float64(v)
         _,_,_,duu,dvv,duv=M._occ_surface_d2(g,pu,pv)
-        _,_,_,duua,dvva,duva=M._occ_surface_d2(ga,pu,pv)
+        _,_,_,duua,dvva,duva=_reference_surface(g,ga,pu,pv)
         @test collect(duu)≈collect(duua) atol=1e-10
         @test collect(dvv)≈collect(dvva) atol=1e-10
         @test collect(duv)≈collect(duva) atol=1e-10
@@ -234,13 +252,13 @@ end
     occ.convert_to_nurbs([(2,sf)])
     occ.synchronize(); m=_current_model()
     g=m.surface_geometry[sf]
-    @test hasproperty(g,:patch) && g.reparam.u!==nothing &&
-          g.reparam.v!==nothing
+    @test hasproperty(g,:patch) && g.analytic_chart.u!==nothing &&
+          g.analytic_chart.v!==nothing
     ga=_surf_analytic(g)
     for u in (0.4,1.9,3.3,5.1), v in (-1.2,-0.4,0.3,1.25)
         pu=Float64(u);pv=Float64(v)
         @test collect(_surf_eval(g,pu,pv))≈
-              collect(M._occ_surface_point(ga,pu,pv)) atol=1e-12
+              collect(_reference_surface(g,ga,pu,pv)[1]) atol=1e-12
         # pole-adjacent v stays on the sphere
         @test abs(M._occ_modulus(_surf_eval(g,pu,pv))-2.0)<1e-12
     end
@@ -269,7 +287,7 @@ end
     for u in (0.7,2.2,4.0,5.5), v in (0.3,1.8,3.9,5.7)
         pu=Float64(u);pv=Float64(v)
         @test collect(_surf_eval(g,pu,pv))≈
-              collect(M._occ_surface_point(ga,pu,pv)) atol=1e-12
+              collect(_reference_surface(g,ga,pu,pv)[1]) atol=1e-12
     end
     # cone — slant-length v parametrization preserved
     occ=_occ_setup()
@@ -284,7 +302,7 @@ end
     for u in (0.5,2.6,4.8), v in (0.4,1.5,2.8)
         pu=Float64(u);pv=Float64(v)
         @test collect(_surf_eval(g,pu,pv))≈
-              collect(M._occ_surface_point(ga,pu,pv)) atol=1e-12
+              collect(_reference_surface(g,ga,pu,pv)[1]) atol=1e-12
     end
     @test hi[2]≈sqrt(9.0+1.0) atol=1e-12
 end
@@ -308,14 +326,22 @@ end
         @test hypot(p[1]-1.0,p[2]-2.0)≈1.5 atol=1e-11
     end
     @test occ.get_mass(3,cyl)≈π*1.5^2*4 atol=1e-9
-    # projection recovers the external (angle, height) parametrization
+    # Projection recovers the rational knot coordinates.
     tgt=collect(M._occ_surface_point(g,1.1,2.5))
     u,v,xyz=M._model_nurbs_surface_project(g,tuple(tgt...))
     @test u≈1.1 atol=1e-9
     @test v≈2.5 atol=1e-9
-    # reflection rejects loudly
-    @test occursin("not implemented",
-        _errtext(()->occ.mirror([(3,cyl)],1.0,0.0,0.0,0.0)))
+    # Reflection of a converted cylinder is a successful exact image.
+    occ.mirror([(3,cyl)],1.0,0.0,0.0,0.0)
+    occ.synchronize(); m=_current_model()
+    g=m.surface_geometry[lat]
+    for i in 1:5, j in 1:5
+        u=Float64(lo[1]+(hi[1]-lo[1])*(i-0.5)/5)
+        v=Float64(lo[2]+(hi[2]-lo[2])*(j-0.5)/5)
+        p=M._occ_surface_point(g,u,v)
+        @test hypot(p[1]+1.0,p[2]-2.0)≈1.5 atol=1e-11
+    end
+    @test occ.get_mass(3,cyl)≈π*1.5^2*4 atol=1e-9
 end
 
 @testset "occ.convertToNURBS converted face still meshes" begin

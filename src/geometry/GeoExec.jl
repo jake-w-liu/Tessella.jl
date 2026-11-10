@@ -536,7 +536,7 @@ function _geo_emit_statement!(statements,locs,buf,buf_nl,buf_line0,cur_line,line
     statement=strip(raw_stmt)
     lead=0;rn=ncodeunits(raw_stmt)
     while lead<rn && isspace(raw_stmt[lead+1])
-        lead+=1
+        lead=nextind(raw_stmt,lead+1)-1
     end
     nl=Int[]
     for p in buf_nl
@@ -709,7 +709,7 @@ function _geo_exec_statements(stream::Base.IO)
     tail=strip(raw_tail)
     tail_lead=0;rn=ncodeunits(raw_tail)
     while tail_lead<rn && isspace(raw_tail[tail_lead+1])
-        tail_lead+=1
+        tail_lead=nextind(raw_tail,tail_lead+1)-1
     end
     tail_nl=buf_nl
     tail_first=buf_line0>0 ? buf_line0 : cur_line
