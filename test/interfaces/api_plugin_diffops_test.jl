@@ -254,19 +254,28 @@ end
         @test data[1]≈[1.,0.,0., 0.,2.,0., 0.,0.,3., 1.,2.,3.]
         A.plugin.set_number("SphericalRaise","TimeStep",0)
 
-        # Model views are rejected like the other in-place writers.
+        # Model views update the owning primary mesh vertices and preserve data rows.
         model_view=A.view.add("model")
         A.model.add("box")
         A.model.add_box(0,0,0,1,1,1;tag=1)
         A.option("Mesh.MeshSizeMin",2.0)
         A.option("Mesh.MeshSizeMax",2.0)
         A.mesh.generate(2)
-        node_ids,_,_=A.mesh.get_nodes()
+        node_ids,before_geometry,_=A.mesh.get_nodes()
         A.view.add_model_data(model_view,0,"box","NodeData",node_ids,
                               [[1.0] for _ in node_ids])
         A.plugin.set_number("SphericalRaise","View",model_view)
-        @test occursin("rewrites list data only",
-            _errtext(()->A.plugin.run("SphericalRaise")))
+        before_data=A.view.get_model_data(model_view,0)
+        A.plugin.run("SphericalRaise")
+        expected_geometry=copy(before_geometry)
+        for index in eachindex(node_ids)
+            point=@view before_geometry[3index-2:3index]
+            radius=hypot(point...)
+            radius>0 || continue
+            expected_geometry[3index-2:3index].=point.*(1+1/radius)
+        end
+        @test A.mesh.get_nodes()[2]≈expected_geometry
+        @test A.view.get_model_data(model_view,0)==before_data
     finally
         A.option("General.AbortOnError",2)
         A.finalize()
@@ -318,7 +327,7 @@ end
         A.option("Mesh.MeshSizeMin",2.0)
         A.option("Mesh.MeshSizeMax",2.0)
         A.mesh.generate(2)
-        node_ids,_,_=A.mesh.get_nodes()
+        node_ids,before_geometry,_=A.mesh.get_nodes()
         md=A.view.add("md")
         A.view.add_model_data(md,0,"box","NodeData",node_ids,
                               [[1.0] for _ in node_ids])

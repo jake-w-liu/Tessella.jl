@@ -61,7 +61,8 @@ the full per-row ledger remains authoritative for additional subitems:
   also retain their exact composed geometry, derivatives, affine images and
   trimmed planar witnesses. Natural-solid moments retain a nearby frame and
   rational faces use bounded adaptive quadrature. Remaining BREP families
-  include hyperbolas/general offsets and internal/external orientations;
+  include general offsets and internal/external orientations. Hyperbolic curves,
+  extruded faces and their rational conversion/pcurve lifecycle are implemented;
   general quadric-bounded shell inertia still rejects rather than approximating.
 - Full-quad and anisotropic integration with embedded, transfinite, smoothing,
   periodic/compound, and curved/scalar-field contexts.

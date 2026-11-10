@@ -41,6 +41,7 @@ include("functional/fixtures.jl")
         "meshing/highorder_elastic_fem_test.jl",
         "meshing/highorder_scaled_jacobian_range_test.jl",
         "interfaces/api_plugin_distance_pde_test.jl",
+        "interfaces/api_plugin_model_geometry_test.jl",
         "core/mesh_coordinate_cancellation_test.jl",
         "core/barycentric_range_test.jl",
         "fields/threshold_interval_precision_test.jl",

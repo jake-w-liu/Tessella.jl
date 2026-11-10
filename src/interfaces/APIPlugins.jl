@@ -18,7 +18,7 @@
 #   Probe           interpolated value at (X,Y,Z) into one `*_Probe` point view,
 #   Skin            boundary facets of list records into `*_Skin`,
 #   ExtractElements value/dimension filtered elements into `*_ExtractElements`,
-#   Transform       in-place affine map of list node coordinates,
+#   Transform       in-place affine map of list or source-model node coordinates,
 #   Remove          in-place element-class/string removal,
 #   Smooth          in-place coincident-node value averaging,
 #   NewView         constant `NodeData` model view over the current mesh,
@@ -59,9 +59,10 @@
 #                   S·S + Ω·Ω built from the 3-component velocity gradient —
 #                   or read straight from 9-component tensor records — into
 #                   `*_Lambda2` scalar records,
-#   SphericalRaise  in-place radial raise: each list-record node moves along
+#   SphericalRaise  in-place radial raise: each selected view node moves along
 #                   the unit vector from (`Xc`,`Yc`,`Zc`) by `Offset + Raise`
-#                   times its `TimeStep` scalar representation,
+#                   times its scalar representation (selected list step or
+#                   each visited model step),
 #   Annotate        appends the `Text` string as a `T2`/`T3` string record
 #                   (in-place on list views; a new `*_Annotate` list view
 #                   carrying the string and the source time table for model
@@ -94,9 +95,9 @@
 # run the same guard (`Eigenvalues`/`ModulusPhase`/`HarmonicToTime` have the
 # identical upstream check). `Eigenvalues`, `HarmonicToTime` and `Density`
 # emit linear corner records like the other per-element plugins.
-# `SphericalRaise` rewrites list data only (upstream mutates the
-# owning mesh through model views, the same restriction the other in-place
-# plugins take). `Annotate` accepts the upstream `Font`/`FontSize`/`Align`
+# `Transform` and `SphericalRaise` also mutate the owning mesh of model
+# views, preserving their value rows and actual public node identities.
+# `Annotate` accepts the upstream `Font`/`FontSize`/`Align`
 # options but session string records carry no per-string style slot, so
 # they are stored without effect (the `Visible` convention below).
 #
@@ -118,9 +119,8 @@
 # Session views carry no per-element visibility flags, so the upstream `Visible`
 # options are accepted and stored but currently never hide an element.
 # `Skin FromMesh` publishes discrete boundary entities while retaining source
-# node ownership. `Transform`/`Remove`/`Smooth`/`Warp`/`SphericalRaise` reject
-# model-based views — upstream in-place writers
-# mutate `PViewDataList`. CutSphere and Isosurface register `RecurLevel`/
+# node ownership. `Remove`/`Smooth`/`Warp` currently reject model-based views;
+# their remaining successful native model-data contexts require qualification. CutSphere and Isosurface register `RecurLevel`/
 # `TargetError` like upstream;
 # they steer the adaptive subdivision of *curved* elements, which our linear
 # record catalog never produces, so they are stored without effect (the
@@ -1342,18 +1342,20 @@ function _plugin_exec_extract_elements(spec::_PluginSpec,caller::AbstractString)
     return nothing
 end
 
+include("APIPluginsModelGeometry.jl")
+
 # ---- Transform ------------------------------------------------------------------------
 
 function _plugin_exec_transform(spec::_PluginSpec,caller::AbstractString)
     numbers=spec.numbers
     tag,view=_plugin_view(numbers,caller)
-    view.model_kind===nothing || throw(ArgumentError(
-        "$caller: Transform rewrites list data only; model views are unsupported"))
     a=((numbers["A11"],numbers["A12"],numbers["A13"]),
        (numbers["A21"],numbers["A22"],numbers["A23"]),
        (numbers["A31"],numbers["A32"],numbers["A33"]))
     t=(numbers["Tx"],numbers["Ty"],numbers["Tz"])
     swap=!iszero(numbers["SwapOrientation"])
+    view.model_kind===nothing || return _plugin_model_geometry!(view,caller;
+        matrix=a,translation=t,swap)
     steps=_plugin_list_steps(view,caller)
     for type in view.list_types
         layout=get(Post._POS_RECORD_TYPES,type,nothing)
@@ -3008,8 +3010,8 @@ function _plugin_exec_spherical_raise(spec::_PluginSpec,caller::AbstractString)
     offset=_mesh_query_coordinate(numbers["Offset"],caller,"Offset")
     timestep=_mesh_query_integer(Int(numbers["TimeStep"]),caller,"TimeStep")
     tag,view=_plugin_view(numbers,caller)
-    view.model_kind===nothing || throw(ArgumentError(
-        "$caller: SphericalRaise rewrites list data only; model views are unsupported"))
+    view.model_kind===nothing || return _plugin_model_geometry!(view,caller;
+        center,raise,offset,timestep)
     steps=_plugin_list_steps(view,caller)
     if timestep<0 || timestep>steps-1
         _native_mesh_input_error_locked(
