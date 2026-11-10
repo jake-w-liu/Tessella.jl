@@ -1,0 +1,11 @@
+Point(1)={0,0,0,0.2};
+Point(2)={1,0,0,0.2};
+Point(3)={Sqrt(3)-1,1,0,0.2};
+Point(4)={0,1,0,0.2};
+Point(5)={-1,0,0,0.2};
+Line(1)={1,2}; Circle(2)={2,5,3}; Line(3)={3,4}; Line(4)={4,1};
+Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+Field[1]=BoundaryLayer; Field[1].CurvesList={1}; Field[1].Size=.03;
+Field[1].Ratio=1.3; Field[1].Thickness=.15; Field[1].Quads=1;
+BoundaryLayer Field=1;
+Mesh.MeshSizeMin=.2; Mesh.MeshSizeMax=.2;

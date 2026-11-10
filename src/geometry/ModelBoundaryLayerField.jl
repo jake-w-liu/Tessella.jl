@@ -623,8 +623,8 @@ end
 # distances from the end vertex (the column's `vertex_offsets` entry — on
 # a straight edge the 2-D and 3-D distances agree), and the unit 3-D
 # direction of the first consumed segment — the `vertex_dirs` override.
-# Bounded: the column direction must stay straight within tolerance —
-# bending end columns are a documented gap.
+# A curved adjacent edge retains its actual mesh-node positions instead of
+# extrapolating the first segment direction through its cumulative distances.
 function _bl_run_end_chain(dsign::Int,p_end::Int,adjacent_curve::Int,
                            spec,caller::AbstractString,t::Int,
                            seg_spec::Vector{Int},loop::Vector{Int},
@@ -636,7 +636,7 @@ function _bl_run_end_chain(dsign::Int,p_end::Int,adjacent_curve::Int,
     rvert(p)=loop[mod1(start0+p-1,nseg)]
     positions=Int[];dists=Float64[]
     dir3=nothing
-    traveled=0.0;d2x=0.0;d2y=0.0
+    traveled=0.0
     pos=pmod(p_end)
     while true
         npos=pmod(pos+dsign)
@@ -654,13 +654,6 @@ function _bl_run_end_chain(dsign::Int,p_end::Int,adjacent_curve::Int,
             s3z=coordsw[b][3]-coordsw[a][3]
             sl3=hypot(s3x,s3y,s3z)
             dir3=(s3x/sl3,s3y/sl3,s3z/sl3)
-            d2x=s2x/sl2;d2y=s2y/sl2
-        else
-            cross=s2x*d2y-s2y*d2x
-            abs(cross)<=1e-9*sl2 || throw(ArgumentError(
-                "$caller: BoundaryLayer Field[$(spec.tag)] end column on " *
-                "Surface[$t] bends along Curve[$adjacent_curve] — " *
-                "bending end columns are not implemented"))
         end
         # `npos` joins the column only when the segment after it (in walk
         # direction) stays on the same non-wall curve — otherwise it is
@@ -1066,9 +1059,10 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
             # already interior wire vertices). The strip then uses the
             # chain prefix up to `min(K, neighbour+1)` levels; chain nodes
             # beyond the used depth keep their place in the reduced wire.
-            # Bounded: the column direction must stay straight and two
+            # Curved columns retain the actual adjacent-edge nodes. Two
             # ends may share only their deepest node when the covered
             # spans partition one edge.
+            vpositions=nothing
             vdirs=nothing
             end_cols=nothing
             if !closed_run
@@ -1178,6 +1172,13 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                         wv=rvert(pos)
                         push!(snapped_coords,coords3d[wv])
                         covered_owner[coords3d[wv]]=Int32(adj)
+                    end
+                    if emit>0
+                        vpositions===nothing && (vpositions=
+                            Dict{Tuple{Int,Int},NTuple{3,Float64}}())
+                        for k in 1:emit
+                            vpositions[(slot,k)]=coordsw[rvert(ch[k])]
+                        end
                     end
                     top_override[v_end_v]=emit>0 ?
                         vertex_id!(rvert(ch[emit])) : vertex_id!(v_end_v)
@@ -1314,6 +1315,7 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                 fan_elements=spec.fan_elements,
                 vertex_dirs=vdirs,
                 vertex_offsets=voff,
+                vertex_positions=vpositions,
                 vertex_scale_last=vscale,
                 vertex_fans=vfans,
                 fan_skips=fskips,

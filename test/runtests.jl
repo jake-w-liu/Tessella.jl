@@ -54,6 +54,7 @@ include("functional/fixtures.jl")
         "fields/postview_compact_tolerance_test.jl",
         "geometry/model_plane_closed_curve_test.jl",
         "geometry/model_surface_auto_algorithm_test.jl",
+        "geometry/boundary_layer_curved_end_test.jl",
         "geometry/model_compact_atomic_coverage_test.jl",
         "functional/list_view_export.jl",
         "functional/brep_assembly_smoke.jl",

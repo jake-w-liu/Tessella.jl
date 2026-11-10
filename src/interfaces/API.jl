@@ -254,13 +254,13 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     # `Mesh.AnisoMax` bounds the BGM metric aspect ratio at mesh time;
     # 1e33 is the upstream unbounded default.
     "Mesh.AnisoMax"=>1e33,
+    "Mesh.BoundaryLayerFanElements"=>5.0,
     "Mesh.FlexibleTransfinite"=>0.0,
     "Mesh.RecombineAll"=>0.0,
     "Mesh.RecombinationAlgorithm"=>1.0,
     # Upstream `mesh.recombine3DAll/Level/Conformity` — all stored `(int)`,
-    # default 0 (DefaultOptions.h). Only the all-triangle boundary fold is
-    # implemented; Level/Conformity remain verbatim storage for the
-    # unimplemented ALGO_3D_RTREE `meshCombine3D` arm.
+    # default 0 (DefaultOptions.h). The native RTREE producer consumes
+    # these values when it constructs recombined volume products.
     "Mesh.Recombine3DAll"=>0.0,
     "Mesh.Recombine3DLevel"=>0.0,
     "Mesh.Recombine3DConformity"=>0.0,
@@ -928,6 +928,8 @@ function option(name::AbstractString, value::Real)
         elseif key in ("Mesh.MinLineNodes","Mesh.MinCircleNodes","Mesh.MinCurveNodes")
             minimum=key=="Mesh.MinCurveNodes" ? 1 : 2
             v=Float64(max(minimum,_geo_signed_gmsh_int_value(v,"API.option")))
+        elseif key=="Mesh.BoundaryLayerFanElements"
+            v=_geo_option_store_value("Mesh","BoundaryLayerFanElements",v,"API.option")
         elseif key=="Mesh.HighOrderOptimize"
             # Upstream signed-int semantics: -1 elastic smoothing, 0 off,
             # 1 relocation optimization, 2 both (truncation like other ints).
@@ -2631,6 +2633,25 @@ function _generate_units(m::GeoModel,dimension::Int,entities::Vector{Int})
     return groups
 end
 
+# Resolve selections before staging; the resulting records are published only
+# with a successful generation plan, just like the other meshing settings.
+function _generation_boundary_layer_fields()
+    resolved=Dict{Int,Model._ModelBoundaryLayerField}()
+    fields_mod=getfield(parentmodule(@__MODULE__),:SizeField)
+    fan_elements=Int(OPTIONS["Mesh.BoundaryLayerFanElements"])
+    for tag in BOUNDARY_LAYER_FIELDS[]
+        field=get(FIELD_SPECS[],tag,nothing)
+        field===nothing && throw(ArgumentError(
+            "API.mesh.generate: BoundaryLayer Field[$tag] is not declared"))
+        lowercase(field.kind)=="boundarylayer" || throw(ArgumentError(
+            "API.mesh.generate: Field[$tag] has kind $(field.kind), not BoundaryLayer"))
+        spec=GeoFieldSpec(tag,field.kind,Dict(field.options),copy(field.order))
+        config=fields_mod._geo_boundary_layer_config(spec,fan_elements)
+        resolved[tag]=Model._ModelBoundaryLayerField(tag,config,"API.mesh.generate")
+    end
+    return resolved
+end
+
 function _generation_meshing_options(order::Int)
     return (algorithm_2d=Int(OPTIONS["Mesh.Algorithm"]),
         algorithm_3d=Int(OPTIONS["Mesh.Algorithm3D"]),
@@ -2650,6 +2671,7 @@ function _generation_meshing_options(order::Int)
         transfinite_tri=Int(OPTIONS["Mesh.TransfiniteTri"]),
         lc_extend_from_boundary=Int(OPTIONS["Mesh.MeshSizeExtendFromBoundary"]),
         aniso_max=OPTIONS["Mesh.AnisoMax"],
+        boundary_layer_fields=_generation_boundary_layer_fields(),
         order=order)
 end
 
@@ -2672,6 +2694,8 @@ function _apply_generation_meshing_options!(m::GeoModel,settings)
     m.meshing.lc_extend_from_boundary=settings.lc_extend_from_boundary
     m.meshing.aniso_max=settings.aniso_max
     m.meshing.order=settings.order
+    hasproperty(settings,:boundary_layer_fields) &&
+        (m.meshing.boundary_layer_fields=copy(settings.boundary_layer_fields))
     # `PView::list` for boundary-layer `Extrude` `Using View[i]`: session
     # views in tag order (upstream keeps them in creation order, which the
     # sequential session tags reproduce). A caller that runs its own view

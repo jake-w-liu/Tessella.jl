@@ -452,6 +452,8 @@ end
 # leaves the vertex on its source row. `vertex_offsets` (indexed by curve node
 # id) optionally gives each wall vertex its own cumulative offsets — upstream's
 # `getLocalInfoAtNode` per-node schedules (`SizesList`/`hwall_n_nodes` grading).
+# `vertex_positions[(v,k)]` retains an existing adjacent-edge column's exact
+# working-frame node at level k, including curved run-end columns.
 # Each wall segment then emits min(lengths) quadrangle rows plus upstream's
 # closing triangle on the deeper column, and a column emits only its deepest
 # *used* level. The returned `dirs`/`tops` maps
@@ -485,6 +487,7 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
                       max_cells::Integer=10_000_000,
                       vertex_dirs=nothing,
                       vertex_offsets=nothing,
+                      vertex_positions=nothing,
                       vertex_scale_last=nothing,
                       scale_hprev::Real=0.0,
                       normalize_dirs::Bool=true,
@@ -630,6 +633,21 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
             previous=off
         end
         nlens[idx]=nvo
+    end
+    positions_over=vertex_positions===nothing ? nothing :
+        Dict{Tuple{Int,Int},NTuple{3,Float64}}()
+    if vertex_positions!==nothing
+        for ((v,k),point) in vertex_positions
+            haskey(pos,v) || throw(ArgumentError(
+                "$caller: vertex_positions node $v is not on the polyline"))
+            1<=k<=nlens[pos[v]] || throw(ArgumentError(
+                "$caller: vertex_positions level $k is outside node $v's column"))
+            v in fan_set && throw(ArgumentError(
+                "$caller: vertex_positions cannot override fan node $v"))
+            length(point)==3 && all(isfinite,point) || throw(ArgumentError(
+                "$caller: vertex_positions[$v,$k] must have three finite coordinates"))
+            positions_over[(Int(v),Int(k))]=Tuple(Float64.(point))
+        end
     end
     emit_len=Vector{Int}(undef,nchain)
     for (idx,v) in enumerate(verts)
@@ -969,7 +987,12 @@ function _bl_2d_offsets(curve::Mesh, offsets::AbstractVector{<:Real};
         else
             dir=dirs_over===nothing ? nothing : get(dirs_over,v,nothing)
             off=_offset_at(v,k)
-            if param_frame
+            retained=positions_over===nothing ? nothing : get(positions_over,(v,k),nothing)
+            if retained!==nothing
+                new_point=retained
+                new_plane_point=_plane_point(
+                    new_point,plane_origin,basis_u,basis_v)
+            elseif param_frame
                 x0,y0=plane_points[v]
                 if dir===nothing
                     px=x0+off*n_avg[idx][1]
