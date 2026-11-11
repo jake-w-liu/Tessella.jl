@@ -8,9 +8,10 @@
 # the conic/spline/NURBS/quadric families; solids reuse the compact
 # `primitive` records and the divergence theorem
 # ∭(r-c)_i(r-c)_j dV = n_k∬(r-c)_i(r-c)_j(r-c)_k dA/5. Conic/spline plane
-# wires use boundary 1-forms; quadric-bounded shells outside the
-# plane/cylinder divergence support reject loudly. Dims outside 1:3 report
-# the empty-GProp zero matrix like upstream's silent switch fall-through.
+# wires use boundary 1-forms; full/partial torus sectors use Pappus moments;
+# trimmed quadrics use the centered CDT divergence. Unparameterized shells
+# reject rather than approximating. Dims outside 1:3 report the empty-GProp
+# zero matrix like upstream's silent switch fall-through.
 using Test
 using LinearAlgebra: Diagonal
 
@@ -138,11 +139,45 @@ end
     co=occ.add_cone(0.0,0.0,0.0,0.0,0.0,3.0,2.0,0.0)
     @test occ.get_matrix_of_inertia(3,co)≈
         [15π/4,0.0,0.0, 0.0,15π/4,0.0, 0.0,0.0,24π/5] atol=1e-12
-    # Torus-bounded shells are outside the all-plane/primitive support
-    # and reject rather than approximate.
+    # Axisymmetric/spherical sector primitives retain their analytic
+    # centroidal moments (Gmsh 4.15.2 controls for π/2 sectors).
+    cs=occ.add_cylinder(0.0,0.0,0.0,0.0,0.0,3.0,2.0;angle=π/2)
+    @test collect(occ.get_center_of_mass(3,cs))≈
+        collect((0.848826363156775,0.848826363156775,1.5)) atol=1e-10
+    @test occ.get_matrix_of_inertia(3,cs)≈
+        [9.702750526092,0.790610905254,0.0, 0.790610905254,9.702750526092,0.0,
+         0.0,0.0,5.26833411103] rtol=1e-10
+    cos=occ.add_cone(0.0,0.0,0.0,0.0,0.0,3.0,2.0,0.5;angle=π/2)
+    @test occ.get_matrix_of_inertia(3,cos)≈
+        [2.973887818387,0.112714975951,0.461383928571,
+         0.112714975951,2.973887818387,0.461383928571,
+         0.461383928571,0.461383928571,1.599334555321] rtol=1e-10
+    sps=occ.add_sphere(0.0,0.0,0.0,2.0;angle1=-π/4,angle2=π/4,angle3=π/2)
+    @test occ.get_matrix_of_inertia(3,sps)≈
+        [5.958878968496,0.501865106343,0.0, 0.501865106343,5.958878968496,0.0,
+         0.0,0.0,3.62437645243] rtol=1e-10
+    # General trimmed quadric shell: sphere cut by z>=0 (lower hemisphere).
+    hs=occ.add_sphere(0.0,0.0,0.0,1.0;tag=50)
+    hb=occ.add_box(-2.0,-2.0,0.0,4.0,4.0,2.0;tag=51)
+    hout,_=occ.cut([(3,50)],[(3,51)];tag=52)
+    @test hout==[(3,52)]
+    occ.synchronize()
+    @test occ.get_mass(3,52)≈2π/3 rtol=1e-6
+    @test collect(occ.get_center_of_mass(3,52))≈[0.,0.,-0.375] atol=1e-6
+    @test occ.get_matrix_of_inertia(3,52)≈
+        [0.543233729683,0.0,0.0, 0.0,0.543233729683,0.0,
+         0.0,0.0,0.837758040957] rtol=1e-6 atol=1e-7
     t=occ.add_torus(0.0,0.0,0.0,3.0,1.0)
-    @test occursin("unsupported solid boundary",
-                   _errtext(()->occ.get_matrix_of_inertia(3,t)))
+    @test occ.get_matrix_of_inertia(3,t)≈
+        [303.490335333498,0.0,0.0, 0.0,303.490335333498,0.0,
+         0.0,0.0,577.371857463727] rtol=1e-10
+    tp=occ.add_torus(0.0,0.0,0.0,3.0,1.0;angle=π/2)
+    @test collect(occ.get_center_of_mass(3,tp))≈
+        [1.9629109648000427,1.962910964800042,0.0] atol=1e-10
+    @test occ.get_matrix_of_inertia(3,tp)≈
+        [18.830917166708,11.095874107916,0.0,
+         11.095874107916,18.830917166708,0.0,
+         0.0,0.0,30.259631032599] rtol=1e-8
 end
 
 @testset "occ.get_matrix_of_inertia — misc dims + lifecycle" begin

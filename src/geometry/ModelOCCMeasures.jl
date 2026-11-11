@@ -1634,6 +1634,42 @@ function _model_occ_trimmed_face_moment2(kernel,id;centroid=nothing)
     return m
 end
 
+# Centered divergence face tensor ∬(p-c)⊗(p-c)((p-c)·n)dA over a trimmed
+# parametric face. The same CDT and 4×-split rule as the mass/centroid
+# divergence path; used for quadric and patch faces outside the exact
+# plane/cylinder/torus-sector arms.
+function _model_occ_trimmed_face_div_moment2(kernel,id,center)
+    shape=kernel.shapes[id];rec=shape.geometry.geometry
+    xs,ys,T,interior=_model_occ_trimmed_face_cdt(kernel,id,shape,rec)
+    nodes=((1/6,1/6),(2/3,1/6),(1/6,2/3))
+    Q=zeros(3,3)
+    for t in eachindex(interior)
+        interior[t] || continue
+        p1=(xs[T.tv[3t-2]],ys[T.tv[3t-2]])
+        p2=(xs[T.tv[3t-1]],ys[T.tv[3t-1]])
+        p3=(xs[T.tv[3t]],ys[T.tv[3t]])
+        m12=_occ2_mid(p1,p2);m23=_occ2_mid(p2,p3);m31=_occ2_mid(p3,p1)
+        for (q1,q2,q3) in ((p1,m12,m31),(m12,p2,m23),(m31,m23,p3),
+                          (m12,m23,m31))
+            jac=abs((q2[1]-q1[1])*(q3[2]-q1[2])-
+                    (q3[1]-q1[1])*(q2[2]-q1[2]))
+            for (s,tt) in nodes
+                u=q1[1]+s*(q2[1]-q1[1])+tt*(q3[1]-q1[1])
+                v=q1[2]+s*(q2[2]-q1[2])+tt*(q3[2]-q1[2])
+                p,du,dv=_occ_surface_d1(rec,u,v)
+                w=jac/2/3
+                normal=_occ_cross(du,dv)
+                d=_occ3_sub(p,center)
+                rn=_dot3(d,normal)
+                for i in 1:3,j in 1:3
+                    Q[i,j]+=w*rn*d[i]*d[j]/5
+                end
+            end
+        end
+    end
+    return Q
+end
+
 function _model_occ_face_moment2(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     hasproperty(rec,:natural_bounds) &&
@@ -1697,6 +1733,70 @@ function _model_occ_face_moment2(kernel,id)
     return m
 end
 
+# Torus sector (Pappus) centroidal second-moment tensor. The solid is the
+# swept tube over u∈[u0,u1]; analytic radial/azimuth integrals avoid a
+# curved-CDT approximation. Q is returned in the torus local frame and then
+# mapped through the stored X/Y/axis basis.
+function _occ_torus_sector_moment2(rec,win)
+    u0,u1=win
+    φ=u1-u0
+    R=rec.r1;r=rec.r2
+    s0,c0=_gm_sincos(u0);s1,c1=_gm_sincos(u1)
+    s20,c20=_gm_sincos(2u0);s21,c21=_gm_sincos(2u1)
+    Su=s1-s0; Cu=c0-c1
+    U2=φ/2+(s21-s20)/4
+    U2y=φ/2-(s21-s20)/4
+    UV=(s1*s1-s0*s0)/2
+    V=φ*π*R*r*r
+    V>_OCC_CONFUSION || return zeros(3,3)
+    # ∫ρ(R+ρcosv)³ dρdv (the x²/y² weight) and the z² weight.
+    qcoef=π*R*r*r*(R*R+3r*r/4)
+    qzz=π*φ*R*r^4/4
+    mcoef=π*r*r*(R*R+r*r/4)
+    mX=mcoef*Su
+    mY=mcoef*Cu
+    cX=mX/V; cY=mY/V
+    Q=zeros(3,3)
+    Q[1,1]=qcoef*U2-V*cX*cX
+    Q[2,2]=qcoef*U2y-V*cY*cY
+    Q[1,2]=Q[2,1]=qcoef*UV-V*cX*cY
+    Q[3,3]=qzz
+    X=rec.X;Y=rec.Y;Z=rec.axis
+    basis=(X,Y,Z)
+    Qw=zeros(3,3)
+    for a in 1:3,b in 1:3
+        Q[a,b]==0.0 && continue
+        for i in 1:3,j in 1:3
+            Qw[i,j]+=Q[a,b]*basis[a][i]*basis[b][j]
+        end
+    end
+    return Qw
+end
+
+# Centered divergence tensor over a full NURBS patch's knot domain.
+function _model_occ_patch_face_div_moment2(kernel,id,center)
+    rec=kernel.shapes[id].geometry.geometry
+    surface=rec.patch.surface
+    (u0,v0),(u1,v1)=_model_nurbs_surface_bounds(rec)
+    uspans=_model_occ_span_cuts(surface.knots_u,u0,u1)
+    vspans=_model_occ_span_cuts(surface.knots_v,v0,v1)
+    Q=zeros(3,3)
+    for (ua,ub) in uspans, (va,vb) in vspans
+        hu=(ub-ua)/2;mu=(ua+ub)/2;hv=(vb-va)/2;mv=(va+vb)/2
+        for i in 1:4,si in (-1,1),j in 1:4,sj in (-1,1)
+            u=mu+si*hu*_OCC_GL_T[i];v=mv+sj*hv*_OCC_GL_T[j]
+            w=_OCC_GL_W[i]*_OCC_GL_W[j]*hu*hv
+            p,du,dv,_,_,_=_model_nurbs_surface_d2(rec,u,v)
+            d=_occ3_sub(p,center)
+            rn=_dot3(d,_occ_cross(du,dv))
+            for i2 in 1:3,j2 in 1:3
+                Q[i2,j2]+=w*rn*d[i2]*d[j2]/5
+            end
+        end
+    end
+    return Q
+end
+
 function _model_occ_solid_moment2(kernel,id)
     shape=kernel.shapes[id]; g=shape.geometry
     m=zeros(3,3)
@@ -1748,9 +1848,18 @@ function _model_occ_solid_moment2(kernel,id)
         return _model_occ_natural_solid_stats(kernel,uses;want_second=true).second
     end
     face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
+    torus_faces=[fid for (fid,_) in uses if face_kind((fid,false))===:torus]
+    if length(torus_faces)==1 &&
+            all(u->face_kind(u) in (:torus,:plane),uses)
+        trec=kernel.shapes[only(torus_faces)].geometry.geometry
+        win=_occ_torus_sector_window(kernel,only(torus_faces),trec)
+        win===nothing || return _occ_torus_sector_moment2(trec,win)
+    end
     face_ok=u->begin
         rec=kernel.shapes[u[1]].geometry.geometry
-        face_kind(u) in (:plane,:cylinder) || hasproperty(rec,:natural_bounds)
+        face_kind(u) in (:plane,:cylinder) ||
+            hasproperty(rec,:natural_bounds) ||
+            haskey(rec,:pcurves) || haskey(rec,:patch)
     end
     all(face_ok,uses) || throw(ErrorException(
         "OCC.get_matrix_of_inertia: unsupported solid boundary"))
@@ -1771,7 +1880,7 @@ function _model_occ_solid_moment2(kernel,id)
             for i in 1:3,j in 1:3,k in 1:3
                 m[i,j]+=n[k]*U[i,j,k]/5
             end
-        else
+        elseif rec.occ===:cylinder
             h=_dot3(_occ_cross(rec.X,_occ_frame_y(rec)),rec.axis)>=0 ?
                 1.0 : -1.0
             _,_,Q=_model_occ_cyl_face_moment_terms(kernel,fid,centroid)
@@ -1779,6 +1888,19 @@ function _model_occ_solid_moment2(kernel,id)
             for i in 1:3,j in 1:3
                 m[i,j]+=scale*Q[i,j]
             end
+        elseif haskey(rec,:pcurves)
+            Q=_model_occ_trimmed_face_div_moment2(kernel,fid,centroid)
+            for i in 1:3,j in 1:3
+                m[i,j]+=σ*Q[i,j]
+            end
+        elseif haskey(rec,:patch)
+            Q=_model_occ_patch_face_div_moment2(kernel,fid,centroid)
+            for i in 1:3,j in 1:3
+                m[i,j]+=σ*Q[i,j]
+            end
+        else
+            throw(ErrorException(
+                "OCC.get_matrix_of_inertia: unsupported solid boundary"))
         end
     end
     return m
