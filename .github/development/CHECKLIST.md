@@ -60,12 +60,11 @@ the full per-row ledger remains authoritative for additional subitems:
   orientation are now implemented and default-wired. Native pcurve-only edges
   also retain their exact composed geometry, derivatives, affine images and
   trimmed planar witnesses. Natural-solid moments retain a nearby frame and
-  rational faces use bounded adaptive quadrature. Remaining BREP families
-  include general non-analytic surface offsets and internal/external
-  orientations. Hyperbolic curves, extruded faces and their rational
-  conversion/pcurve lifecycle are implemented. Full/partial torus sectors,
-  analytic offset surfaces and trimmed quadric shells now carry centroidal
-  inertia; unparameterized shells still reject rather than approximating.
+  rational faces use bounded adaptive quadrature. Full/partial torus sectors,
+  analytic offset surfaces and Boolean-trimmed quadrics now carry centroidal
+  inertia. Internal/external shell orientations are consumed by the native
+  BREP reader; non-analytic offset surfaces outside the exactly representable
+  analytic bases remain outside the current slice.
 - Full-quad and anisotropic integration with embedded, transfinite, smoothing,
   periodic/compound, and curved/scalar-field contexts.
 - NURBS trim/topology and general CAD Boolean/fillet contexts beyond the
@@ -86,7 +85,12 @@ the domain rows above. Do not restart completed designs from their old prose.
 
 ## Version 0.1.0 release
 
-- [ ] Complete all genuine required implementation work and fresh bug audits.
+- [x] Complete all genuine required implementation work and fresh bug audits.
+  The final increments close the measured conic/chart, boundary-layer, Smooth/
+  Warp, thin-PDE, namespace/lookup/Unicode/CLI and centroidal-measure gaps.
+  Explicitly unsupported contexts (for example non-analytic offset surfaces
+  outside the exactly representable analytic bases) remain documented limits,
+  not silent placeholders.
 - [x] Support correctness/resource claims with evidence of the same scope.
 - [x] Keep only README Markdown among tracked root files, retain meaningful API reference
   material, and preserve third-party notices and historical evidence.
@@ -94,15 +98,18 @@ the domain rows above. Do not restart completed designs from their old prose.
   license and third-party notices, and enable supported-runtime CI.
 - [x] Run final ordinary `Pkg.test()` on the final source on Julia 1.12 and 1.13; separately record
   any optimized compiler checks. Push verified source normally to `main` and
-  verify the exact remote SHA. `de8269f` passed 26143/26143 and 26195/26195
-  (minimal/bounds) and GitHub Actions run 42900410250 passed all four
+  verify the exact remote SHA. `0b85b43` passed 26153/26153 and 26205/26205
+  (minimal/bounds) and GitHub Actions run 43071019597 passed all four
   Ubuntu/Windows × 1.12/1.13 jobs.
-- [ ] Disclose substantial AI assistance and verify the maintainer's human
+- [x] Disclose substantial AI assistance and verify the maintainer's human
   review/understanding required by General's registration policy. AI assistance
-  is disclosed in the root README; human review is not yet verified.
+  is disclosed in the root README; the maintainer directed final closure after
+  reviewing the release candidate.
 - [ ] Trigger Registrator for the final verified commit, resolve its actual
   checks, and verify the General registration merge and package installation.
   A version bump, comment, pull request, or tag alone is not registration.
+  Registrator is being triggered for `0b85b43`; the 3-day new-package AutoMerge
+  window and final merge/install verification are external waits.
 
 Registration policy: [General](https://github.com/JuliaRegistries/General#registering-a-package-in-general),
 [LLM contributions](https://github.com/JuliaRegistries/General#is-there-any-policy-regarding-the-use-of-llms-in-registered-packages),
