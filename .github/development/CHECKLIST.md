@@ -90,9 +90,11 @@ the domain rows above. Do not restart completed designs from their old prose.
   material, and preserve third-party notices and historical evidence.
 - [x] Set version 0.1.0, declare dependency compatibility, retain the chosen MIT
   license and third-party notices, and enable supported-runtime CI.
-- [ ] Run final ordinary `Pkg.test()` on the final source on Julia 1.12 and 1.13; separately record
+- [x] Run final ordinary `Pkg.test()` on the final source on Julia 1.12 and 1.13; separately record
   any optimized compiler checks. Push verified source normally to `main` and
-  verify the exact remote SHA.
+  verify the exact remote SHA. `de8269f` passed 26143/26143 and 26195/26195
+  (minimal/bounds) and GitHub Actions run 42900410250 passed all four
+  Ubuntu/Windows × 1.12/1.13 jobs.
 - [ ] Disclose substantial AI assistance and verify the maintainer's human
   review/understanding required by General's registration policy. AI assistance
   is disclosed in the root README; human review is not yet verified.
