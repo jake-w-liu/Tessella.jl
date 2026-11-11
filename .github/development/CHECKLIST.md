@@ -108,8 +108,10 @@ the domain rows above. Do not restart completed designs from their old prose.
 - [ ] Trigger Registrator for the final verified commit, resolve its actual
   checks, and verify the General registration merge and package installation.
   A version bump, comment, pull request, or tag alone is not registration.
-  Registrator is being triggered for `0b85b43`; the 3-day new-package AutoMerge
-  window and final merge/install verification are external waits.
+  Registrator was triggered for `0b85b43`; [General PR #175815](https://github.com/JuliaRegistries/General/pull/175815)
+  has green treecheck/package-load checks and is waiting on the mandatory
+  3-day new-package AutoMerge window. Clean registry installation and merge
+  verification remain the only external wait.
 
 Registration policy: [General](https://github.com/JuliaRegistries/General#registering-a-package-in-general),
 [LLM contributions](https://github.com/JuliaRegistries/General#is-there-any-policy-regarding-the-use-of-llms-in-registered-packages),
