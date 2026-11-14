@@ -28,6 +28,8 @@ jobs:
         with:
           version: ${{ matrix.julia }}
       - uses: julia-actions/cache@v2
+      - name: Run optimized elastic FEM kernel tests
+        run: julia --project=. --startup-file=no --check-bounds=yes -O2 test/meshing/highorder_elastic_kernel_test.jl
       - name: Run functional package tests
         shell: julia --project=. --startup-file=no --check-bounds=yes {0}
         run: |

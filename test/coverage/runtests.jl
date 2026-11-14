@@ -21,6 +21,7 @@ Base.JLOptions().code_coverage==0 && error(
         "meshing/mesh2d_test.jl",
         "meshing/refine_test.jl",
         "meshing/periodic_test.jl",
+        "meshing/highorder_elastic_kernel_test.jl",
         "coverage/native_geometry.jl",
         "structured/transfinite_curve_test.jl",
         "geometry/nurbs_test.jl",

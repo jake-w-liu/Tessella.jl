@@ -28,10 +28,11 @@ julia --project=. --startup-file=no -O2 -e 'ENV["TESSELLA_TEST_COMPILER"]="optim
 CI collects coverage in a separate Julia 1.13 Linux job with normal compilation.
 The compiled suite exercises predicates, topology, coordinate queries, quality,
 transforms, 1-D/2-D/3-D meshing, refinement, periodicity, structured meshes, NURBS,
-healing, fields and MSH/STL I/O. It also checks warmed kernel allocations.
+healing, elastic FEM, fields and MSH/STL I/O. It also checks warmed kernel allocations.
 The report includes executed function-body counters, LCOV data, and total and
 covered source-line counts for this suite. Session API tests run separately.
-Minimal compilation does not reliably emit function coverage counters.
+On Julia 1.12 and 1.13, minimal compilation does not reliably emit function
+coverage counters.
 
 Run the same coverage suite locally:
 
@@ -44,6 +45,14 @@ Kernel allocation checks require normal compilation. Run them separately with:
 
 ```sh
 julia --project=. --startup-file=no --check-bounds=yes -O2 test/core/allocation_audit_test.jl
+```
+
+CI runs elastic FEM kernel regressions with normal optimization on every tested
+platform and Julia version. The default suite retains the public Poisson-control
+and boundary-preservation checks. Run the numerical kernel cases separately with:
+
+```sh
+julia --project=. --startup-file=no --check-bounds=yes -O2 test/meshing/highorder_elastic_kernel_test.jl
 ```
 
 The default covers predicates, fields, small 1D/2D/3D kernels, structured meshes,
