@@ -55,15 +55,8 @@ and boundary-preservation checks. Run the numerical kernel cases separately with
 julia --project=. --startup-file=no --check-bounds=yes -O2 test/meshing/highorder_elastic_kernel_test.jl
 ```
 
-The default covers predicates, fields, small 1D/2D/3D kernels, structured meshes,
-refinement, high order, I/O, API state, CAD boundaries, partitions, views and
-plugins. It also includes native Boolean seam/fuse-image controls, finite
-natural BREP faces and solids, centroidal CAD measures, wedge orientation, and
-the native ONELAB process server (including finite deadline/backpressure
-cleanup). Torus/box curved Boolean mass integration, full NURBS pillow and
-spherical-cap volume recovery, full `.geo`
-adaptation and geometry-mesh matching, native-oracle sweeps, allocation stress,
-benchmarks, and HFSS/external solver campaigns are opt-in:
+The extended suite adds larger geometry and meshing regressions and optional
+Gmsh comparisons:
 
 ```powershell
 julia --project=. --startup-file=no --check-bounds=yes test/extended/runtests.jl
@@ -77,11 +70,9 @@ the extended suite and can be run directly:
 julia --project=. --startup-file=no --check-bounds=yes test/integration/gmsh_io_test.jl
 ```
 
-The extended runner includes those cases and larger regression tests.
-It can take hours. Run the individual relevant file when checking a changed
-feature; documentation-only changes need a documentation build. External
-differential drivers under local `validation/` have their own tool requirements
-and are never production dependencies.
+The extended suite can take hours. Run the individual relevant file when
+checking a changed feature; documentation-only changes need a documentation
+build.
 
 See the [contribution guide](../docs/src/contributing.md) for documentation builds
 and change-verification guidance.
