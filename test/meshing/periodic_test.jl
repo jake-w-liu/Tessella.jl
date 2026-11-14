@@ -156,6 +156,14 @@ end
         singular=copy(identity);singular[3,3]=0
         @test_throws ArgumentError periodic_identify_affine(
             affine_input,singular,[1],[4])
+        # Matching coordinates must not mask invalid affine-map structure.
+        for malformed in (projective,singular)
+            for representation in (malformed,vec(permutedims(malformed)))
+                @test_throws ArgumentError periodic_identify_affine(
+                    coincident,representation,[1],[2];atol=0)
+            end
+        end
+        @test coincident.coords==zeros(3,2)
         @test_throws ArgumentError periodic_identify_affine(
             affine_input,identity,[1],[4];atol=NaN)
         @test_throws ArgumentError periodic_identify_affine(

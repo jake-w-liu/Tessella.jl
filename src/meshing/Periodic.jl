@@ -12,7 +12,7 @@ module Periodic
 
 using ..MeshTypes: Mesh, nnodes, validate
 using ..Elements: MixedMesh
-using ..Transform: _affine_coordinate, _periodic_affine_input
+using ..Transform: _affine_coordinate, _transform_gmsh_affine
 
 export periodic_identify, periodic_identify_affine
 
@@ -140,7 +140,7 @@ function _periodic_snapped_coords(mesh::Union{Mesh,MixedMesh},
 end
 
 function _periodic_affine(raw,caller::AbstractString)
-    coefficients,translation,=_periodic_affine_input(raw,caller)
+    coefficients,translation,=_transform_gmsh_affine(raw,caller)
     return coefficients,translation
 end
 
