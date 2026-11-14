@@ -38,6 +38,15 @@ curve_x(u)=let t=2u-1;23t-10t^3+3t^5;end
     # The existing artificial-normal reference tolerance remains applicable.
     @test F.field_value(field,0.,1e-8,0.)≈.5 atol=1e-10
     @test F.field_value(field,0.,1e-2,0.)==F.GMSH_MAX_SIZE
+    # Different LU rounding can send an ordinary inverse through precise
+    # recovery. Its final corrections need not fall below BigFloat epsilon.
+    cell=only(field.scheme_cells)
+    for seed in (-4e-15,0.,3.774758283725538e-15,4e-15)
+        recovered=F._pv_scheme_precise_inverse(cell,(-16.,0.,0.),
+            (seed,0.,0.),field.reference_tolerance)
+        @test recovered!==nothing
+        recovered===nothing || @test abs(first(recovered))<1e-10
+    end
 end
 
 @testset "the actual residual certificate retains the pyramid apex" begin
@@ -63,6 +72,16 @@ function small_parameter_field(dim,alpha)
     scheme=P.PosScheme(ones(1,1),[1. 0. 0.],geometry,exponents)
     record=P.PosElement(family,Matrix{Float64}(I,3,3),ones(1,1);scheme)
     return F.PostViewField([record];crop_negative=false,use_closest=false)
+end
+
+@testset "precise inversion continues until the boundary is certified" begin
+    field=small_parameter_field(1,1.)
+    # Newton approaches u=1 from above. A small correction alone cannot
+    # accept those iterates when the reference domain has zero tolerance.
+    reference=F._pv_scheme_precise_inverse(only(field.scheme_cells),
+        (2.,0.,0.),(.9,0.,0.),0.)
+    @test reference!==nothing
+    reference===nothing || @test first(reference)==1
 end
 
 @testset "small world residuals certify the actual intrinsic parameter" begin

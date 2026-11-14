@@ -4951,10 +4951,13 @@ end
                 return nothing
             end
             all(isfinite,step) || return nothing
-            limit=16eps(BigFloat)*max(BigFloat(1),maximum(abs,coordinates))
-            if maximum(abs,step)<=limit
-                return _pv_scheme_precise_certificate(cell,coordinates,query,
+            # Stop at the intrinsic accuracy the certificate actually needs;
+            # demanding BigFloat epsilon can stall at map roundoff.
+            if all(axis->abs(step[axis])<=max(BigFloat(nextfloat(0.)),
+                    BigFloat(64eps(Float64))*abs(coordinates[axis])),1:dim)
+                certified=_pv_scheme_precise_certificate(cell,coordinates,query,
                     base,scale,tolerance,step)
+                certified===nothing || return certified
             end
             previous=sum(abs2,residual);alpha=BigFloat(1);advanced=false
             for _ in 1:24
