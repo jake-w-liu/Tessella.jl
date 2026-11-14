@@ -1,21 +1,3 @@
-Tessella.jl is distributed as a combined work under the GNU General Public
-License, version 3 or (at your option) any later version (GPL-3.0-or-later).
-
-Copyright (c) 2026 Jake Liu
-Additional upstream copyright holders and source terms are identified in
-LICENSES/README.md and the source-file notices. The full GPL version 3
-follows this notice.
-
-Original, independently authored Tessella material remains available under the
-MIT terms in LICENSES/MIT.txt when used separately. That grant does not cover
-material translated or adapted from third-party sources. Third-party portions
-retain their original notices and license terms; the package as a whole must
-be distributed under GPL-3.0-or-later. See LICENSES/README.md for the source
-inventory and the reason for the combined license.
-
-This software is distributed WITHOUT ANY WARRANTY, including the implied
-warranties of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 
