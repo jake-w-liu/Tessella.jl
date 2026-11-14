@@ -36,7 +36,7 @@ members remain. Macros, extrusions, fillets, and general OCC
 BREP remain explicit blockers.
 """
 module GeoExec
-
+# Runtime-selected CAD and meshing calls use inference barriers to bound parser compilation.
 using Printf: Format, format as _printf_format
 
 import ..Model
@@ -977,17 +977,17 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
             push!(get!(() -> Int[],context.raw_physicals,(dimension,physical)),entity)
         end
     end
-    context.exec_hook=src->_geo_exec_value_term(
+    context.exec_hook=src->Base.inferencebarrier(_geo_exec_value_term)(
         model,src,context,allocator_state)
     statements,stmt_locs=_geo_exec_statements(path)
     executed=Ref(0)
-    transfinite_tri=_exec_geo_statements!(
+    transfinite_tri=Base.inferencebarrier(_exec_geo_statements!)(
         model,statements,stmt_locs,firstindex(statements),
         lastindex(statements),context,allocator_state,executed)
     # End-of-parse `synchronize` — the raw physical-group records materialize
     # into the observable view (`m.physical`), forwarding-declared members
     # resolve, and unknown members warn once.
-    _geo_sync_physical_view!(model,context)
+    Base.inferencebarrier(_geo_sync_physical_view!)(model,context)
     # `Abort` / `Exit` set the stream stop. `Msg::Exit(n, force)`: an explicit
     # `Exit n` exits with `n` regardless of accumulated errors (`forceLevel`),
     # while a bare `Exit` exits with `_atLeastOneErrorInRun` (0 or 1). `Abort`
@@ -1019,10 +1019,10 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     # request.
     mesh=context.mesh
     if dim in 1:3
-        _geo_sync_meshing_options!(model,context)
+        Base.inferencebarrier(_geo_sync_meshing_options!)(model,context)
     end
     if dim==1
-        mesh,context.mesh_node_owner=_geo_mesh_model(model,1,context)
+        mesh,context.mesh_node_owner=Base.inferencebarrier(_geo_mesh_model)(model,1,context)
         context.mesh=mesh
     elseif dim==2
         # Upstream `Mesh n` meshes every entity of dimension <= n regardless
@@ -1031,14 +1031,14 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         # coordinates with per-node ownership for the mesh operations. An
         # empty dimension silently produces a smaller mesh, like `gmsh -2`
         # on a curve-only model.
-        mesh,context.mesh_node_owner=_geo_mesh_model(model,2,context)
+        mesh,context.mesh_node_owner=Base.inferencebarrier(_geo_mesh_model)(model,2,context)
         context.mesh=mesh
     elseif dim==3
-        mesh,context.mesh_node_owner=_geo_mesh_model(model,3,context)
+        mesh,context.mesh_node_owner=Base.inferencebarrier(_geo_mesh_model)(model,3,context)
         context.mesh=mesh
     end
-    _geo_sync_mesh_algorithms!(model,context)
-    _geo_sync_native_surface_controls!(model,context)
+    Base.inferencebarrier(_geo_sync_mesh_algorithms!)(model,context)
+    Base.inferencebarrier(_geo_sync_native_surface_controls!)(model,context)
     if _initial_fields!==nothing
         # The execution map is shared with params.fields; selection commands
         # live on the context and need their literal final values transported.
@@ -1055,7 +1055,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                         context.lists,context.strings,
                         copy(context.exec_warnings),context.msg_error_count,
                         context.stop===:exit ? context.exit_code : nothing,
-                        _geo_execution_geometry_parts(model,context),context.mesh_parts,
+                        Base.inferencebarrier(_geo_execution_geometry_parts)(model,context),context.mesh_parts,
                         context.mesh_node_max,context.mesh_element_max,
                         context.native_context_lc,context.native_context_forced_bbox,
                         context.native_element_lookup_receipt,
@@ -1422,7 +1422,7 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 "executed statements"))
             if match(r"^Call\b",line)!==nothing
                 assigned=try
-                    _geo_exec_call!(
+                    Base.inferencebarrier(_geo_exec_call!)(
                         m,statements,line,context,allocator_state,executed)
                 catch err
                     err isa InterruptException && rethrow()
@@ -1458,7 +1458,7 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 (m.occ_kernel.next_shape,length(m.occ_kernel.bindings),
                  copy(m.occ_kernel.maxima)) : nothing
             assigned=try
-                _exec_line!(m,line,context,allocator_state)
+                Base.inferencebarrier(_exec_line!)(m,line,context,allocator_state)
             catch err
                 err isa InterruptException && rethrow()
                 if err isa _GeoSyntaxAbort
@@ -1503,7 +1503,7 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             occ_sig!==nothing &&
                 (m.occ_kernel.next_shape,length(m.occ_kernel.bindings),
                  m.occ_kernel.maxima)!=occ_sig &&
-                _geo_occ_allocator_resync!(allocator_state,m)
+                Base.inferencebarrier(_geo_occ_allocator_resync!)(allocator_state,m)
             # `occ_sig` snapshots the kernel before the statement; a pure
             # lazy-bind (e.g. `Closest` operand binding) also changes it —
             # the resync rebuild is idempotent on those statements.
@@ -1906,7 +1906,7 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
     isempty(obj) && return NTuple{2,Int}[]
     if all(e->e[1]==3,obj) && all(e->e[1]==3,tool)
         msgs=String[]
-        out=boolean_volumes_multi!(m,op,
+        out=Base.inferencebarrier(boolean_volumes_multi!)(m,op,
             Int[t for (_,t) in obj],Int[t for (_,t) in tool];tag=tag,
             remove_object=objects.delete,remove_tool=tools.delete,
             caller=caller,msg_out=msgs)
@@ -1918,9 +1918,9 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
         end
         return NTuple{2,Int}[(3,t) for t in out]
     end
-    kernel=_geo_occ_prepare_kernel!(m,allocator_state)
+    kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m,allocator_state)
     unknown=[e for e in Iterators.flatten((obj,tool))
-             if !_geo_geo_entity_known(m,e[1],e[2])]
+             if !Base.inferencebarrier(_geo_geo_entity_known)(m,e[1],e[2])]
     if !isempty(unknown)
         for (d,t) in unknown
             _geo_msg_error!(context,"Unknown OpenCASCADE entity of " *
@@ -1931,13 +1931,13 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
     end
     msgs=String[]
     out_dt=try
-        _geo_occ_bind_entities!(
+        Base.inferencebarrier(_geo_occ_bind_entities!)(
             m,NTuple{2,Int}[e for e in Iterators.flatten((obj,tool))],
             kernel,caller)
-        out=first(Model._model_occ_boolean(
+        out=first(Base.inferencebarrier(Model._model_occ_boolean)(
             m,op,obj,tool,tag,objects.delete,tools.delete,caller;
             msg_out=msgs))
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         out
     catch err
         err isa InterruptException && rethrow()
@@ -1977,7 +1977,7 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
     # Upstream evaluates the operand `ListOfShapes` during the parse — tag
     # expressions, inline `Kind(tag) = ..` definitions, and transform side
     # effects all run before the factory gate in the `Boolean` action.
-    operands=_geo_boolean_operands(m,groups,context,caller;
+    operands=Base.inferencebarrier(_geo_boolean_operands)(m,groups,context,caller;
                                    allocator_state=allocator_state)
     # Gmsh.y: upstream applies the operator only when the OCC kernel is
     # active; under built-in the term is a recoverable diagnostic and
@@ -1991,7 +1991,7 @@ function _geo_exec_boolean_term(m::GeoModel,raw::AbstractString,
     op=get(_GEO_BOOLEAN_OPS,opname,nothing)
     op===nothing && throw(ArgumentError(
         "execute_geo: Boolean$opname is not implemented"))
-    out=_geo_boolean_apply!(m,op,operands.objects,operands.tools;
+    out=Base.inferencebarrier(_geo_boolean_apply!)(m,op,operands.objects,operands.tools;
         context=context,allocator_state=allocator_state,caller=caller)
     context.geo_changed=true
     # `VectorOfPairs2ListOfShapes` flattens outDimTags to the tag list — the
@@ -2018,14 +2018,14 @@ function _geo_exec_shape_from_file(m::GeoModel,raw::AbstractString,
     file=_geo_fix_relative_path(context.file_name,
         _geo_eval_string(mm.captures[1],context,caller))
     out=try
-        Model._model_occ_import_shapes(m,file;caller="OCC.importShapes")
+        Base.inferencebarrier(Model._model_occ_import_shapes)(m,file;caller="OCC.importShapes")
     catch err
         err isa InterruptException && rethrow()
         err isa ArgumentError || rethrow()
         _geo_occ_fail!(context,err,"Could not import shapes")
         return Float64[]
     end
-    _geo_occ_finish!(m,context)
+    Base.inferencebarrier(_geo_occ_finish!)(m,context)
     return Float64[tag for (_,tag) in out]
 end
 
@@ -2086,8 +2086,8 @@ end
 # and returns every entity.
 function _geo_selector_all_tags(m::GeoModel,dim::Int)
     0<=dim<=3 ||
-        return Float64[Float64(tag) for (_,tag) in model_entities(m)]
-    return Float64[Float64(tag) for (_,tag) in model_entities(m,dim)]
+        return Float64[Float64(tag) for (_,tag) in Base.inferencebarrier(model_entities)(m)]
+    return Float64[Float64(tag) for (_,tag) in Base.inferencebarrier(model_entities)(m,dim)]
 end
 
 # `getElementaryTagsForPhysicalGroups` / `getAllPhysicalTags` — groups are
@@ -2105,13 +2105,13 @@ function _geo_selector_physical(m::GeoModel,dim::Int,tail::String,
             (_geo_yyerror!(context,
                  "Unknown special string for list replacement");
              return Float64[])
-        return _geo_selector_all_physical(m,dim)
+        return Base.inferencebarrier(_geo_selector_all_physical)(m,dim)
     end
     inlist=if startswith(tail,"{")
         (body,rest)=_geo_balanced_group(tail,caller)
         isempty(rest) || return nothing
         inner=String(strip(body))
-        inner==":" && return _geo_selector_all_physical(m,dim)
+        inner==":" && return Base.inferencebarrier(_geo_selector_all_physical)(m,dim)
         _geo_numeric_list_values(
             "{"*inner*"}",context,"$caller Physical";depth=1)
     else
@@ -2121,7 +2121,7 @@ function _geo_selector_physical(m::GeoModel,dim::Int,tail::String,
     end
     out=Float64[]
     if 0<=dim<=3
-        live_groups=Set(model_physical_groups(m,dim))
+        live_groups=Set(Base.inferencebarrier(model_physical_groups)(m,dim))
         for raw_tag in inlist
             tag=_geo_int_value(raw_tag,"$caller Physical tag")
             # `getElementaryTagsForPhysicalGroups` does `groups.find(num)`
@@ -2130,7 +2130,7 @@ function _geo_selector_physical(m::GeoModel,dim::Int,tail::String,
             (dim,tag) in live_groups || continue
             members=get(m.physical,(dim,tag),Int[])
             append!(out,Float64.(sort!(unique!(
-                _physical_live_members(m,dim,members)))))
+                Base.inferencebarrier(_physical_live_members)(m,dim,members)))))
         end
     end
     return out
@@ -2156,7 +2156,7 @@ function _geo_selector_in_box(m::GeoModel,dim::Int,tail::String,
     # entity is box-filtered.
     query_dim=0<=dim<=3 ? dim : -1
     return Float64[Float64(tag) for (_,tag) in
-        model_entities_in_bounding_box(
+        Base.inferencebarrier(model_entities_in_bounding_box)(
             m,box[1],box[2],box[3],box[4],box[5],box[6],query_dim)]
 end
 
@@ -2174,10 +2174,10 @@ function _geo_selector_bounding_box(m::GeoModel,dim::Int,tail::String,
     if 0<=dim<=3
         for raw_tag in tags
             tag=_geo_int_value(raw_tag,"$caller BoundingBox tag")
-            model_entity(m,dim,tag)===nothing && continue
-            entity_bounds=_model_entity_bounding_box(m,dim,tag,caller)
+            Base.inferencebarrier(model_entity)(m,dim,tag)===nothing && continue
+            entity_bounds=Base.inferencebarrier(_model_entity_bounding_box)(m,dim,tag,caller)
             bounds=bounds===nothing ? entity_bounds :
-                _model_bounds_union(bounds,entity_bounds)
+                Base.inferencebarrier(_model_bounds_union)(bounds,entity_bounds)
         end
     end
     return bounds===nothing ? Float64[] : collect(Float64,bounds)
@@ -2252,7 +2252,7 @@ function _geo_selector_normal(m::GeoModel,tail::String,
         get(m.surface_geometry,tag,nothing)!==nothing ||
         (_geo_yyerror!(context,"Surface $tag does not exist");
          return Float64[])
-    return collect(Float64,model_normal(m,tag,params;
+    return collect(Float64,Base.inferencebarrier(model_normal)(m,tag,params;
         old_ruled_surface=_geo_exec_old_ruled(context)))
 end
 
@@ -2291,7 +2291,7 @@ _geo_exec_lc(context::_GeoNumericContext)=context.native_context_lc
 function _geo_sync_native_context!(m::GeoModel,context::_GeoNumericContext)
     context.native_context_forced_bbox && return nothing
     tolerance=something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
-    context.native_context_lc=_model_mesh_lc(m,tolerance,"execute_geo: synchronize")
+    context.native_context_lc=Base.inferencebarrier(_model_mesh_lc)(m,tolerance,"execute_geo: synchronize")
     return nothing
 end
 
@@ -2325,7 +2325,7 @@ function _geo_selector_parametric(m::GeoModel,tail::String,
             (_geo_yyerror!(context,
                  "Point $ptag or surface $stag does not exist");
              return Float64[])
-        return collect(Float64,model_reparametrize_on_surface(
+        return collect(Float64,Base.inferencebarrier(model_reparametrize_on_surface)(
             m,0,ptag,Float64[],stag;
             old_ruled_surface=_geo_exec_old_ruled(context),
             newton_convergence_xyz=_geo_exec_newton_xyz(context),
@@ -2356,7 +2356,7 @@ function _geo_selector_parametric(m::GeoModel,tail::String,
     label=dim==1 ? "Curve" : "Surface"
     exists || (_geo_yyerror!(context,"$label $tag does not exist");
                return Float64[])
-    lower,upper=model_parametrization_bounds(m,dim,tag)
+    lower,upper=Base.inferencebarrier(model_parametrization_bounds)(m,dim,tag)
     if dim==1
         return Float64[lower[1],upper[1]]
     end
@@ -2380,9 +2380,9 @@ function _geo_selector_color(m::GeoModel,tail::String,
         _geo_eval_numeric(body,context,"$caller Color tag"),
         "$caller Color tag")
     0<=dim<=3 || return Float64[]
-    model_entity(m,dim,tag)===nothing &&
+    Base.inferencebarrier(model_entity)(m,dim,tag)===nothing &&
         !haskey(m.discrete,(dim,tag)) && return Float64[]
-    return collect(Float64,model_entity_color(m,dim,tag))
+    return collect(Float64,Base.inferencebarrier(model_entity_color)(m,dim,tag))
 end
 
 # Bare entity selectors: `Point{t}` coordinates, `X{:}`/`X "name"` tag
@@ -2396,7 +2396,7 @@ function _geo_selector_entity_term(m::GeoModel,dim::Int,rest::String,
         # still evaluate.
         literal ||
             _geo_selector_dim_check(dim,false,0,3,context) || return nothing
-        return _geo_selector_in_box(
+        return Base.inferencebarrier(_geo_selector_in_box)(
             m,dim,String(strip(im.captures[1])),context,caller)
     end
     if match(r"^\"[^\"]*\"\s*$",rest)!==nothing
@@ -2405,7 +2405,7 @@ function _geo_selector_entity_term(m::GeoModel,dim::Int,rest::String,
         # value is ignored upstream.
         literal ||
             _geo_selector_dim_check(dim,false,1,3,context) || return nothing
-        return _geo_selector_all_tags(m,dim)
+        return Base.inferencebarrier(_geo_selector_all_tags)(m,dim)
     end
     # The entity keyword commits the production upstream — anything but
     # `In BoundingBox`, a quoted name, or `{` here is a syntax error.
@@ -2419,7 +2419,7 @@ function _geo_selector_entity_term(m::GeoModel,dim::Int,rest::String,
         # dim outside [1,3] emits the range error but still lists.
         literal ||
             _geo_selector_dim_check(dim,false,1,3,context) || return nothing
-        return _geo_selector_all_tags(m,dim)
+        return Base.inferencebarrier(_geo_selector_all_tags)(m,dim)
     end
     # `Point{expr}` reports coordinates; `Curve{expr}`/`Surface{expr}`/
     # `Volume{expr}`/`GeoEntity{d}{expr}` reduce to `GeoEntity123 '{'`, which
@@ -2493,7 +2493,7 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
         (curve_tag,point_tags,rest)=_geo_split_curve_args(
             tail,context,caller)
         isempty(rest) || _geo_selector_abort(rest)
-        _geo_split_curve_run!(m,curve_tag,point_tags,context,caller,
+        Base.inferencebarrier(_geo_split_curve_run!)(m,curve_tag,point_tags,context,caller,
                               allocator_state)
         throw(_GeoSyntaxAbort("Split","",true))
     end
@@ -2523,9 +2523,9 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
         startswith(r2,"{") || _geo_selector_abort(r2)
         (shape_list,rest)=_geo_balanced_group(r2,caller)
         isempty(rest) || _geo_selector_abort(rest)
-        entities=_geo_shape_list_entities!(m,shape_list,context,caller;
+        entities=Base.inferencebarrier(_geo_shape_list_entities!)(m,shape_list,context,caller;
                                            allocator_state=allocator_state)
-        _geo_apply_transform_entities!(m,name,t,entities,context,caller;
+        Base.inferencebarrier(_geo_apply_transform_entities!)(m,name,t,entities,context,caller;
                                        allocator_state=allocator_state)
         # Gmsh yields the parsed entity list itself (`$$ = $MultipleShape`),
         # including any tags the endpoint skipped.
@@ -2563,14 +2563,14 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
                 "$name only available with OpenCASCADE geometry kernel")
             return Float64[]
         end
-        kernel=_geo_occ_prepare_kernel!(m)
+        kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
         if name=="ThruSections"
             wires=_geo_exec_entity_rhs_tags(
                 "{"*groups[1]*"}",context,"$caller wires";abs_refs=true)
-            out=_geo_occ_thru_sections_run(m,wires,context,caller,ruled)
+            out=Base.inferencebarrier(_geo_occ_thru_sections_run)(m,wires,context,caller,ruled)
             return Float64[Float64(tag) for (_,tag) in out]
         end
-        out=_geo_occ_corner_run(m,name,groups,context,caller)
+        out=Base.inferencebarrier(_geo_occ_corner_run)(m,name,groups,context,caller)
         out===nothing && return Float64[]
         return Float64[Float64(tag) for (_,tag) in out]
     end
@@ -2581,7 +2581,7 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
         isempty(rest) || _geo_selector_abort(rest)
         vals=_geo_numeric_list_values(
             "{"*params*"}",context,"$caller parameters";depth=1)
-        entities=_geo_shape_list_entities!(m,shape_list,context,caller;
+        entities=Base.inferencebarrier(_geo_shape_list_entities!)(m,shape_list,context,caller;
                                            allocator_state=allocator_state)
         if allocator_state===nothing || allocator_state.factory!==:opencascade
             # OCC-only transforms report a recoverable error upstream and
@@ -2598,25 +2598,25 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
                 "geometry kernel")
             return Float64[]
         end
-        kernel=_geo_occ_prepare_kernel!(m)
+        kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
         if name=="Affine"
             try
-                _geo_occ_bind_entities!(m,entities,kernel,caller)
-                Model._model_occ_affine_transform!(m,entities,vals)
+                Base.inferencebarrier(_geo_occ_bind_entities!)(m,entities,kernel,caller)
+                Base.inferencebarrier(Model._model_occ_affine_transform!)(m,entities,vals)
             catch err
                 err isa InterruptException && rethrow()
                 err isa ArgumentError || rethrow()
                 _geo_occ_fail!(context,err,"Could not apply affine transform")
                 return Float64[Float64(tag) for (_,tag) in entities]
             end
-            _geo_occ_finish!(m,context)
+            Base.inferencebarrier(_geo_occ_finish!)(m,context)
             return Float64[Float64(tag) for (_,tag) in entities]
         end
         length(vals)==3 || throw(ArgumentError(
             "$caller: Closest requires `{x, y, z}` parameters"))
         out=try
-            _geo_occ_bind_entities!(m,entities,kernel,caller)
-            first(Model._model_occ_get_closest_entities(
+            Base.inferencebarrier(_geo_occ_bind_entities!)(m,entities,kernel,caller)
+            first(Base.inferencebarrier(Model._model_occ_get_closest_entities)(
                 m,vals[1],vals[2],vals[3],entities,1))
         catch err
             err isa InterruptException && rethrow()
@@ -2629,15 +2629,15 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
     name in _GEO_SELECTOR_KEYWORDS && return nothing
     # `tSTRING '{' MultipleShape '}'` — Duplicata/boundary/PointsOf/unknown
     # actions; `params` is the shape-list body here.
-    entities=_geo_shape_list_entities!(m,params,context,caller;
+    entities=Base.inferencebarrier(_geo_shape_list_entities!)(m,params,context,caller;
                                        allocator_state=allocator_state)
     isempty(rest) || _geo_selector_abort(rest)
     if name=="Duplicata"
         context.geo_changed=true
     else
-        _geo_sync_physical_view_if_changed!(m,context)
+        Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
     end
-    out=_geo_shape_action!(m,name,entities,context,caller;
+    out=Base.inferencebarrier(_geo_shape_action!)(m,name,entities,context,caller;
                            allocator_state=allocator_state)
     return Float64[Float64(tag) for (_,tag) in out]
 end
@@ -2652,7 +2652,7 @@ function _geo_selector_keyword_term(m::GeoModel,name::String,tail::String,
         dim,rest,literal=head
         _geo_selector_dim_check(dim,literal,0,3,context) ||
             _geo_selector_abort(tail)
-        return _geo_selector_physical(m,dim,rest,context,caller)
+        return Base.inferencebarrier(_geo_selector_physical)(m,dim,rest,context,caller)
     elseif name=="Parent"
         head=_geo_selector_entity_head(tail,context,caller)
         head===nothing && _geo_selector_abort(tail)
@@ -2669,7 +2669,7 @@ function _geo_selector_keyword_term(m::GeoModel,name::String,tail::String,
         head===nothing && _geo_selector_abort(tail)
         dim,rest,literal=head
         _geo_selector_dim_check(dim,literal,0,3,context) || return nothing
-        return _geo_selector_bounding_box(m,dim,rest,context,caller)
+        return Base.inferencebarrier(_geo_selector_bounding_box)(m,dim,rest,context,caller)
     elseif name in ("Mass","CenterOfMass","MatrixOfInertia")
         head=_geo_selector_entity_head(tail,context,caller)
         head===nothing && _geo_selector_abort(tail)
@@ -2678,14 +2678,14 @@ function _geo_selector_keyword_term(m::GeoModel,name::String,tail::String,
         # a keyword `Point` is a syntax error at `Point`, not a miss.
         literal && dim==0 && _geo_selector_abort(tail)
         _geo_selector_dim_check(dim,literal,1,3,context) || return nothing
-        return _geo_selector_mass(
+        return Base.inferencebarrier(_geo_selector_mass)(
             m,name,dim,rest,context,caller,allocator_state)
     elseif name=="Normal"
-        return _geo_selector_normal(m,tail,context,caller)
+        return Base.inferencebarrier(_geo_selector_normal)(m,tail,context,caller)
     elseif name=="Parametric"
-        return _geo_selector_parametric(m,tail,context,caller)
+        return Base.inferencebarrier(_geo_selector_parametric)(m,tail,context,caller)
     elseif name=="Color"
-        return _geo_selector_color(m,tail,context,caller)
+        return Base.inferencebarrier(_geo_selector_color)(m,tail,context,caller)
     end
     return nothing
 end
@@ -2697,12 +2697,12 @@ function _geo_exec_selector_term(m::GeoModel,raw::AbstractString,
     s=String(strip(raw))
     isempty(s) && return nothing
     caller="execute_geo"
-    transform=_geo_exec_transform_term(m,s,context,allocator_state)
+    transform=Base.inferencebarrier(_geo_exec_transform_term)(m,s,context,allocator_state)
     transform!==nothing && return transform
     kw=match(r"^(Physical|Parent|BoundingBox|Mass|CenterOfMass|MatrixOfInertia|Normal|Parametric|Color)\b(.*)$",s)
     if kw!==nothing
-        _geo_sync_physical_view_if_changed!(m,context)
-        return _geo_selector_keyword_term(
+        Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
+        return Base.inferencebarrier(_geo_selector_keyword_term)(
             m,String(kw.captures[1]),String(strip(kw.captures[2])),context,caller,
             allocator_state)
     end
@@ -2710,21 +2710,21 @@ function _geo_exec_selector_term(m::GeoModel,raw::AbstractString,
     head===nothing && return nothing
     # The hook also sees ordinary numeric terms and option reads. Only an
     # admitted model selector triggers the native synchronization event.
-    _geo_sync_physical_view_if_changed!(m,context)
-    return _geo_selector_entity_term(
+    Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
+    return Base.inferencebarrier(_geo_selector_entity_term)(
         m,head[1],head[2],head[3],context,caller)
 end
 
 function _geo_exec_value_term(m::GeoModel,raw::AbstractString,
                               context::_GeoNumericContext,
                               allocator_state=nothing)
-    extruded=_geo_exec_extrude_term(m,raw,context,allocator_state)
+    extruded=Base.inferencebarrier(_geo_exec_extrude_term)(m,raw,context,allocator_state)
     extruded!==nothing && return extruded
-    boolean=_geo_exec_boolean_term(m,raw,context,allocator_state)
+    boolean=Base.inferencebarrier(_geo_exec_boolean_term)(m,raw,context,allocator_state)
     boolean!==nothing && return boolean
-    shapefile=_geo_exec_shape_from_file(m,raw,context,allocator_state)
+    shapefile=Base.inferencebarrier(_geo_exec_shape_from_file)(m,raw,context,allocator_state)
     shapefile!==nothing && return shapefile
-    return _geo_exec_selector_term(m,raw,context,allocator_state)
+    return Base.inferencebarrier(_geo_exec_selector_term)(m,raw,context,allocator_state)
 end
 
 function _geo_exec_numeric_values(raw::AbstractString,
@@ -3476,15 +3476,15 @@ function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
     # `SetFactory`, mesh and end-of-parse syncs): lazily bound kernel
     # entities materialize into the model first, so a `(dim, tag)` OCC
     # binding counts as an existing physical member.
-    m.occ_kernel.changed && Model._model_occ_synchronize!(m)
-    _geo_restore_orientation_constraints!(m)
+    m.occ_kernel.changed && Base.inferencebarrier(Model._model_occ_synchronize!)(m)
+    Base.inferencebarrier(_geo_restore_orientation_constraints!)(m)
     raw=context.raw_physicals
     # `synchronize` clears the entity-level memberships only when the model
     # carries no mesh elements and raw physical groups exist — otherwise
     # previously assigned memberships persist (a `-=` that emptied the last
     # raw group leaves them in place; API-assigned memberships survive a sync
     # with an empty raw registry too).
-    if !isempty(raw) && !_geo_model_has_mesh_elements(m,context)
+    if !isempty(raw) && !Base.inferencebarrier(_geo_model_has_mesh_elements)(m,context)
         empty!(m.entity_physicals)
     end
     empty!(m.physical)
@@ -3503,7 +3503,7 @@ function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
         word=("point","curve","surface","volume")[dim+1]
         for member in raw[(dim,tag)]
             entity=abs(member)
-            if _has_entity(m,dim,entity)
+            if Base.inferencebarrier(_has_entity)(m,dim,entity)
                 ep=get!(m.entity_physicals,(dim,entity),Int[])
                 p=_gmsh_sign(member)*tag
                 p in ep || push!(ep,p)
@@ -3522,7 +3522,7 @@ function _geo_sync_physical_view!(m::GeoModel,context::_GeoNumericContext)
     for members in values(m.physical)
         sort!(members)
     end
-    _geo_sync_native_context!(m,context)
+    Base.inferencebarrier(_geo_sync_native_context!)(m,context)
     context.geo_changed=false
     return nothing
 end
@@ -3535,9 +3535,9 @@ end
 # re-emitted).
 function _geo_sync_physical_view_if_changed!(m::GeoModel,
                                              context::_GeoNumericContext)
-    m.occ_kernel.changed && Model._model_occ_synchronize!(m)
+    m.occ_kernel.changed && Base.inferencebarrier(Model._model_occ_synchronize!)(m)
     context.geo_changed || return nothing
-    _geo_sync_physical_view!(m,context)
+    Base.inferencebarrier(_geo_sync_physical_view!)(m,context)
     return nothing
 end
 
@@ -3907,7 +3907,7 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
             s=String(strip(s))
             startswith(s,"{") || _geo_selector_abort(s)
             (inner_list,s)=_geo_balanced_group(s,nested)
-            inner=_geo_shape_list_entities!(m,inner_list,context,caller;
+            inner=Base.inferencebarrier(_geo_shape_list_entities!)(m,inner_list,context,caller;
                                             allocator_state=allocator_state)
             if allocator_state===nothing ||
                     allocator_state.factory!==:opencascade
@@ -3925,11 +3925,11 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
                     "geometry kernel")
                 return (NTuple{2,Int}[],s,true)
             end
-            kernel=_geo_occ_prepare_kernel!(m)
+            kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
             if name=="Affine"
                 try
-                    _geo_occ_bind_entities!(m,inner,kernel,nested)
-                    Model._model_occ_affine_transform!(m,inner,vals)
+                    Base.inferencebarrier(_geo_occ_bind_entities!)(m,inner,kernel,nested)
+                    Base.inferencebarrier(Model._model_occ_affine_transform!)(m,inner,vals)
                 catch err
                     err isa InterruptException && rethrow()
                     err isa ArgumentError || rethrow()
@@ -3937,14 +3937,14 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
                                    "Could not apply affine transform")
                     return (inner,s,true)
                 end
-                _geo_occ_finish!(m,context)
+                Base.inferencebarrier(_geo_occ_finish!)(m,context)
                 return (inner,s,true)
             end
             length(vals)==3 || throw(ArgumentError(
                 "$nested: Closest requires `{x, y, z}` parameters"))
             out=try
-                _geo_occ_bind_entities!(m,inner,kernel,nested)
-                first(Model._model_occ_get_closest_entities(
+                Base.inferencebarrier(_geo_occ_bind_entities!)(m,inner,kernel,nested)
+                first(Base.inferencebarrier(Model._model_occ_get_closest_entities)(
                     m,vals[1],vals[2],vals[3],inner,1))
             catch err
                 err isa InterruptException && rethrow()
@@ -3959,9 +3959,9 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         s=String(strip(s))
         startswith(s,"{") || _geo_selector_abort(s)
         (inner_list,s)=_geo_balanced_group(s,nested)
-        inner=_geo_shape_list_entities!(m,inner_list,context,caller;
+        inner=Base.inferencebarrier(_geo_shape_list_entities!)(m,inner_list,context,caller;
                                         allocator_state=allocator_state)
-        _geo_apply_transform_entities!(m,name,t,inner,context,nested;
+        Base.inferencebarrier(_geo_apply_transform_entities!)(m,name,t,inner,context,nested;
                                        allocator_state=allocator_state)
         # Gmsh returns the input shape list (`$$ = $MultipleShape`).
         return (inner,s,true)
@@ -3997,9 +3997,9 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         out=if name=="ThruSections"
             wires=_geo_exec_entity_rhs_tags(
                 "{"*groups[1]*"}",context,"$caller wires";abs_refs=true)
-            _geo_occ_thru_sections_run(m,wires,context,nested,ruled)
+            Base.inferencebarrier(_geo_occ_thru_sections_run)(m,wires,context,nested,ruled)
         else
-            _geo_occ_corner_run(m,name,groups,context,nested)
+            Base.inferencebarrier(_geo_occ_corner_run)(m,name,groups,context,nested)
         end
         out===nothing && return (NTuple{2,Int}[],s,true)
         return (NTuple{2,Int}[e for e in out],s,true)
@@ -4014,7 +4014,7 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         name=="Intersect" && throw(ArgumentError(
             "$caller: Intersect requires built-in kernel curve splitting, " *
             "which Tessella does not implement"))
-        (new_tags,s)=_geo_exec_split_curve!(
+        (new_tags,s)=Base.inferencebarrier(_geo_exec_split_curve!)(
             m,s,context,"$caller: $name",allocator_state)
         # The Transform production terminates on `tEND` — the member `;` is
         # part of the `Split` production, like every other shape-list entry.
@@ -4052,7 +4052,7 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
                 cut==0 && _geo_syntax_abort("}")
                 stmt=String(s0[firstindex(s0):cut])
                 rest=String(strip(s0[nextind(s0,cut):end]))
-                _exec_line!(m,stmt,context,allocator_state)
+                Base.inferencebarrier(_exec_line!)(m,stmt,context,allocator_state)
                 allocator_state===nothing ||
                     _geo_allocator_observe_statement!(
                         allocator_state,stmt,context,"execute_geo")
@@ -4084,7 +4084,7 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
                 cut==0 && _geo_syntax_abort("}")
                 stmt=String(s0[firstindex(s0):cut])
                 rest=String(strip(s0[nextind(s0,cut):end]))
-                _exec_line!(m,stmt,context,allocator_state)
+                Base.inferencebarrier(_exec_line!)(m,stmt,context,allocator_state)
                 allocator_state===nothing ||
                     _geo_allocator_observe_statement!(
                         allocator_state,stmt,context,"execute_geo")
@@ -4097,16 +4097,16 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         name=="Parent" && return (NTuple{2,Int}[],s,false)
         # `getElementaryTagsForPhysicalGroups` synchronizes first — the
         # selector sees the derived view, resolved through `abs` group tags.
-        _geo_sync_physical_view_if_changed!(m,context)
+        Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
         entries=NTuple{2,Int}[]
-        for gtag in _geo_shape_physical_tags(m,dim,group,context,caller)
+        for gtag in Base.inferencebarrier(_geo_shape_physical_tags)(m,dim,group,context,caller)
             members=get(m.physical,(dim,gtag),nothing)
             # Gmsh resolves the group through the model: an unknown tag (or a
             # group whose members were all `Delete`d) silently contributes
             # nothing, and stale member integers resolve to live entities only.
             members===nothing && continue
             for tag in members
-                _model_entity_known(m,dim,tag) || continue
+                Base.inferencebarrier(_model_entity_known)(m,dim,tag) || continue
                 push!(entries,(dim,tag))
             end
         end
@@ -4125,11 +4125,11 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         # contributes no entities (its tag list is still evaluated).
         if !(0<=dim<=3)
             _geo_yyerror!(context,"GeoEntity dim out of range [0,3]")
-            _geo_shape_tags(m,dim,group,context,caller;
+            Base.inferencebarrier(_geo_shape_tags)(m,dim,group,context,caller;
                             signed_tags=signed_tags)
             return (NTuple{2,Int}[],s,false)
         end
-        return (NTuple{2,Int}[(dim,t) for t in _geo_shape_tags(
+        return (NTuple{2,Int}[(dim,t) for t in Base.inferencebarrier(_geo_shape_tags)(
                     m,dim,group,context,caller;signed_tags=signed_tags)],
                 s,false)
     end
@@ -4138,7 +4138,7 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         if startswith(s,"{")
             (group,s)=_geo_balanced_group(s,caller)
             s=_geo_require_list_semicolon(s,caller,name)
-            return (NTuple{2,Int}[(dim,t) for t in _geo_shape_tags(
+            return (NTuple{2,Int}[(dim,t) for t in Base.inferencebarrier(_geo_shape_tags)(
                         m,dim,group,context,caller;signed_tags=signed_tags)],
                     s,false)
         end
@@ -4146,14 +4146,14 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         # in a shape list is followed by `'{'` or `'('`; anything else is a
         # syntax error.
         startswith(s,"(") || _geo_selector_abort(s)
-        return _geo_shape_definition_element!(m,s0,context,caller,
+        return Base.inferencebarrier(_geo_shape_definition_element!)(m,s0,context,caller,
                                               allocator_state)
     end
     if startswith(s,"{")
         # tSTRING '{' MultipleShape '}' — Duplicata, a boundary query, or an
         # unknown action.
         (group,s)=_geo_balanced_group(s,caller)
-        inner=_geo_shape_list_entities!(m,group,context,caller;
+        inner=Base.inferencebarrier(_geo_shape_list_entities!)(m,group,context,caller;
                                         allocator_state=allocator_state)
         # Boundary-family queries and `PointsOf` run on the synced model in
         # Gmsh — the internals synchronize first when changed; `Duplicata`
@@ -4162,13 +4162,13 @@ function _geo_multiple_shape_element!(m::GeoModel, s0::AbstractString,
         if name=="Duplicata"
             context.geo_changed=true
         else
-            _geo_sync_physical_view_if_changed!(m,context)
+            Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
         end
-        return (_geo_shape_action!(m,name,inner,context,caller;
+        return (Base.inferencebarrier(_geo_shape_action!)(m,name,inner,context,caller;
                                    allocator_state=allocator_state),s,true)
     end
     (startswith(s,"(") || match(r"^[A-Za-z_]",s)!==nothing) &&
-        return _geo_shape_definition_element!(m,s0,context,caller)
+        return Base.inferencebarrier(_geo_shape_definition_element!)(m,s0,context,caller)
     _geo_selector_abort(s)
 end
 
@@ -4244,7 +4244,7 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
         # `yymsg(0)` "Could not apply operation on shapes".
         kept=NTuple{2,Int}[];dropped=false
         for (d,tag) in inner
-            if 0<=d<=3 && _geo_geo_entity_known(m,d,abs(tag))
+            if 0<=d<=3 && Base.inferencebarrier(_geo_geo_entity_known)(m,d,abs(tag))
                 push!(kept,(d,tag))
             else
                 dropped=true
@@ -4256,10 +4256,10 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
         if allocator_state!==nothing && allocator_state.factory===:opencascade
             # `OCC_Internals::copy` — `_multiBind` binds the inputs at their
             # tags, duplicates, and reports the new highest-dimension tags.
-            kernel=_geo_occ_prepare_kernel!(m)
+            kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
             out=try
-                _geo_occ_bind_entities!(m,kept,kernel,"$caller: Duplicata")
-                Model._model_occ_copy_entities!(m,kept)
+                Base.inferencebarrier(_geo_occ_bind_entities!)(m,kept,kernel,"$caller: Duplicata")
+                Base.inferencebarrier(Model._model_occ_copy_entities!)(m,kept)
             catch err
                 err isa InterruptException && rethrow()
                 err isa ArgumentError || rethrow()
@@ -4269,11 +4269,11 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
             dropped && length(context.exec_errors)==base &&
                 _geo_yyerror!(context,"Could not apply operation on shapes")
             out===nothing && return NTuple{2,Int}[]
-            _geo_occ_finish!(m,context)
+            Base.inferencebarrier(_geo_occ_finish!)(m,context)
             return NTuple{2,Int}[(d,t) for (d,t) in out]
         end
         out=try
-            duplicate_entities!(m,kept;caller="$caller: Duplicata")
+            Base.inferencebarrier(duplicate_entities!)(m,kept;caller="$caller: Duplicata")
         catch err
             err isa InterruptException && rethrow()
             err isa ArgumentError || rethrow()
@@ -4296,7 +4296,7 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
             group=NTuple{2,Int}[]
             for (ed,t) in inner
                 ed==d || continue
-                if _geo_geo_entity_known(m,d,abs(t))
+                if Base.inferencebarrier(_geo_geo_entity_known)(m,d,abs(t))
                     push!(group,(d,t))
                 else
                     failed=true
@@ -4307,13 +4307,13 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
             isempty(group) && continue
             if oriented
                 for (_,signed_tag) in Iterators.flatten(
-                        _model_direct_boundary(
+                        Base.inferencebarrier(_model_direct_boundary)(
                             m,d,t,caller;canonical_orientation=false)
                         for (_,t) in group)
                     push!(entries,(d-1,abs(signed_tag)))
                 end
             else
-                for tag in _model_boundary(
+                for tag in Base.inferencebarrier(_model_boundary)(
                         m,group,caller;
                         combined=combined,max_entities=_MAX_GEO_LIST_ITEMS)
                     push!(entries,(d-1,tag))
@@ -4323,7 +4323,7 @@ function _geo_shape_action!(m::GeoModel, name::AbstractString,
         failed && _geo_yyerror!(context,"Could not apply operation on shapes")
         return entries
     elseif name=="PointsOf"
-        return NTuple{2,Int}[(0,t) for t in _model_points_of(
+        return NTuple{2,Int}[(0,t) for t in Base.inferencebarrier(_model_points_of)(
             m,inner,"$caller: PointsOf")]
     end
     # `yymsg(0, "Unknown action on multiple shapes '%s'")` — recoverable, the
@@ -5227,7 +5227,7 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
         # Tokens survived past the last `}` — the `Using Wire` pipe suffix or
         # a bison error lookahead after a completed production (`error tEND`
         # swallows it to `;`, so no result is ever assigned).
-        return _geo_exec_extrude_tail!(m,rest,shapes,delta,revolve,nvec,
+        return Base.inferencebarrier(_geo_exec_extrude_tail!)(m,rest,shapes,delta,revolve,nvec,
                                        terminated,context,caller,
                                        allocator_state)
     end
@@ -5238,7 +5238,7 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
     # Gmsh.y's `ListOfShapes` parses before the parser action runs — surface
     # its errors ahead of the boundary-layer/`TRANSLATE_ROTATE` gates like
     # upstream, whose OCC gate also sits between the two.
-    entities,params,blmeta,saw_params=_geo_extrude_shape_list!(
+    entities,params,blmeta,saw_params=Base.inferencebarrier(_geo_extrude_shape_list!)(
         m,shapes,context,caller,allocator_state)
     if nvec==0 && !saw_params
         # `Extrude {shapes}` alone is only the `Using Wire` pipe prefix —
@@ -5247,7 +5247,7 @@ function _geo_exec_extrude_term(m::GeoModel, raw::AbstractString,
         # empty lookahead text prints `syntax error ()`.
         _geo_syntax_abort(terminated ? ";" : "")
     end
-    return _geo_exec_extrude_run!(m,entities,params,blmeta,delta,revolve,
+    return Base.inferencebarrier(_geo_exec_extrude_run!)(m,entities,params,blmeta,delta,revolve,
                                   nvec,context,caller,allocator_state)
 end
 
@@ -5709,7 +5709,7 @@ end
 # GEO records and mark the internals changed (the enclosing statement loop
 # resynchronizes the allocator from the synced model).
 function _geo_occ_finish!(m::GeoModel,context::_GeoNumericContext)
-    Model._model_occ_synchronize!(m)
+    Base.inferencebarrier(Model._model_occ_synchronize!)(m)
     context.geo_changed=true
     return nothing
 end
@@ -5778,7 +5778,7 @@ const _GEO_OCC_TRANSFORM_WHAT=Dict("Translate"=>"translate",
 function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
                                   context::_GeoNumericContext,
                                   allocator_state)
-    kernel=_geo_occ_prepare_kernel!(m,allocator_state)
+    kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m,allocator_state)
     if (mm=match(
             r"^Rectangle\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",s))!==nothing
         caller="execute_geo: Rectangle"
@@ -5793,7 +5793,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             haskey(m.surfaces,tag)||haskey(kernel.bindings,(2,tag)),
             :surface,"rectangle",tag,zero_literal,allocator_state) && return
         try
-            Model._model_occ_add_rectangle!(m,v[1],v[2],v[3],v[4],v[5];
+            Base.inferencebarrier(Model._model_occ_add_rectangle!)(m,v[1],v[2],v[3],v[4],v[5];
                 tag=_geo_occ_requested_tag(tag,zero_literal),
                 rounded_radius=length(v)==6 ? v[6] : 0.0)
         catch err
@@ -5802,7 +5802,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             _geo_occ_fail!(context,err,"Could not add rectangle")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         return
     end
     if (mm=match(
@@ -5819,7 +5819,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             haskey(m.surfaces,tag)||haskey(kernel.bindings,(2,tag)),
             :surface,"disk",tag,zero_literal,allocator_state) && return
         try
-            Model._model_occ_add_disk!(m,v[1],v[2],v[3],v[4],
+            Base.inferencebarrier(Model._model_occ_add_disk!)(m,v[1],v[2],v[3],v[4],
                 length(v)==5 ? v[5] : v[4];
                 tag=_geo_occ_requested_tag(tag,zero_literal))
         catch err
@@ -5828,7 +5828,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             _geo_occ_fail!(context,err,"Could not add disk")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         return
     end
     if (mm=match(
@@ -5845,7 +5845,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             haskey(m.volumes,tag)||haskey(kernel.bindings,(3,tag)),
             :volume,"wedge",tag,zero_literal,allocator_state) && return
         try
-            Model._model_occ_add_wedge!(m,v[1],v[2],v[3],v[4],v[5],v[6];
+            Base.inferencebarrier(Model._model_occ_add_wedge!)(m,v[1],v[2],v[3],v[4],v[5],v[6];
                 tag=_geo_occ_requested_tag(tag,zero_literal),
                 ltx=length(v)==7 ? v[7] : 0.0)
         catch err
@@ -5854,7 +5854,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             _geo_occ_fail!(context,err,"Could not add wedge")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         return
     end
     if (mm=match(
@@ -5870,9 +5870,9 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             :curve_loop,"wire",tag,zero_literal,allocator_state) && return
         allocated=try
             for c in curves
-                _geo_occ_pipe_edge!(m,abs(c),kernel,caller)
+                Base.inferencebarrier(_geo_occ_pipe_edge!)(m,abs(c),kernel,caller)
             end
-            Model._model_occ_add_wire!(m,curves;
+            Base.inferencebarrier(Model._model_occ_add_wire!)(m,curves;
                 tag=_geo_occ_requested_tag(tag,zero_literal))
         catch err
             err isa InterruptException && rethrow()
@@ -5880,11 +5880,11 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             _geo_occ_fail!(context,err,"Could not add wire")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         # A kernel wire doubles as a `.geo` curve-loop record — the same
         # signed-traversal list `_geo_occ_wire_geo_loop!` materializes — so
         # `Plane Surface`/`Surface`/`Volume` references see it.
-        _geo_occ_wire_geo_loop!(m,allocated,kernel,caller)
+        Base.inferencebarrier(_geo_occ_wire_geo_loop!)(m,allocated,kernel,caller)
         return
     end
     if (mm=match(
@@ -5905,8 +5905,8 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
         excludes=Int[_geo_signed_gmsh_int_value(x,"$caller exclude surface")
                      for x in v[3:end]]
         try
-            _geo_occ_bind_volume!(m,abs(volume_tag),kernel,caller)
-            Model._model_occ_thick_solid(m,
+            Base.inferencebarrier(_geo_occ_bind_volume!)(m,abs(volume_tag),kernel,caller)
+            Base.inferencebarrier(Model._model_occ_thick_solid)(m,
                 _geo_occ_requested_tag(tag,zero_literal),abs(volume_tag),
                 excludes,v[2])
         catch err
@@ -5915,7 +5915,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             _geo_occ_fail!(context,err,"Could not add thick solid")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         return
     end
     if (mm=match(
@@ -5932,8 +5932,8 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             haskey(kernel.bindings,(3,tag))||haskey(kernel.bindings,(2,tag)),
             :volume,"thru sections",tag,zero_literal,allocator_state) && return
         try
-            wire_tags=Int[_geo_occ_wire_tag!(m,wt,kernel,caller) for wt in wires]
-            Model._model_occ_thru_sections!(m,
+            wire_tags=Int[Base.inferencebarrier(_geo_occ_wire_tag!)(m,wt,kernel,caller) for wt in wires]
+            Base.inferencebarrier(Model._model_occ_thru_sections!)(m,
                 _geo_occ_requested_tag(tag,zero_literal),wire_tags;
                 make_ruled=ruled)
         catch err
@@ -5942,7 +5942,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             _geo_occ_fail!(context,err,"Could not add thru sections")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         return
     end
     if (mm=match(
@@ -5986,12 +5986,12 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
         end
         try
             for p in points
-                _geo_occ_pipe_vertex!(m,p,kernel,caller)
+                Base.inferencebarrier(_geo_occ_pipe_vertex!)(m,p,kernel,caller)
             end
             family===:bspline ?
-                Model._model_occ_add_bspline_surface!(m,points,nu;
+                Base.inferencebarrier(Model._model_occ_add_bspline_surface!)(m,points,nu;
                     tag=_geo_occ_requested_tag(tag,zero_literal)) :
-                Model._model_occ_add_bezier_surface!(m,points,nu;
+                Base.inferencebarrier(Model._model_occ_add_bezier_surface!)(m,points,nu;
                     tag=_geo_occ_requested_tag(tag,zero_literal))
         catch err
             err isa InterruptException && rethrow()
@@ -5999,7 +5999,7 @@ function _geo_exec_occ_shape_def!(m::GeoModel,s::AbstractString,
             _geo_occ_fail!(context,err,"Could not add $(family) surface")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         return
     end
     throw(ArgumentError(
@@ -6032,7 +6032,7 @@ end
 function _geo_occ_corner_run(m::GeoModel,name::AbstractString,groups,
                              context::_GeoNumericContext,
                              caller::AbstractString)
-    kernel=_geo_occ_prepare_kernel!(m)
+    kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
     vols=_geo_exec_entity_rhs_tags(
         "{"*groups[1]*"}",context,"$caller volumes";abs_refs=true)
     cs=_geo_exec_entity_rhs_tags(
@@ -6043,12 +6043,12 @@ function _geo_occ_corner_run(m::GeoModel,name::AbstractString,groups,
         length(radii)==1 && (radii=fill(radii[1],length(cs)))
         try
             for v in vols
-                _geo_occ_bind_volume!(m,v,kernel,caller)
+                Base.inferencebarrier(_geo_occ_bind_volume!)(m,v,kernel,caller)
             end
             for c in cs
-                _geo_occ_pipe_edge!(m,c,kernel,caller)
+                Base.inferencebarrier(_geo_occ_pipe_edge!)(m,c,kernel,caller)
             end
-            Model._model_occ_fillet(m,vols,cs,radii)
+            Base.inferencebarrier(Model._model_occ_fillet)(m,vols,cs,radii)
         catch err
             err isa InterruptException && rethrow()
             err isa ArgumentError || rethrow()
@@ -6072,12 +6072,12 @@ function _geo_occ_corner_run(m::GeoModel,name::AbstractString,groups,
         end
         try
             for v in vols
-                _geo_occ_bind_volume!(m,v,kernel,caller)
+                Base.inferencebarrier(_geo_occ_bind_volume!)(m,v,kernel,caller)
             end
             for c in cs
-                _geo_occ_pipe_edge!(m,c,kernel,caller)
+                Base.inferencebarrier(_geo_occ_pipe_edge!)(m,c,kernel,caller)
             end
-            Model._model_occ_chamfer(
+            Base.inferencebarrier(Model._model_occ_chamfer)(
                 m,vols,cs,dist[1],length(dist)==2 ? dist[2] : dist[1])
         catch err
             err isa InterruptException && rethrow()
@@ -6086,7 +6086,7 @@ function _geo_occ_corner_run(m::GeoModel,name::AbstractString,groups,
             return nothing
         end
     end
-    _geo_occ_finish!(m,context)
+    Base.inferencebarrier(_geo_occ_finish!)(m,context)
     return Tuple{Int,Int}[e for e in out]
 end
 
@@ -6567,7 +6567,7 @@ function _exec_periodic!(m::GeoModel,line::AbstractString,
         edgemap=match(
             r"^Periodic\s+Surface\s+([^{}]+?)\s*\{\s*([^}]*)\s*\}\s*=\s*([^{}]+?)\s*\{\s*([^}]*)\s*\}\s*;$",
             line)
-        edgemap!==nothing && return _geo_periodic_surface_edge_map!(
+        edgemap!==nothing && return Base.inferencebarrier(_geo_periodic_surface_edge_map!)(
             m,edgemap,context,caller)
     end
     statement=match(
@@ -6581,7 +6581,7 @@ function _exec_periodic!(m::GeoModel,line::AbstractString,
     isempty(strip(statement.captures[2])) && _geo_syntax_abort("}")
     slaves=_geo_periodic_tags(statement.captures[1],context,caller)
     masters=_geo_periodic_tags(statement.captures[2],context,caller)
-    atol=_geo_periodic_atol(m,context)
+    atol=Base.inferencebarrier(_geo_periodic_atol)(m,context)
     transform=strip(statement.captures[3])
     # Upstream evaluates the transform payload while reducing the production,
     # so `ListOfDouble`/`VExpr` errors surface before the action's count
@@ -6600,7 +6600,7 @@ function _exec_periodic!(m::GeoModel,line::AbstractString,
         # `PeriodicTransform` epsilon — orientation-only for curves; the
         # surface action rejects a <12 transform.
         if dim!=2
-            _geo_periodic_curve_orientation_pairs!(
+            Base.inferencebarrier(_geo_periodic_curve_orientation_pairs!)(
                 m,slaves,masters,context,caller,atol)
         else
             _geo_yyerror!(context,
@@ -6610,7 +6610,7 @@ function _exec_periodic!(m::GeoModel,line::AbstractString,
         return nothing
     end
     if (matched=match(r"^Affine\b(.*)$",transform)) !== nothing
-        return _geo_periodic_affine_statement!(
+        return Base.inferencebarrier(_geo_periodic_affine_statement!)(
             m,dim,slaves,masters,matched.captures[1],context,caller,atol)
     end
     affine=if (matched=match(r"^Translate\b(.*)$",transform)) !== nothing
@@ -6653,10 +6653,10 @@ function _exec_periodic!(m::GeoModel,line::AbstractString,
         return nothing
     end
     if dim==1
-        _geo_periodic_curve_transform_pairs!(
+        Base.inferencebarrier(_geo_periodic_curve_transform_pairs!)(
             m,slaves,masters,affine,16,context,caller,atol)
     else
-        _geo_periodic_surface_transform_pairs!(
+        Base.inferencebarrier(_geo_periodic_surface_transform_pairs!)(
             m,slaves,masters,affine,context,caller,atol)
     end
     return nothing
@@ -7608,19 +7608,19 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         (inner,rest)=_geo_balanced_group(s,caller)
         isempty(strip(rest)) || throw(ArgumentError(
             "$caller: unexpected text after the entity list"))
-        entities=_geo_shape_list_entities!(
+        entities=Base.inferencebarrier(_geo_shape_list_entities!)(
             m,inner,context,caller;signed_tags=true,
             allocator_state=allocator_state)
         # `GModel::remove` reports each unresolved entity as a
         # `Msg::Error` and still removes the rest — the deletion itself
         # skips missing tags like upstream's best-effort removal.
         for (d,t) in entities
-            (0<=d<=3 && _geo_geo_entity_known(m,d,abs(t))) &&
+            (0<=d<=3 && Base.inferencebarrier(_geo_geo_entity_known)(m,d,abs(t))) &&
                 continue
             _geo_msg_error!(context,"Unknown model " *
                 "$(_GEO_MODEL_NOUNS[clamp(d,0,3)+1]) with tag $(abs(t))")
         end
-        removed=_geo_delete_entities!(m,entities;recursive=recursive)
+        removed=Base.inferencebarrier(_geo_delete_entities!)(m,entities;recursive=recursive)
         # `GModel::remove` unbinds every OCC-resident entity it deletes —
         # leaving the binding would resurrect the tag at the next
         # `_model_occ_synchronize!`. `_geo_delete_entities!` already
@@ -7633,7 +7633,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
                     by=e->-e[1])
         for entry in bound
             id=kernel.bindings[entry]
-            Model._model_occ_entity_map_unbind!(
+            Base.inferencebarrier(Model._model_occ_entity_map_unbind!)(
                 kernel.entity_maps[first(entry)+3],last(entry))
             delete!(kernel.bindings,entry)
             delete!(kernel.shape_tags,id)
@@ -7643,14 +7643,14 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
                 init=0)
             kernel.changed=true
         end
-        isempty(bound) || Model._model_occ_collect_shapes!(kernel)
+        isempty(bound) || Base.inferencebarrier(Model._model_occ_collect_shapes!)(kernel)
         allocator_state===nothing ||
             _geo_allocator_delete_entities!(allocator_state,removed)
         # `GEO_Internals::remove` marks the internals changed unconditionally,
         # so the grammar always resynchronizes here — stale raw members drop
         # from the view (and warn) now rather than at the next sync point.
         context.geo_changed=true
-        _geo_sync_physical_view!(m,context)
+        Base.inferencebarrier(_geo_sync_physical_view!)(m,context)
         return nothing
     end
     recursive && _geo_syntax_abort(
@@ -7665,13 +7665,13 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         (inner,rest)=_geo_balanced_group(rest,caller)
         isempty(strip(rest)) || throw(ArgumentError(
             "$caller: unexpected text after the entity list"))
-        entities=_geo_shape_list_entities!(
+        entities=Base.inferencebarrier(_geo_shape_list_entities!)(
             m,inner,context,caller;signed_tags=true,
             allocator_state=allocator_state)
         dim_tags=NTuple{2,Int}[]
         for (dim,tag) in entities
             dim in (2,3) || continue
-            if !_geo_geo_entity_known(m,dim,tag)
+            if !Base.inferencebarrier(_geo_geo_entity_known)(m,dim,tag)
                 # `removeEmbedded` reports a `Msg::Error` per missing
                 # parent and clears the embeddings it did resolve.
                 _geo_msg_error!(context,"Unknown model " *
@@ -7680,7 +7680,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
             end
             push!(dim_tags,(dim,tag))
         end
-        remove_embedded!(m,dim_tags)
+        Base.inferencebarrier(remove_embedded!)(m,dim_tags)
         return nothing
     end
     # `Delete Field[i]` drops a mesh field from the live exec map;
@@ -7753,8 +7753,8 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         # `DeleteAllModelsAndViews` clears BOTH parser symbol tables and the
         # struct namespaces. `FunctionManager` and options survive — it is
         # only cleared by `OpenProject` (file open).
-        _geo_reset_model_geometry!(m)
-        _geo_reset_geometry_counters!(m,context)
+        Base.inferencebarrier(_geo_reset_model_geometry!)(m)
+        Base.inferencebarrier(_geo_reset_geometry_counters!)(m,context)
         empty!(m.physical_names);empty!(m.entity_names)
         empty!(m.meshing.compounds)
         m.name=""
@@ -7776,7 +7776,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
         context.mesh_geometry_parts=nothing
-        _geo_forget_mesh_products!(m,context;reset_tags=true)
+        Base.inferencebarrier(_geo_forget_mesh_products!)(m,context;reset_tags=true)
         context.geo_changed=true
         if allocator_state!==nothing
             _geo_allocator_reset_model!(allocator_state,context;fresh=true)
@@ -7786,13 +7786,13 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
     elseif name=="Model"
         # `destroy(/*keepName=*/true)` + `GEO_Internals::destroy` — the model
         # name and file name survive; entity mesh data dies with the model.
-        _geo_reset_model_geometry!(m)
-        _geo_reset_geometry_counters!(m,context)
+        Base.inferencebarrier(_geo_reset_model_geometry!)(m)
+        Base.inferencebarrier(_geo_reset_geometry_counters!)(m,context)
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
         context.mesh_geometry_parts=nothing
-        _geo_forget_mesh_products!(m,context;reset_tags=true)
+        Base.inferencebarrier(_geo_forget_mesh_products!)(m,context;reset_tags=true)
         empty!(context.raw_physicals)
         empty!(context.parametric_surfaces)
         context.parametric_surface=nothing
@@ -7835,13 +7835,13 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         empty!(context.option_colors)
         return 0
     elseif name=="Meshes"
-        cleared_authority=Model._model_mesh_cleared_authority(m.meshing.mesh_authority)
+        cleared_authority=Base.inferencebarrier(Model._model_mesh_cleared_authority)(m.meshing.mesh_authority)
         # `GModel::deleteMesh` — drops the mid-file mesh and its ownership.
         context.mesh=nothing
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
         context.mesh_geometry_parts=nothing
-        _geo_forget_mesh_products!(m,context)
+        Base.inferencebarrier(_geo_forget_mesh_products!)(m,context)
         m.meshing.mesh_authority=cleared_authority
         context.native_element_lookup_receipt=nothing
         empty!(m.curve_params);empty!(m.meshing.attached)
@@ -7923,7 +7923,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_syntax_abort(";")
     end
     if occursin(r"^Periodic(?:\s|$)",line)
-        _exec_periodic!(m,line,context)
+        Base.inferencebarrier(_exec_periodic!)(m,line,context)
         return
     elseif (mm=match(
             r"^Point\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -7942,14 +7942,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_dup_entity!(context,haskey(m.points,trunc(Int,tag)),
                          :point,"point",tag,zero_literal,allocator_state) &&
             return
-        t=add_point!(m,values[1],values[2],values[3];
+        t=Base.inferencebarrier(add_point!)(m,values[1],values[2],values[3];
                    tag=tag,mesh_size=lc>0 ? lc : 1.0,
                    _zero_literal=zero_literal)
         # `gmshVertex` keeps the `lc` component verbatim — `lc <= 0` is the
         # unset default (`point_size` reads fall back to 0).
         lc<=0 && (m.point_size[t]=lc)
         if allocator_state===nothing || allocator_state.factory!==:opencascade
-            Model._native_geo_kernel_admit_point!(m,t)
+            Base.inferencebarrier(Model._native_geo_kernel_admit_point!)(m,t)
         end
         return
     elseif (mm=match(
@@ -7969,12 +7969,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add line")
             return
         end
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
-        _geo_line_tolerance_warn!(m,context,found,t)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
+        Base.inferencebarrier(_geo_line_tolerance_warn!)(m,context,found,t)
         occ=allocator_state!==nothing && allocator_state.factory===:opencascade
-        _geo_store_curve!(m,t,found;control_points=length(found)>2,
-            geometry=occ ? _geo_occ_line_geometry(m,found) : nothing,native_geo=!occ)
+        Base.inferencebarrier(_geo_store_curve!)(m,t,found;control_points=length(found)>2,
+            geometry=occ ? Base.inferencebarrier(_geo_occ_line_geometry)(m,found) : nothing,native_geo=!occ)
         ok || _geo_yyerror!(context,"Could not add line")
         return
     elseif (mm=match(
@@ -7991,13 +7991,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             (vals,)=_geo_occ_center_params(
                 mm.captures[2],context,caller,(4,6,9,12))
             if vals!==nothing
-                kernel=_geo_occ_prepare_kernel!(m)
+                kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
                 _geo_dup_entity!(context,
                     haskey(m.curves,trunc(Int,tag)) ||
                     haskey(kernel.bindings,(1,tag)),
                     :curve,"circle",tag,zero_literal,allocator_state) && return
                 try
-                    Model._model_occ_add_circle!(m,
+                    Base.inferencebarrier(Model._model_occ_add_circle!)(m,
                         vals[1],vals[2],vals[3],vals[4];
                         tag=_geo_occ_requested_tag(tag,zero_literal),
                         angle1=length(vals)>=6 ? vals[5] : 0.0,
@@ -8010,7 +8010,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                     _geo_occ_fail!(context,err,"Could not add circle")
                     return
                 end
-                _geo_occ_finish!(m,context)
+                Base.inferencebarrier(_geo_occ_finish!)(m,context)
                 return
             end
         end
@@ -8025,7 +8025,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
                          :curve,"circle",tag,zero_literal,allocator_state) &&
             return
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
         if occ
             for point in points
                 if !haskey(m.points,point)
@@ -8034,22 +8034,22 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                     return
                 end
             end
-            geometry,error=Model._model_occ_circle_arc_geometry(
+            geometry,error=Base.inferencebarrier(Model._model_occ_circle_arc_geometry)(
                 m.points[points[1]],m.points[points[2]],m.points[points[3]])
             if error!==nothing
                 _geo_msg_error!(context,error)
                 _geo_yyerror!(context,"Could not add circle")
                 return
             end
-            _geo_store_curve!(m,t,points;kind=:circle,control_points=true,geometry)
+            Base.inferencebarrier(_geo_store_curve!)(m,t,points;kind=:circle,control_points=true,geometry)
             return
         end
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
-        n=_arc_stored_normal(normal,caller)
-        ok=_geo_arc_endcurve_ok!(m,context,found,n,t;
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
+        n=Base.inferencebarrier(_arc_stored_normal)(normal,caller)
+        ok=Base.inferencebarrier(_geo_arc_endcurve_ok!)(m,context,found,n,t;
                                  ellipse=false,
                                  normal_given=normal!==nothing) && ok
-        _geo_store_curve!(m,t,found;kind=:circle,control_points=true,
+        Base.inferencebarrier(_geo_store_curve!)(m,t,found;kind=:circle,control_points=true,
                           geometry=(n=n,))
         ok || _geo_yyerror!(context,"Could not add circle")
         return
@@ -8067,14 +8067,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             (vals,)=_geo_occ_center_params(
                 mm.captures[2],context,caller,(5,7,10,13))
             if vals!==nothing
-                kernel=_geo_occ_prepare_kernel!(m)
+                kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
                 _geo_dup_entity!(context,
                     haskey(m.curves,trunc(Int,tag)) ||
                     haskey(kernel.bindings,(1,tag)),
                     :curve,"ellipse",tag,zero_literal,allocator_state) &&
                     return
                 try
-                    Model._model_occ_add_ellipse!(m,
+                    Base.inferencebarrier(Model._model_occ_add_ellipse!)(m,
                         vals[1],vals[2],vals[3],vals[4],vals[5];
                         tag=_geo_occ_requested_tag(tag,zero_literal),
                         angle1=length(vals)>=7 ? vals[6] : 0.0,
@@ -8087,7 +8087,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                     _geo_occ_fail!(context,err,"Could not add ellipse")
                     return
                 end
-                _geo_occ_finish!(m,context)
+                Base.inferencebarrier(_geo_occ_finish!)(m,context)
                 return
             end
         end
@@ -8105,13 +8105,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_dup_entity!(context,haskey(m.curves,trunc(Int,tag)),
                          :curve,"ellipse",tag,zero_literal,allocator_state) &&
             return
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
-        n=_arc_stored_normal(normal,caller)
-        ok=_geo_arc_endcurve_ok!(m,context,found,n,t;
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
+        n=Base.inferencebarrier(_arc_stored_normal)(normal,caller)
+        ok=Base.inferencebarrier(_geo_arc_endcurve_ok!)(m,context,found,n,t;
                                  ellipse=true,
                                  normal_given=normal!==nothing) && ok
-        _geo_store_curve!(m,t,found;kind=:ellipse,control_points=true,
+        Base.inferencebarrier(_geo_store_curve!)(m,t,found;kind=:ellipse,control_points=true,
                           geometry=(n=n,))
         ok || _geo_yyerror!(context,"Could not add ellipse")
         return
@@ -8133,9 +8133,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add spline")
             return
         end
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
-        _geo_store_curve!(m,t,found;kind=:spline,control_points=true)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
+        Base.inferencebarrier(_geo_store_curve!)(m,t,found;kind=:spline,control_points=true)
         ok || _geo_yyerror!(context,"Could not add spline")
         return
     elseif (mm=match(
@@ -8156,9 +8156,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add BSpline")
             return
         end
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
-        _geo_store_curve!(m,t,found;kind=:bspline,control_points=true)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
+        Base.inferencebarrier(_geo_store_curve!)(m,t,found;kind=:bspline,control_points=true)
         ok || _geo_yyerror!(context,"Could not add BSpline")
         return
     elseif (mm=match(
@@ -8179,9 +8179,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add Bezier")
             return
         end
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
-        _geo_store_curve!(m,t,found;kind=:bezier,control_points=true)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
+        Base.inferencebarrier(_geo_store_curve!)(m,t,found;kind=:bezier,control_points=true)
         ok || _geo_yyerror!(context,"Could not add Bezier")
         return
     elseif (mm=match(
@@ -8221,17 +8221,17 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add nurbs")
             return
         end
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
         if isempty(knots)
             # An empty `Knots {}` builds the plain `MSH_SEGM_BSPLN` record.
-            _geo_store_curve!(m,t,found;kind=:bspline,control_points=true)
+            Base.inferencebarrier(_geo_store_curve!)(m,t,found;kind=:bspline,control_points=true)
         else
             # `order = knots - points - 1` uses the *input* point count; the
             # knot vector stores as `float` and `ubeg`/`uend` keep the raw
             # doubles — upstream performs no knot validation.
             degree=length(knots)-length(points)-1
-            _geo_store_curve!(m,t,found;kind=:nurbs,control_points=true,
+            Base.inferencebarrier(_geo_store_curve!)(m,t,found;kind=:nurbs,control_points=true,
                 geometry=(knots=Float64.(Float32.(knots)),deg=degree,
                           ubeg=first(knots),uend=last(knots)))
         end
@@ -8249,11 +8249,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_dup_entity!(context,haskey(m.loops,trunc(Int,tag)),
                          :curve_loop,"curve loop",tag,zero_literal,
                          allocator_state) && return
-        t=_alloc_curve_loop_tag(m,_tag(tag,caller,1),caller;
+        t=Base.inferencebarrier(_alloc_curve_loop_tag)(m,Base.inferencebarrier(_tag)(tag,caller,1),caller;
                                 literal_zero=zero_literal)
         if all(id->haskey(m.curves,abs(id)),curves)
             # `SortEdgesInLoop` stores the chained prefix even on a dead-end.
-            (ordered,ok)=_geo_sort_loop_partial(m,curves)
+            (ordered,ok)=Base.inferencebarrier(_geo_sort_loop_partial)(m,curves)
             m.loops[t]=ordered
             ok || (_geo_msg_error!(context,"Curve loop $t is wrong");
                    _geo_yyerror!(context,"Could not add curve loop"))
@@ -8282,11 +8282,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add plane surface")
             return
         end
-        t=_geo_entity_tag(m,2,tag,caller,zero_literal)
-        ok=_geo_check_surface_wires!(m,context,loops,t)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,2,tag,caller,zero_literal)
+        ok=Base.inferencebarrier(_geo_check_surface_wires!)(m,context,loops,t)
         m.surfaces[t]=loops
         if ok && allocator_state!==nothing && allocator_state.factory===:opencascade
-            geometry=_geo_occ_axis_plane_geometry(m,loops)
+            geometry=Base.inferencebarrier(_geo_occ_axis_plane_geometry)(m,loops)
             geometry===nothing || (m.surface_geometry[t]=geometry)
         end
         ok || _geo_yyerror!(context,"Could not add plane surface")
@@ -8333,8 +8333,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add surface")
             return
         end
-        t=_geo_entity_tag(m,2,tag,caller,zero_literal)
-        ok=_geo_check_surface_wires!(m,context,wires,t)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,2,tag,caller,zero_literal)
+        ok=Base.inferencebarrier(_geo_check_surface_wires!)(m,context,wires,t)
         if sphere_center!==nothing && sphere_center>=0 &&
                 !haskey(m.points,sphere_center)
             _geo_msg_error!(context,
@@ -8362,7 +8362,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_dup_entity!(context,haskey(m.surface_loops,trunc(Int,tag)),
                          :surface_loop,"surface loop",tag,zero_literal,
                          allocator_state) && return
-        t=_alloc_surface_loop_tag(m,_tag(tag,caller,2),caller;
+        t=Base.inferencebarrier(_alloc_surface_loop_tag)(m,Base.inferencebarrier(_tag)(tag,caller,2),caller;
                                   literal_zero=zero_literal)
         m.surface_loops[t]=copy(surfaces)
         return
@@ -8381,8 +8381,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_dup_entity!(context,haskey(m.volumes,trunc(Int,tag)),
                          :volume,"volume",tag,zero_literal,
                          allocator_state) && return
-        t=_geo_entity_tag(m,3,tag,caller,zero_literal)
-        ok=_geo_check_volume_shells!(m,context,shells,t)
+        t=Base.inferencebarrier(_geo_entity_tag)(m,3,tag,caller,zero_literal)
+        ok=Base.inferencebarrier(_geo_check_volume_shells!)(m,context,shells,t)
         m.volumes[t]=copy(shells)
         ok || _geo_yyerror!(context,"Could not add volume")
         return
@@ -8409,7 +8409,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         _geo_dup_entity!(context,haskey(m.volumes,tag),:volume,"block",
                          tag,zero_literal,allocator_state) &&
             return
-        add_box!(m,values...;tag=tag,_zero_literal=zero_literal)
+        Base.inferencebarrier(add_box!)(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
             r"^Cylinder\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
@@ -8435,9 +8435,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         if length(values)==8
             # `{x,y,z,dx,dy,dz,r,angle}` — a partial sweep the native
             # encoding cannot store; the OCC endpoint builds it.
-            kernel=_geo_occ_prepare_kernel!(m)
+            kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
             try
-                Model._model_occ_add_cylinder!(m,values[1:7]...;
+                Base.inferencebarrier(Model._model_occ_add_cylinder!)(m,values[1:7]...;
                     tag=_geo_occ_requested_tag(tag,zero_literal),
                     angle=values[8])
             catch err
@@ -8446,10 +8446,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                 _geo_occ_fail!(context,err,"Could not add cylinder")
                 return
             end
-            _geo_occ_finish!(m,context)
+            Base.inferencebarrier(_geo_occ_finish!)(m,context)
             return
         end
-        add_cylinder!(m,values...;tag=tag,_zero_literal=zero_literal)
+        Base.inferencebarrier(add_cylinder!)(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
             r"^Sphere\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
@@ -8468,7 +8468,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         if length(values)==2
             # `Sphere(n) = {centerTag, pointTag}` — the built-in-kernel form:
             # center point plus a point on the sphere, radius = distance.
-            _geo_exec_point_sphere!(m,raw_tag,values,context,caller,"sphere";
+            Base.inferencebarrier(_geo_exec_point_sphere!)(m,raw_tag,values,context,caller,"sphere";
                                     zero_literal=zero_literal)
         elseif 4<=length(values)<=7
             # `{x,y,z,r[,a1,a2,a3]}` — Gmsh gates this on OpenCASCADE;
@@ -8483,15 +8483,15 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                              tag,zero_literal,allocator_state) &&
                 return
             if length(values)==4
-                add_sphere!(m,values[1],values[2],values[3],values[4];
+                Base.inferencebarrier(add_sphere!)(m,values[1],values[2],values[3],values[4];
                             tag=tag,_zero_literal=zero_literal)
             else
                 # `{x,y,z,r,a1[,a2[,a3]]}` — the angle-bound forms bind a
                 # partial sphere through the OCC endpoint (`add_sphere!`
                 # only encodes the full sweep).
-                kernel=_geo_occ_prepare_kernel!(m)
+                kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
                 try
-                    Model._model_occ_add_sphere!(m,values[1],values[2],
+                    Base.inferencebarrier(Model._model_occ_add_sphere!)(m,values[1],values[2],
                         values[3],values[4];
                         tag=_geo_occ_requested_tag(tag,zero_literal),
                         angle1=values[5],
@@ -8503,7 +8503,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                     _geo_occ_fail!(context,err,"Could not add sphere")
                     return
                 end
-                _geo_occ_finish!(m,context)
+                Base.inferencebarrier(_geo_occ_finish!)(m,context)
             end
         else
             _geo_yyerror!(context,
@@ -8523,7 +8523,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         values=_geo_exec_numeric_values(
             mm.captures[2],context,"$caller parameters")
         if length(values)==2
-            _geo_exec_point_sphere!(m,raw_tag,values,context,caller,
+            Base.inferencebarrier(_geo_exec_point_sphere!)(m,raw_tag,values,context,caller,
                                     "polar sphere";zero_literal=raw_tag==0)
         else
             _geo_yyerror!(context,"PolarSphere requires 2 points")
@@ -8553,9 +8553,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         if length(values)==9
             # `{x,y,z,dx,dy,dz,r1,r2,angle}` — a partial cone sweep, built
             # through the OCC endpoint like `Cylinder`'s angle form.
-            kernel=_geo_occ_prepare_kernel!(m)
+            kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
             try
-                Model._model_occ_add_cone!(m,values[1:8]...;
+                Base.inferencebarrier(Model._model_occ_add_cone!)(m,values[1:8]...;
                     tag=_geo_occ_requested_tag(tag,zero_literal),
                     angle=values[9])
             catch err
@@ -8564,10 +8564,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                 _geo_occ_fail!(context,err,"Could not add cone")
                 return
             end
-            _geo_occ_finish!(m,context)
+            Base.inferencebarrier(_geo_occ_finish!)(m,context)
             return
         end
-        add_cone!(m,values...;tag=tag,_zero_literal=zero_literal)
+        Base.inferencebarrier(add_cone!)(m,values...;tag=tag,_zero_literal=zero_literal)
         return
     elseif (mm=match(
             r"^Torus\s*\(\s*(.*?)\s*\)\s*=\s*\{\s*(.*?)\s*\}\s*;$",
@@ -8587,7 +8587,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Torus requires 5 or 6 parameters")
             return
         end
-        kernel=_geo_occ_prepare_kernel!(m)
+        kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
         _geo_dup_entity!(context,
             haskey(m.volumes,tag) || haskey(kernel.bindings,(3,tag)),
             :volume,"torus",tag,zero_literal,allocator_state) &&
@@ -8596,7 +8596,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # sweep topology so OCC ops (Boundary, Duplicata, Fillet, …) consume
         # it. `angle` stays optional like upstream `addTorus`.
         try
-            Model._model_occ_add_torus!(m,values[1],values[2],values[3],
+            Base.inferencebarrier(Model._model_occ_add_torus!)(m,values[1],values[2],values[3],
                 values[4],values[5];
                 tag=_geo_occ_requested_tag(tag,zero_literal),
                 angle=length(values)==6 ? values[6] : 2pi)
@@ -8606,7 +8606,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_occ_fail!(context,err,"Could not add torus")
             return
         end
-        _geo_occ_finish!(m,context)
+        Base.inferencebarrier(_geo_occ_finish!)(m,context)
         return
     elseif (mm=match(
             r"^Curve\s*\(\s*(.*?)\s*\)\s*=\s*(.*?)\s*;$",
@@ -8626,10 +8626,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_yyerror!(context,"Could not add line")
             return
         end
-        t=_geo_entity_tag(m,1,tag,caller,zero_literal)
-        (found,ok)=_geo_curve_found_points!(m,context,points,t)
-        _geo_line_tolerance_warn!(m,context,found,t)
-        _geo_store_curve!(m,t,found;control_points=length(found)>2,
+        t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
+        Base.inferencebarrier(_geo_line_tolerance_warn!)(m,context,found,t)
+        Base.inferencebarrier(_geo_store_curve!)(m,t,found;control_points=length(found)>2,
             native_geo=allocator_state===nothing || allocator_state.factory!==:opencascade)
         ok || _geo_yyerror!(context,"Could not add line")
         return
@@ -8645,7 +8645,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             (mm.captures[2]!==nothing ? "ThruSections" :
              "$(mm.captures[3]) surface")
         if allocator_state!==nothing && allocator_state.factory==:opencascade
-            _geo_exec_occ_shape_def!(m,line,context,allocator_state)
+            Base.inferencebarrier(_geo_exec_occ_shape_def!)(m,line,context,allocator_state)
             return
         end
         _geo_yyerror!(context,
@@ -8724,7 +8724,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif match(r"^Split\s+Curve\b",line)!==nothing
         splitcaller="execute_geo: Split"
-        (new_tags,rest)=_geo_exec_split_curve!(
+        (new_tags,rest)=Base.inferencebarrier(_geo_exec_split_curve!)(
             m,String(strip(line[nextind(line,firstindex(line),5):end])),
             context,splitcaller,allocator_state)
         _geo_require_statement_end(rest,splitcaller)
@@ -8749,7 +8749,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             tail=strip(s[nextind(s,firstindex(s),ncodeunits(tm.match)):end])
             s="$(tm.match){$(tail)}"
         end
-        _geo_exec_transform_term(m,s,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_transform_term)(m,s,context,allocator_state)
         return
     elseif match(r"^ShapeFromFile\s*\(",line)!==nothing
         _geo_yyerror!(context,
@@ -8767,7 +8767,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         body=String(strip(line))
         endswith(body,";") &&
             (body=String(strip(body[firstindex(body):prevind(body,lastindex(body))])))
-        _geo_exec_boolean_term(m,body,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_boolean_term)(m,body,context,allocator_state)
         return
     elseif (mm=match(r"^OnelabRun\s*\(\s*(.*?)\s*\)\s*;?\s*$",line)) !== nothing
         nargs=_geo_eval_string_list(mm.captures[1],context,
@@ -8793,7 +8793,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # The operand `ListOfShapes` still reduce (side effects included)
         # under the built-in factory — only the operator application gates
         # on OpenCASCADE upstream.
-        operands=_geo_boolean_operands(m,groups,context,caller;
+        operands=Base.inferencebarrier(_geo_boolean_operands)(m,groups,context,caller;
                                        allocator_state=allocator_state)
         # Gmsh.y `BooleanShape`: unlike the bare `Boolean` term the tagged
         # statement has no built-in-kernel diagnostic — it silently no-ops
@@ -8805,11 +8805,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         op=get(_GEO_BOOLEAN_OPS,opname,nothing)
         op===nothing && throw(ArgumentError(
             "execute_geo: Boolean$opname is not implemented"))
-        _geo_boolean_apply!(m,op,operands.objects,operands.tools;tag=tag,
+        Base.inferencebarrier(_geo_boolean_apply!)(m,op,operands.objects,operands.tools;tag=tag,
             context=context,allocator_state=allocator_state,caller=caller)
         return
     elseif match(r"^(Translate|Rotate|Dilate|Symmetry)\s*\{",line)!==nothing
-        _geo_exec_transform_statement!(m,line,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_transform_statement!)(m,line,context,allocator_state)
         return
     elseif match(r"^Affine\s*\{",line)!==nothing
         # `Affine{matrix}{shapes};` — a Transform production like the
@@ -8817,10 +8817,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         s=String(strip(line))
         endswith(s,";") &&
             (s=String(strip(s[firstindex(s):prevind(s,end)])))
-        _geo_exec_transform_term(m,s,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_transform_term)(m,s,context,allocator_state)
         return
     elseif match(r"^Extrude\b",line)!==nothing
-        _geo_exec_extrude_term(m,line,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_extrude_term)(m,line,context,allocator_state)
         return
     elseif match(
             r"^(Duplicata|Boundary|CombinedBoundary|OrientedBoundary|OrientedCombinedBoundary|PointsOf)\s*\{",
@@ -8830,7 +8830,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         s=String(strip(line))
         endswith(s,";") &&
             (s=String(strip(s[firstindex(s):prevind(s,end)])))
-        _geo_shape_list_entities!(m,s,context,"execute_geo";
+        Base.inferencebarrier(_geo_shape_list_entities!)(m,s,context,"execute_geo";
                                   allocator_state=allocator_state)
         return
     elseif (mm=match(
@@ -8845,7 +8845,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         ids=_geo_exec_entity_tags(mm.captures[2],context,"$caller entities")
         target=_geo_exec_single_entity(
             mm.captures[3],context,"$caller target")
-        _geo_exec_embed!(m,dim,ids,2,target,context)
+        Base.inferencebarrier(_geo_exec_embed!)(m,dim,ids,2,target,context)
         return
     elseif (mm=match(
             r"^(Point|Line|Curve|Surface)\s*\{\s*(.*?)\s*\}\s+In\s+Volume\s*\{\s*(.*?)\s*\}\s*;$",
@@ -8855,7 +8855,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         ids=_geo_exec_entity_tags(mm.captures[2],context,"$caller entities")
         target=_geo_exec_single_entity(
             mm.captures[3],context,"$caller target")
-        _geo_exec_embed!(m,dim,ids,3,target,context)
+        Base.inferencebarrier(_geo_exec_embed!)(m,dim,ids,3,target,context)
         return
     elseif (physical=_geo_physical_declaration(line)) !== nothing
         caller="execute_geo: Physical $(physical.kind)"
@@ -8873,15 +8873,15 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # wins over the explicit tag; otherwise `(dim, T)` is bound when
         # unnamed, even when the modify below then fails.
         tag=if physical.tag_source===nothing
-            _geo_physical_assign_next!(m,allocator_state)
-            _geo_set_physical_name!(m,dim,name,m.physical_tag_max)
+            Base.inferencebarrier(_geo_physical_assign_next!)(m,allocator_state)
+            Base.inferencebarrier(_geo_set_physical_name!)(m,dim,name,m.physical_tag_max)
         else
             explicit=_geo_signed_gmsh_int_value(
                 _geo_eval_numeric(
                     physical.tag_source,context,"$caller tag"),
                 "$caller tag")
             isempty(name) ? explicit :
-                _geo_set_physical_name!(m,dim,name,explicit)
+                Base.inferencebarrier(_geo_set_physical_name!)(m,dim,name,explicit)
         end
         membership=physical.membership
         # A missing list is a syntax error, but `{}` is a valid (empty)
@@ -8895,7 +8895,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         elseif match(
                 r"^(?:Boundary|CombinedBoundary|PointsOf)(?:\s|\{)",
                 membership)!==nothing
-            _geo_exec_physical_topology(
+            Base.inferencebarrier(_geo_exec_physical_topology)(
                 m,membership,context,"$caller entities",dim)
         else
             occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",membership) &&
@@ -8908,10 +8908,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                 membership,context,"$caller entities";signed=true)
         end
         if physical.op=="="
-            _geo_exec_physical_create!(m,dim,tag,ids,context,physical.kind,
+            Base.inferencebarrier(_geo_exec_physical_create!)(m,dim,tag,ids,context,physical.kind,
                                        allocator_state)
         else
-            _geo_exec_physical_modify!(m,dim,physical.op,tag,ids,
+            Base.inferencebarrier(_geo_exec_physical_modify!)(m,dim,physical.op,tag,ids,
                                        context,caller,physical.kind)
         end
         return
@@ -8933,7 +8933,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             sort!(collect(keys(m.points)))
         elseif match(r"^PointsOf(?:\s|\{)",selector)!==nothing
             match(r"^PointsOf\s*\{\s*\}$",selector)!==nothing ? Int[] :
-                _geo_exec_points_of(m,selector,context,caller)
+                Base.inferencebarrier(_geo_exec_points_of)(m,selector,context,caller)
         else
             occursin(r"[A-Za-z_][A-Za-z0-9_]*\s*\{",selector) && return
             _geo_exec_entity_tags(selector,context,"$caller Point selector";
@@ -8949,20 +8949,20 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # `lc <= 0` vertex behaves as unconstrained downstream — silently
         # skipping produces the observable-equivalent model.
         mesh_size<=0 && return
-        set_point_mesh_size!(m,point_tags,mesh_size)
+        Base.inferencebarrier(set_point_mesh_size!)(m,point_tags,mesh_size)
         return
     elseif (mm=match(
             r"^Transfinite\s+(?:Curve|Line)\s*(.*?)\s*=\s*(.*?)\s*;$",
             line)) !== nothing
-        _geo_exec_transfinite_curve!(m,mm.captures[1],mm.captures[2],context)
+        Base.inferencebarrier(_geo_exec_transfinite_curve!)(m,mm.captures[1],mm.captures[2],context)
         return
     elseif (mm=match(
             r"^Transfinite\s+Surface\s*(.*?)\s*;$",line)) !== nothing
-        _geo_exec_transfinite_surface!(m,mm.captures[1],context)
+        Base.inferencebarrier(_geo_exec_transfinite_surface!)(m,mm.captures[1],context)
         return
     elseif (mm=match(
             r"^Transfinite\s+Volume\s*(.*?)\s*;$",line)) !== nothing
-        _geo_exec_transfinite_volume!(m,mm.captures[1],context)
+        Base.inferencebarrier(_geo_exec_transfinite_volume!)(m,mm.captures[1],context)
         return
     elseif (mm=match(
             r"^TransfQuadTri\s*(.*?)\s*;$",line)) !== nothing
@@ -8971,7 +8971,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # when a flagged volume is meshed.
         list=_geo_constraint_list(mm.captures[1],context,
                                   "execute_geo: TransfQuadTri";allow_all=true)
-        _geo_constraint_apply(m,3,list,"execute_geo: TransfQuadTri",
+        Base.inferencebarrier(_geo_constraint_apply)(m,3,list,"execute_geo: TransfQuadTri",
                               tag->push!(m.meshing.quad_tri,tag))
         return
     elseif (mm=match(
@@ -8985,7 +8985,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                 caller,"angle"))
         list=_geo_constraint_list(mm.captures[1],context,caller;allow_all=true)
         let angle=angle
-            _geo_constraint_apply(m,2,list,caller,
+            Base.inferencebarrier(_geo_constraint_apply)(m,2,list,caller,
                 tag->(m.meshing.recombine[(2,tag)]=angle;nothing))
         end
         return
@@ -8994,7 +8994,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         list=_geo_constraint_list(mm.captures[1],context,
                                   "execute_geo: Recombine Volume";
                                   allow_all=true)
-        _geo_constraint_apply(m,3,list,"execute_geo: Recombine Volume",
+        Base.inferencebarrier(_geo_constraint_apply)(m,3,list,"execute_geo: Recombine Volume",
             tag->(m.meshing.recombine[(3,tag)]=0.0;nothing))
         return
     elseif (mm=match(
@@ -9004,7 +9004,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_eval_numeric(mm.captures[2],context,"$caller iteration count"),
             caller,"iteration count")
         list=_geo_constraint_list(mm.captures[1],context,caller;allow_all=true)
-        _geo_constraint_apply(m,2,list,caller,
+        Base.inferencebarrier(_geo_constraint_apply)(m,2,list,caller,
             tag->(m.meshing.smoothing[(2,tag)]=count;nothing))
         return
     elseif (mm=match(
@@ -9041,10 +9041,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             r"^(?:Reverse|ReverseMesh)\s+(Curve|Line|Surface)\s*(.*?)\s*;$",
             line)) !== nothing
         dim=mm.captures[1]=="Surface" ? 2 : 1
-        caller="execute_geo: ReverseMesh $(_entity_label(dim))"
+        caller="execute_geo: ReverseMesh $(Base.inferencebarrier(_entity_label)(dim))"
         list=_geo_constraint_list(mm.captures[2],context,caller;allow_all=true)
         let dim=dim
-            _geo_constraint_apply(m,dim,list,caller,
+            Base.inferencebarrier(_geo_constraint_apply)(m,dim,list,caller,
                 tag->begin
                     m.meshing.reverse[(dim,tag)]=true
                     dim==2 && haskey(m.meshing.orientation_geo_reverse,tag) &&
@@ -9056,11 +9056,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     elseif (mm=match(
             r"^RelocateMesh\s+(Point|Curve|Line|Surface)\s*(.*?)\s*;$",
             line)) !== nothing
-        _geo_exec_relocate_mesh!(m,mm.captures[1],mm.captures[2],context)
+        Base.inferencebarrier(_geo_exec_relocate_mesh!)(m,mm.captures[1],mm.captures[2],context)
         return
     elseif (mm=match(
             r"^ReorientMesh\s+Volume\s*(.*?)\s*;$",line)) !== nothing
-        _geo_exec_reorient_mesh!(m,mm.captures[1],context)
+        Base.inferencebarrier(_geo_exec_reorient_mesh!)(m,mm.captures[1],context)
         return
     elseif (mm=match(
             r"^Degenerated\s+(?:Curve|Line)\s*(.*?)\s*;$",line)) !== nothing
@@ -9076,12 +9076,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             r"^Compound\s+(Curve|Line|Surface|Volume)\s*(.*?)\s*;$",
             line)) !== nothing
         dim=mm.captures[1]=="Surface" ? 2 : mm.captures[1]=="Volume" ? 3 : 1
-        _geo_exec_compound!(m,dim,mm.captures[2],context)
+        Base.inferencebarrier(_geo_exec_compound!)(m,dim,mm.captures[2],context)
         return
     elseif match(r"^RecombineMesh\s*;$",line) !== nothing
-        return _geo_exec_mesh_statement!(m,line,context,allocator_state)
+        return Base.inferencebarrier(_geo_exec_mesh_statement!)(m,line,context,allocator_state)
     elseif (mm=match(r"^(Recursive\s+)?Delete\b(.*)$",line)) !== nothing
-        return _geo_exec_delete!(m,mm.captures[1]!==nothing,
+        return Base.inferencebarrier(_geo_exec_delete!)(m,mm.captures[1]!==nothing,
                                  String(mm.captures[2]),context,
                                  allocator_state)
     elseif match(r"^SetTag\b",line) !== nothing
@@ -9125,13 +9125,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             r"^Coherence(?:\s+(Geometry|Mesh)|\s+Point\s*\{\s*(.*?)\s*\})?\s*;$",
             line)) !== nothing
         if mm.captures[2] !== nothing
-            merge_vertices!(m,_geo_exec_entity_tags(
+            Base.inferencebarrier(merge_vertices!)(m,_geo_exec_entity_tags(
                 mm.captures[2],context,"execute_geo: Coherence Point";
                 abs_refs=true);
                 caller="execute_geo: Coherence Point",
                 remove_degenerated=_geo_auto_coherence(context)>1)
         elseif mm.captures[1] != "Mesh"
-            coherence!(m;remove_degenerated=_geo_auto_coherence(context)>1)
+            Base.inferencebarrier(coherence!)(m;remove_degenerated=_geo_auto_coherence(context)>1)
         end
         # `Coherence Mesh` deduplicates mesh vertices; no mesh exists during
         # .geo execution, so there is nothing to merge.
@@ -9142,7 +9142,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                                 "execute_geo: Mesh.TransfiniteTri")
         isinteger(value) || throw(ArgumentError(
             "execute_geo: Mesh.TransfiniteTri must be 0 or 1 (got $value)"))
-        set_transfinite_tri!(m,Int(value))
+        Base.inferencebarrier(set_transfinite_tri!)(m,Int(value))
         return Int(value)
     elseif startswith(line,"Coherence")
         throw(ArgumentError(
@@ -9163,14 +9163,14 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # `Field[i] = Kind` — `FieldManager::newField` semantics on the live
         # exec map: duplicate ids keep the original, unknown kinds create
         # nothing, both recoverable diagnostics.
-        _geo_exec_field_declare!(context,fm.captures[1],String(fm.captures[2]))
+        Base.inferencebarrier(_geo_exec_field_declare!)(context,fm.captures[1],String(fm.captures[2]))
         return
     elseif (fm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+Field\s*=\s*(.*?)\s*;?$",
                      line))!==nothing
         # `Background Field`/field-list commands — the tag list is evaluated at
         # execution, diagnostics match `String__Index tField tAFFECT
         # ListOfDouble`; the background/boundary-layer stores live in params.
-        _geo_exec_field_command!(context,String(fm.captures[1]),fm.captures[2])
+        Base.inferencebarrier(_geo_exec_field_command!)(context,String(fm.captures[1]),fm.captures[2])
         return
     elseif startswith(line,"Field") &&
            !occursin(r"^Field\s*\[.*\]\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*=",line)
@@ -9208,11 +9208,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     elseif (mm=match(r"^SetFactory\s*\(\s*(.*?)\s*\)\s*;?\s*$",line)) !== nothing
         # The grammar syncs the internals (when changed) before switching
         # kernels so merged tags cannot clash.
-        _geo_sync_physical_view_if_changed!(m,context)
-        _geo_exec_set_factory!(mm.captures[1],context,allocator_state)
+        Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
+        Base.inferencebarrier(_geo_exec_set_factory!)(mm.captures[1],context,allocator_state)
         return
     elseif (mm=match(r"^DefineConstant\s*\[\s*(.*?)\s*\]\s*;?\s*$",line)) !== nothing
-        _geo_exec_define_constants!(context,mm.captures[1])
+        Base.inferencebarrier(_geo_exec_define_constants!)(context,mm.captures[1])
         return
     elseif (mm=match(r"^UndefineConstant\s*\[\s*(.*?)\s*\]\s*;?\s*$",line)) !== nothing
         for arg in _geo_split_define_constants(mm.captures[1],
@@ -9243,7 +9243,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif (mm=match(r"^(Printf|Warning|Error)\s*\(\s*(.*?)\s*\)\s*(?:(>>|>)\s*(.*?)\s*)?;?\s*$",
                      line)) !== nothing
-        _geo_exec_print!(mm.captures[1],mm.captures[2],
+        Base.inferencebarrier(_geo_exec_print!)(mm.captures[1],mm.captures[2],
             mm.captures[3]===nothing ? nothing : (mm.captures[3],mm.captures[4]),
             context)
         return
@@ -9264,7 +9264,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     elseif match(r"^SyncModel\s*;?\s*$",line)!==nothing
         # `SyncModel` forces a synchronize unconditionally (every other sync
         # point in the grammar gates on `getChanged()`).
-        _geo_sync_physical_view!(m,context)
+        Base.inferencebarrier(_geo_sync_physical_view!)(m,context)
         return
     elseif match(r"^Draw\s*;?\s*$",line)!==nothing ||
            match(r"^SetChanged\s*;?\s*$",line)!==nothing ||
@@ -9273,8 +9273,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         return
     elseif match(r"^BoundingBox\s*;?\s*$",line)!==nothing
         context.native_context_forced_bbox=false
-        _geo_sync_physical_view_if_changed!(m,context)
-        _geo_sync_native_context!(m,context)
+        Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
+        Base.inferencebarrier(_geo_sync_native_context!)(m,context)
         return
     elseif (mm=match(r"^BoundingBox\s*\{(.*?)\}\s*;?\s*$",line)) !== nothing
         values=_geo_numeric_list_values("{"*mm.captures[1]*"}",context,
@@ -9290,8 +9290,8 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # `new GModel()` — a fresh empty model (empty name, no physical or
         # entity names, fresh GEO internals) becomes current; parser symbols
         # are left alone.
-        _geo_reset_model_geometry!(m)
-        _geo_reset_geometry_counters!(m,context)
+        Base.inferencebarrier(_geo_reset_model_geometry!)(m)
+        Base.inferencebarrier(_geo_reset_geometry_counters!)(m,context)
         empty!(m.physical_names);empty!(m.entity_names)
         empty!(context.raw_physicals)
         empty!(m.meshing.compounds);context.mesh=nothing
@@ -9300,7 +9300,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         context.mesh_node_owner=empty(context.mesh_node_owner)
         context.mesh_parts=empty(context.mesh_parts)
         context.mesh_geometry_parts=nothing
-        _geo_forget_mesh_products!(m,context;reset_tags=true)
+        Base.inferencebarrier(_geo_forget_mesh_products!)(m,context;reset_tags=true)
         m.name=""
         context.geo_changed=true
         if allocator_state!==nothing
@@ -9311,17 +9311,17 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         end
         return
     elseif (mm=match(r"^(?:Recursive\s+)?(?:Show|Hide)\b",line)) !== nothing
-        _geo_exec_visibility!(m,line,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_visibility!)(m,line,context,allocator_state)
         return
     elseif (mm=match(r"^(?:Recursive\s+)?Color\b",line)) !== nothing
-        _geo_exec_color!(m,line,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_color!)(m,line,context,allocator_state)
         return
     elseif (mm=match(Regex("^(RelocateMesh|ReorientMesh|RecombineMesh|" *
         "RenumberMeshNodes|RenumberMeshElements|CreateMeshEdges|" *
         "CreateMeshFaces|RefineMesh|TransformMesh|SetOrder|" *
         "PartitionMesh|CreateOverlaps|AdaptMesh|CreateTopology|" *
         "ClassifySurfaces|CreateGeometry)\\b"),line)) !== nothing
-        _geo_exec_mesh_statement!(m,line,context,allocator_state)
+        Base.inferencebarrier(_geo_exec_mesh_statement!)(m,line,context,allocator_state)
         return
     elseif (mm=match(r"^Mesh\s+(.*?)\s*;?\s*$",line)) !== nothing
         d=_geo_eval_numeric(mm.captures[1],context,"execute_geo: Mesh")
@@ -9331,44 +9331,44 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # physical view and any pending unknown-member warnings materialize.
         # Dimension zero skips element births, but GModel::mesh still runs
         # generation setup, renumbering and queued homology on living cells.
-        _geo_sync_physical_view_if_changed!(m,context)
+        Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
         if d==0
             context.native_element_lookup_receipt=nothing
             context.native_mesh_begin_callback===nothing || context.native_mesh_begin_callback()
             context.mesh,context.mesh_node_owner=
-                _geo_mesh_actual_higher(m,0,context,"execute_geo: Mesh")
+                Base.inferencebarrier(_geo_mesh_actual_higher)(m,0,context,"execute_geo: Mesh")
             return
         end
         context.mesh,context.mesh_node_owner=
-            _geo_mesh_model(m,Int(d),context)
+            Base.inferencebarrier(_geo_mesh_model)(m,Int(d),context)
         return
     elseif (mm=match(
             r"^(Save|Print)\s+View\s*\[\s*(.*?)\s*\]\s+(.*?)\s*;?\s*$",
             line))!==nothing
-        _geo_exec_save_view!(mm.captures[1],mm.captures[2],mm.captures[3],
+        Base.inferencebarrier(_geo_exec_save_view!)(mm.captures[1],mm.captures[2],mm.captures[3],
                              context)
         return
     elseif (mm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(.*?)\s*;?\s*$",line)) !== nothing &&
            mm.captures[1] in _GEO_COMMAND_WORDS
-        _geo_exec_command!(m,mm.captures[1],mm.captures[2],context,
+        Base.inferencebarrier(_geo_exec_command!)(m,mm.captures[1],mm.captures[2],context,
                            allocator_state)
         return
     elseif match(r"^Plugin\s*\(",line)!==nothing
-        _geo_exec_plugin!(m,line,context)
+        Base.inferencebarrier(_geo_exec_plugin!)(m,line,context)
         return
     elseif (mm=match(
             r"^Background\s+Mesh\s+View\s*\[\s*([^\]]*)\s*\]\s*;$",
             line))!==nothing
-        _geo_exec_background_mesh_view!(
+        Base.inferencebarrier(_geo_exec_background_mesh_view!)(
             mm.captures[1],context,allocator_state)
         return
     elseif (mm=match(
             r"^(Alias|AliasWithOptions)\s+View\s*\[\s*(.*?)\s*\]\s*;?\s*$",
             line))!==nothing
-        _geo_exec_alias_view!(mm.captures[1],mm.captures[2],context)
+        Base.inferencebarrier(_geo_exec_alias_view!)(mm.captures[1],mm.captures[2],context)
         return
     elseif (mm=match(r"^Combine\s+(.*?)\s*;?\s*$",line))!==nothing
-        _geo_exec_combine!(mm.captures[1],context)
+        Base.inferencebarrier(_geo_exec_combine!)(mm.captures[1],context)
         return
     elseif match(r"^SendToServer\b",line)!==nothing
         # Not a grammar verb in Gmsh 4.15.2 — upstream reports an unknown
@@ -9390,7 +9390,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # `GModel::addHomologyRequest`; requests run inside the next
         # `Mesh n` (and the implicit final generation), after the mesh
         # exists — the upstream `GModel::mesh` placement.
-        _geo_exec_homology_statement!(m,mm.captures[1],mm.captures[2],
+        Base.inferencebarrier(_geo_exec_homology_statement!)(m,mm.captures[1],mm.captures[2],
                                       context)
         return
     end
@@ -10031,7 +10031,7 @@ function _geo_sync_mesh_algorithms!(m::GeoModel,context::_GeoNumericContext)
 end
 
 function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
-    _geo_sync_mesh_algorithms!(m,context)
+    Base.inferencebarrier(_geo_sync_mesh_algorithms!)(m,context)
     m.meshing.flexible_transfinite=!iszero(something(
         _geo_option_number(context,"Mesh",0,"FlexibleTransfinite"),0.0))
     m.meshing.lc_factor=something(
@@ -10051,7 +10051,7 @@ function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
     m.meshing.recombine_3d_conformity=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"Recombine3DConformity"),0.0),
         "execute_geo: Mesh.Recombine3DConformity")
-    _geo_sync_native_surface_controls!(m,context)
+    Base.inferencebarrier(_geo_sync_native_surface_controls!)(m,context)
     m.meshing.lc_extend_from_boundary=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"MeshSizeExtendFromBoundary"),1.0),
         "execute_geo: Mesh.MeshSizeExtendFromBoundary")
@@ -10331,7 +10331,7 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
         (_,record) in Model._discrete_mesh_records_model(m))
     if dim>=2 || actual || high_order || records || (dim>=1 && only_empty) || Model._model_mesh_has_native_sources(m) || (dim>=2 &&
             context.mesh!==nothing && m.meshing.mesh_authority!==nothing)
-        return _geo_mesh_actual_higher(m,dim,context,caller)
+        return Base.inferencebarrier(_geo_mesh_actual_higher)(m,dim,context,caller)
     end
     original=m
     # First-order Curve emission and its identity completion are one detached
@@ -12685,21 +12685,21 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
         end
         # SetOrder/PartitionMesh/CreateOverlaps are dispatched before this —
         # reaching here means the FExpr form slipped past the mesh-op regex.
-        return _geo_exec_mesh_statement!(m,"$word $arg_src;",context,
+        return Base.inferencebarrier(_geo_exec_mesh_statement!)(m,"$word $arg_src;",context,
                                          allocator_state)
     end
     arg=_geo_eval_string(arg_src,context,caller)
     if word=="Merge" || word=="MergeWithBoundingBox"
         # `Merge`/`MergeWithBoundingBox` sync the internals (when changed) so
         # merged entity tags cannot clash — `Include` does not sync.
-        _geo_sync_physical_view_if_changed!(m,context)
-        _geo_exec_include!(m,arg,context,caller,allocator_state)
+        Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
+        Base.inferencebarrier(_geo_exec_include!)(m,arg,context,caller,allocator_state)
     elseif word=="Include"
-        _geo_exec_include!(m,arg,context,caller,allocator_state)
+        Base.inferencebarrier(_geo_exec_include!)(m,arg,context,caller,allocator_state)
     elseif word=="Save"
-        _geo_exec_save!(m,arg,context,caller)
+        Base.inferencebarrier(_geo_exec_save!)(m,arg,context,caller)
     elseif word=="Print"
-        _geo_exec_save!(m,arg,context,caller;kind="Print")
+        Base.inferencebarrier(_geo_exec_save!)(m,arg,context,caller;kind="Print")
     elseif word=="System" || word=="SystemCall"
         _geo_system_call(arg,caller)
     elseif word=="NonBlockingSystemCall"
