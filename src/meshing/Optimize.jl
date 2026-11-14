@@ -28,6 +28,7 @@ module Optimize
 using ..MeshTypes: Mesh, nnodes, ntets, node, tet_signed_volume, tet_dihedral_extrema,
                    tet_radius_edge, tet_volume, boundary_faces, boundary_edges, validate
 using ..Predicates: orient3
+using ..Elements: _barycentric_mean_exact
 
 export mesh_quality, smooth_laplacian, smooth_odt, smooth_optimize, remove_slivers, TetQuality
 
@@ -567,6 +568,10 @@ end
 # Laplacian smoothing of a triangle cache — the "Laplace2D"/"Relocate2D"
 # method roles. Boundary nodes and nodes outside the entity selection stay
 # fixed; moves are the isotropic neighbor average in all three coordinates.
+@noinline function _surface_neighbor_mean_exact(coords,list,axis)
+    return _barycentric_mean_exact((coords[axis,other] for other in list))
+end
+
 function _laplacian_smooth_tri_cache(mesh::Mesh,iterations::Int,
                                      movable)
     boundary=falses(nnodes(mesh))
@@ -593,9 +598,12 @@ function _laplacian_smooth_tri_cache(mesh::Mesh,iterations::Int,
             for other in list
                 sx+=coords[1,other];sy+=coords[2,other];sz+=coords[3,other]
             end
-            next[1,node]=sx/length(list)
-            next[2,node]=sy/length(list)
-            next[3,node]=sz/length(list)
+            next[1,node]=isfinite(sx) ? sx/length(list) :
+                _surface_neighbor_mean_exact(coords,list,1)
+            next[2,node]=isfinite(sy) ? sy/length(list) :
+                _surface_neighbor_mean_exact(coords,list,2)
+            next[3,node]=isfinite(sz) ? sz/length(list) :
+                _surface_neighbor_mean_exact(coords,list,3)
         end
         coords=next
     end
