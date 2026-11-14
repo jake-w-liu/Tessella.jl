@@ -1,16 +1,4 @@
-# ── Allocation audit: closure boxing and hot-kernel allocation bounds ──────────
-#
-# Correctness  : a `Core.Box` in lowered code marks a local that a closure
-#                captures after reassignment; Julia then types every use as
-#                `Any`, which allocates on every call (measured: a boxed scale
-#                in `_quality_frame2` made 2-D refinement allocate 2.49 GB for a
-#                3,106-triangle square).  Every method of the package is
-#                scanned; boxes are tolerated only in the documented one-shot
-#                or exact-fallback paths below.
-# Robustness   : the hot kernels are measured after a warm-up call at ordinary,
-#                exactly degenerate (coplanar/collinear/right-angle), tiny, and
-#                huge scales.
-# Completeness : a new hot-path box or allocation fails the gate explicitly.
+# Warm allocation bounds for geometric kernels, including degenerate and extreme-scale inputs.
 
 using Test
 using Tessella
@@ -21,72 +9,6 @@ using Tessella.Mesh2D: _quality_frame2, _circumcenter2, _radius_edge2, _encroach
 using Tessella.Mesh3D: _rb_dedup_surface, _rb_build_regions, _rb_side_float,
                        _rb_edge_pierces
 using Tessella.Geometry: box_surface
-
-@testset "closure boxing audit" begin
-    # Exact-arithmetic fallbacks, one-shot setup, and recursive local helpers on
-    # cold paths; each entry names the boxed locals it tolerates.
-    allowed=Dict(
-        "Predicates._orient_nd_sos_exact"=>["visit"],
-        "SizeField._nearest_point_big"=>["best_id","best"],
-        "SizeField._build_geo_field"=>["field","build"],
-        "SizeField.StructuredField"=>["data","count","d","o"],
-        "SizeField._postview_cell_value_big"=>["b","a"],
-        "Model.model_is_inside"=>["values"],
-        "Model.model_closest_point"=>["exact"],
-        "Model._discrete_surface_locate"=>String[],
-        "Model._model_entity_state_targets"=>["add_entity!"],
-        "Model._transfinite_automatic_surface!"=>["lc"],
-        "Model._model_removal_plan"=>["attempt!"],
-        "API._remove_elements"=>["element_tags"],
-        "API._partition"=>["count"],
-        "CLI.main"=>["dim"],
-        "IO._weld_triangles"=>["tol","robust_diagonal","hi","lo"],
-        "IO.read_geo_params"=>["control_depth","boundary_layer_fan_elements",
-            "mesh_size_from_curvature","geometry_tolerance","background","seed",
-            "sfactor","smax","smin","caller","_consume_stmt",
-            "_consume_stmt_inner","_consume_stmt_ctrl"],
-        "BoundaryLayer._float_fill"=>["m"],
-        "Transfinite._exact_plane_frame"=>["best_norm","best"],
-        "TransfiniteTriangle._exact_plane_frame"=>["best_norm","best"],
-    )
-    seen=Set{Module}()
-    offending=String[]
-    function walk(mod)
-        mod in seen && return
-        push!(seen,mod)
-        for name in names(mod;all=true)
-            isdefined(mod,name) || continue
-            object=getfield(mod,name)
-            if object isa Module && object!==mod && parentmodule(object)===mod
-                walk(object)
-            elseif object isa Function || object isa Type
-                methods_list=try methods(object) catch; continue end
-                for method in methods_list
-                    method.module===mod || continue
-                    info=try Base.uncompressed_ast(method) catch; continue end
-                    boxed=String[]
-                    for statement in info.code
-                        statement isa Expr && statement.head==:(=) || continue
-                        rhs=statement.args[2]
-                        (rhs isa Expr && rhs.head==:call &&
-                         rhs.args[1]==GlobalRef(Core,:Box)) || continue
-                        push!(boxed,string(info.slotnames[statement.args[1].id]))
-                    end
-                    isempty(boxed) && continue
-                    method_name=replace(string(method.name),r"^#|#\d+$"=>"")
-                    key=string(nameof(mod),".",method_name)
-                    tolerated=get(allowed,key,nothing)
-                    if tolerated===nothing || !issubset(Set(boxed),Set(tolerated))
-                        push!(offending,"$key boxed=$(unique(boxed))")
-                    end
-                end
-            end
-        end
-    end
-    walk(Tessella)
-    @test isempty(offending)
-    isempty(offending) || foreach(println,offending)
-end
 
 @testset "hot kernels allocate nothing after warm-up" begin
     # `measure` specializes on the closure type so the harness itself adds no

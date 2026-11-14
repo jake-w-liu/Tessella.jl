@@ -16,6 +16,7 @@ Base.JLOptions().code_coverage==0 && error(
         "core/mesh_quadrature_test.jl",
         "core/mesh_element_quality_test.jl",
         "core/transform_test.jl",
+        "core/allocation_audit_test.jl",
         "meshing/mesh1d_test.jl",
         "meshing/mesh2d_test.jl",
         "meshing/refine_test.jl",
@@ -26,6 +27,14 @@ Base.JLOptions().code_coverage==0 && error(
         "geometry/heal_test.jl",
         "fields/scalar_finite_interpolation_test.jl",
         "fields/metric_spectral_range_test.jl",
+        "fields/distance_triangle_translation_test.jl",
+        "fields/finite_difference_range_test.jl",
+        "fields/restrict_anisotropic_test.jl",
+        "fields/metric_spectrum_certificate_test.jl",
+        "fields/structured_extend_lonlat_range_test.jl",
+        "fields/axial_field_geometry_test.jl",
+        "fields/postview_translated_line_test.jl",
+        "fields/postview_compact_tolerance_test.jl",
         "interfaces/api_hybrid_winslow_allocation_test.jl",
     ))
         println("Coverage tests: ",path);flush(stdout)
