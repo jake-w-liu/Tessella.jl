@@ -10,7 +10,8 @@ operation. The [feature reference](docs/src/reference/index.md) describes suppor
 contexts and limitations; complete Gmsh parity is not guaranteed.
 
 [Documentation](https://jake-w-liu.github.io/Tessella.jl/dev/) ·
-[CI and coverage reports](https://github.com/jake-w-liu/Tessella.jl/actions/workflows/ci.yml)
+[CI and coverage reports](https://github.com/jake-w-liu/Tessella.jl/actions/workflows/ci.yml) ·
+[Gmsh benchmark and reproducible results](benchmark/README.md)
 
 ## Install
 
