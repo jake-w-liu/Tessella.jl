@@ -3,8 +3,7 @@
 
 Three-dimensional meshing. This module owns the 3-D Delaunay kernel, constrained
 tetrahedralization / **boundary recovery** (recovering a given closed surface
-triangulation as facets of the tet mesh), and sliver handling. It is exactly the
-layer where gmsh 4.13/4.15 fail on the enclosure coax junction.
+triangulation as facets of the tet mesh), and sliver handling.
 
 Foundation, mirroring the robust 2-D kernel:
 
@@ -689,9 +688,15 @@ end
 
 # ── driver + export ─────────────────────────────────────────────────────────────
 """
-    delaunay3d(xs, ys, zs; rng_seed=1) -> Triangulation3
+    delaunay3d(xs, ys, zs; rng_seed=1, perturb=true,
+               preserve_input_rows=false) -> Triangulation3
 
 3-D Delaunay tetrahedralization of the (deduplicated) points.
+By default, deterministic numerical jitter uses a scale of `1e-8` times the
+point-cloud bounding-box diagonal (or a unit scale if all points coincide) to
+reduce degeneracies. Use `perturb=false` to retain the coordinates; maximally
+cospherical inputs can then produce flat cells with this kernel. For such
+inputs, `ExactMesh3D.delaunay3d_exact` provides exact-coordinate construction.
 With `preserve_input_rows=true`, retain the original input rows and distinct
 vertex identities instead of merging coincident coordinates.
 """
@@ -726,12 +731,8 @@ function delaunay3d(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64
     return T
 end
 
-# Break exact coplanar/cospherical degeneracies with a deterministic, per-vertex
-# symbolic perturbation of magnitude ~1e-8·(bbox diagonal). This is the concrete
-# form of SoS: with the points in general position the exact predicates return
-# definite signs and the tetrahedralization has NO flat (zero-volume) tets. The
-# shift is far below any meshing tolerance (e.g. the enclosure's 1.2e-6 m), and
-# coincident points were already merged, so shared vertices stay shared.
+# Deterministic numerical jitter reduces coplanar/cospherical degeneracies.
+# It changes coordinates; the exact-coordinate path skips this step.
 function _perturb3!(x::Vector{Float64}, y::Vector{Float64}, z::Vector{Float64})
     n = length(x); n == 0 && return
     xmin,xmax = extrema(x); ymin,ymax = extrema(y); zmin,zmax = extrema(z)
