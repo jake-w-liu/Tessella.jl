@@ -38,6 +38,7 @@ include("functional/fixtures.jl")
         "meshing/ordered_matching_seeded_test.jl",
         "meshing/periodic_test.jl",
         "meshing/optimize_tri_centroid_range_test.jl",
+        "interfaces/api_hybrid_winslow_allocation_test.jl",
         "core/transform_axis_scale_test.jl",
         "core/fem_linear_solvers_test.jl",
         "meshing/highorder_elastic_fem_test.jl",

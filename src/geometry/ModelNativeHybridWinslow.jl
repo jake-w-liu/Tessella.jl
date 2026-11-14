@@ -49,7 +49,7 @@ function energy_gradient(point,patch,epsilon)
             column=ntuple(axis->2.0/power*columns[world][axis]-coefficient*cofactor[axis],3)
             R.dot(column,cell.normals[cell.variable])
         end
-        gradient=ntuple(axis->gradient[axis]+derivative[axis],3)
+        gradient=map(+,gradient,derivative)
     end
     return energy,gradient,minimum_det
 end
@@ -78,7 +78,9 @@ function line_search(point,patch,epsilon,direction,initial,first_step)
     slope<0.0 || return nothing
     previous=0.0;previous_energy=value;step=first_step
     for iteration in 1:40
-        trial=ntuple(axis->point[axis]+step*direction[axis],3)
+        trial=let step=step
+            ntuple(axis->point[axis]+step*direction[axis],3)
+        end
         result=energy_gradient(trial,patch,epsilon);candidate,derivative,_=result
         if !isfinite(candidate) || candidate>value+1.e-4*step*slope ||
                 (iteration>1 && candidate>=previous_energy)
@@ -105,18 +107,18 @@ function minimize(point,patch,epsilon)
         q=gradient;alphas=Float64[]
         for (step,change,inverse) in Iterators.reverse(history)
             alpha=inverse*R.dot(step,q);push!(alphas,alpha)
-            q=ntuple(axis->q[axis]-alpha*change[axis],3)
+            q=map((value,delta)->value-alpha*delta,q,change)
         end
         scale=isempty(history) ? 1.0 : R.dot(history[end][1],history[end][2])/
             R.dot(history[end][2],history[end][2])
-        direction=ntuple(axis->scale*q[axis],3)
+        direction=map(value->scale*value,q)
         for ((step,change,inverse),alpha) in zip(history,Iterators.reverse(alphas))
             beta=inverse*R.dot(change,direction)
-            direction=ntuple(axis->direction[axis]+step[axis]*(alpha-beta),3)
+            direction=map((value,delta)->value+delta*(alpha-beta),direction,step)
         end
-        direction=ntuple(axis->-direction[axis],3)
+        direction=map(-,direction)
         if !all(isfinite,direction) || R.dot(direction,gradient)>=0.0
-            empty!(history);direction=ntuple(axis->-gradient[axis],3)
+            empty!(history);direction=map(-,gradient)
         end
         initial_step=iteration==1 ? 1.0/magnitude : 1.0
         product=line_search(point,patch,epsilon,direction,current,initial_step)
