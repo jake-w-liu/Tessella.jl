@@ -1,3 +1,10 @@
+# SPDX-FileCopyrightText: 1997-2025 C. Geuzaine, J.-F. Remacle
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND GPL-2.0-or-later
+# Contains Gmsh 4.15.2 tag-query/cache adaptations (GModel mesh lookup paths).
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# Licenses apply to their respective portions; see LICENSES/README.md and gmsh-LICENSE.txt.
+
 # Tag lookup memo is separate from the authoritative mesh and spatial locator.
 # Native element lookup stores the owner integer at rebuild; vertex lookup
 # follows the current living vertex. Model slots survive detached plan commits.

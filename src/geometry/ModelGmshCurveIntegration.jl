@@ -1,3 +1,10 @@
+# SPDX-FileCopyrightText: 1997-2025 C. Geuzaine, J.-F. Remacle
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND GPL-2.0-or-later
+# Contains Gmsh 4.15.2 adaptations: mesh/meshGEdge.cpp; curve integration/smoothing.
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# Licenses apply to their respective portions; see LICENSES/README.md and gmsh-LICENSE.txt.
+
 # Built-in GEO Curve integration follows meshGEdge.cpp. The public standalone
 # Mesh1D kernel keeps its robust callable-curve arithmetic; this path preserves
 # the native derivative, primitive, smoothing and NUMP expression order.

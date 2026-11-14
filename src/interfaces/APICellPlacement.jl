@@ -1,3 +1,10 @@
+# SPDX-FileCopyrightText: 1997-2025 C. Geuzaine, J.-F. Remacle
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND GPL-2.0-or-later
+# Contains Gmsh 4.15.2 source adaptations: numeric/InnerVertexPlacement.cpp; boundary-to-interior placement.
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# Licenses apply to their respective portions; see LICENSES/README.md and gmsh-LICENSE.txt.
+
 # Native boundary-to-interior transfinite placement from InnerVertexPlacement.cpp.
 # Coefficients accumulate in source order, then physical sums visit ascending columns.
 function _native_inner_add!(row,indices,key,value)

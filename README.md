@@ -70,5 +70,7 @@ documentation. Maintainer: Jake Liu.
 
 ## License
 
-Tessella is available under the [MIT license](LICENSE). Third-party code retains
-its respective [license and provenance notices](LICENSES/).
+Tessella is distributed under [GPL-3.0-or-later](LICENSE) because it includes
+source adaptations from Gmsh, OCCT, and libstdc++. Independently authored
+Tessella material retains its MIT grant when used separately. See the
+[license and provenance inventory](LICENSES/README.md) for component terms.

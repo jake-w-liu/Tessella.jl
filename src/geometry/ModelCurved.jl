@@ -1,3 +1,12 @@
+# SPDX-FileCopyrightText: 1997-2025 C. Geuzaine, J.-F. Remacle
+# SPDX-FileCopyrightText: 1991-1999 Matra Datavision
+# SPDX-FileCopyrightText: 1999-2014 OPEN CASCADE SAS
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND GPL-2.0-or-later AND (LGPL-2.1-only WITH OCCT-exception-1.0)
+# Gmsh EndCurve/parameter-search and OCCT 7.9.3 geometric/classifier adaptations.
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# Licenses apply to their respective portions; see LICENSES/README.md.
+
 # ── Curved entity kernel ─────────────────────────────────────────────────────
 #
 # Gmsh built-in-kernel curved geometry. Arcs (`:circle`, `:ellipse`) carry an

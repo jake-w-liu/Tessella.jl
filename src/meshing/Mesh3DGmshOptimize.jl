@@ -1,3 +1,10 @@
+# SPDX-FileCopyrightText: 1997-2025 C. Geuzaine, J.-F. Remacle
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND GPL-2.0-or-later
+# Contains Gmsh 4.15.2 adaptations: mesh/meshGRegionLocalMeshMod.cpp; ring swap pattern order.
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# Licenses apply to their respective portions; see LICENSES/README.md and gmsh-LICENSE.txt.
+
 # Native tetrahedron quality optimization. Storage order and element births
 # belong to this operation; the caller retains its public node identities.
 

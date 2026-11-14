@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: 2007-2021 Free Software Foundation, Inc.
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND (GPL-3.0-or-later WITH GCC-exception-3.1)
+# Julia adaptation of GCC 11.3.0 libstdc++ hashtable policy/order and prime table.
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# The GCC exception is retained for its defined scope; it does not relicense this source as MIT.
+# See LICENSES/README.md, GPL-3.0-or-later.txt and GCC-exception-3.1.txt.
+
 # GNU11.3 libstdc++ _Prime_rehash_policy and unique-key hashtable list order.
 # Copyright (C) 2007-2021 Free Software Foundation, Inc.
 # Derived policy constants follow the GCC Runtime Library Exception.

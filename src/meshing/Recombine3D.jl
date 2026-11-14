@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND GPL-2.0-or-later
+# Contains HXT adaptations from Gmsh 4.15.2 contrib/hxt/Combine/src/hxt_quality.cpp.
+# Upstream authors: Amaury Johnen, Kilian Verhetsel, Jeanne Pellerin.
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# Independently implemented recombination remains MIT; adapted quality routines retain HXT terms.
+# See LICENSES/README.md and hxt-LICENSE.txt.
+
 """
     Recombine3D
 

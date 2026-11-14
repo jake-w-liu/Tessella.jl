@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: 2015-2016 Weierstrass Institute for Applied Analysis and Stochastics
+# SPDX-FileCopyrightText: 2026 Jake Liu
+# SPDX-License-Identifier: MIT AND GPL-2.0-or-later
+# Adapted topology tables and bounded flip routines from Gmsh 4.15.2 Tetgen/BR.
+# Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
+# Preserve the upstream agreement notice in LICENSES/TetgenBR-notice.txt.
+# Licenses apply to their respective portions; see LICENSES/README.md.
+
 module ModelNativeTetgenArena
 using ...Predicates: orient3
 
