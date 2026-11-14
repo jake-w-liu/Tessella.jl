@@ -102,3 +102,21 @@ prepared: a first installation's precompilation differs from startup with an
 existing cache. Other work
 on a shared host can distort measurements; repeat on an idle host before
 interpreting small timing differences or publishing speed ratios.
+
+Fresh-process captures on the same host used 64 points in 3D, identical hull
+constraints, and HXT for Gmsh. Times below are seconds; each row is one capture.
+They include driver setup and compilation through the returned mesh.
+
+| Implementation | Julia module cache | Through mesh | Package load | First mesh call |
+| --- | --- | ---: | ---: | ---: |
+| [Gmsh](results/apple_m3_julia_1_13_4_gmsh_cache_enabled.toml) | Enabled | 6.69 | <0.001 | 0.006 |
+| [Tessella, first capture](results/apple_m3_julia_1_13_4_tessella_cache_enabled_first.toml) | Enabled | 104.15 | 89.39 | 0.463 |
+| [Tessella, repeated import](results/apple_m3_julia_1_13_4_tessella_cache_enabled_repeat.toml) | Enabled | 13.57 | 0.246 | 0.488 |
+| [Gmsh](results/apple_m3_julia_1_13_4_gmsh_cache_disabled.toml) | Disabled | 8.06 | <0.001 | 0.003 |
+| [Tessella](results/apple_m3_julia_1_13_4_tessella_cache_disabled.toml) | Disabled | 111.92 | 92.46 | 0.524 |
+
+Cache validity was unspecified for the first cache-enabled capture. The repeated
+import followed a successful import of identical source. The disabled captures
+used `--compiled-modules=no`; all captures used `--compile=yes -O2` and one
+thread. Tessella's package loading and first-call compilation add startup cost
+beyond the warm meshing measurements above.
