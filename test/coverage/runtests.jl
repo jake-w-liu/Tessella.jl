@@ -36,6 +36,7 @@ Base.JLOptions().code_coverage==0 && error(
         "fields/postview_translated_line_test.jl",
         "fields/postview_compact_tolerance_test.jl",
         "interfaces/api_hybrid_winslow_allocation_test.jl",
+        "interfaces/io_test.jl",
     ))
         println("Coverage tests: ",path);flush(stdout)
         scope=Core.eval(Main,:(module $(Symbol("KernelCoverage",index)) end))

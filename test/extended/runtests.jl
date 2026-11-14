@@ -35,6 +35,7 @@ using Tessella
     include(joinpath(@__DIR__, "..", "core/transform_test.jl"))
     include(joinpath(@__DIR__, "..", "core/transform_axis_scale_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/io_test.jl"))
+    include(joinpath(@__DIR__, "..", "integration/gmsh_io_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/stream_cleanup_test.jl"))
     include(joinpath(@__DIR__, "..", "interfaces/cli_precision_test.jl"))
     include(joinpath(@__DIR__, "..", "core/elements_test.jl"))

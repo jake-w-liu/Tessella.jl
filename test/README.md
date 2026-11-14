@@ -8,7 +8,7 @@ Run ordinary package tests from the repository root:
 
 ```powershell
 julia +1.12 --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
-julia +1.13.3 --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
+julia +1.13 --project=. --startup-file=no --check-bounds=yes -e 'using Pkg; Pkg.test()'
 ```
 
 The runner selects minimal compilation automatically before loading Tessella.
@@ -28,10 +28,9 @@ julia --project=. --startup-file=no -O2 -e 'ENV["TESSELLA_TEST_COMPILER"]="optim
 CI collects coverage in a separate Julia 1.13 Linux job with normal compilation.
 The compiled suite exercises predicates, topology, coordinate queries, quality,
 transforms, 1-D/2-D/3-D meshing, refinement, periodicity, structured meshes, NURBS,
-healing, fields and MSH/STL I/O. It verifies executed function-body counters,
-attaches an LCOV report and records total and covered source-line counts. The
-report records lines exercised by this suite, rather than the separately run
-session API suite.
+healing, fields and MSH/STL I/O. It also checks warmed kernel allocations.
+The report includes executed function-body counters, LCOV data, and total and
+covered source-line counts for this suite. Session API tests run separately.
 Minimal compilation does not reliably emit function coverage counters.
 
 Run the same coverage suite locally:
@@ -39,6 +38,12 @@ Run the same coverage suite locally:
 ```sh
 julia --project=. --startup-file=no --compiled-modules=no --check-bounds=yes --code-coverage=user -O2 test/coverage/runtests.jl
 python3 test/coverage/verify.py
+```
+
+Kernel allocation checks require normal compilation. Run them separately with:
+
+```sh
+julia --project=. --startup-file=no --check-bounds=yes -O2 test/core/allocation_audit_test.jl
 ```
 
 The default covers predicates, fields, small 1D/2D/3D kernels, structured meshes,
@@ -53,6 +58,14 @@ benchmarks, and HFSS/external solver campaigns are opt-in:
 
 ```powershell
 julia --project=. --startup-file=no --check-bounds=yes test/extended/runtests.jl
+```
+
+Live Gmsh I/O comparisons require the reference version checked in
+[gmsh_io_test.jl](integration/gmsh_io_test.jl) on `PATH`. They are included in
+the extended suite and can be run directly:
+
+```sh
+julia --project=. --startup-file=no --check-bounds=yes test/integration/gmsh_io_test.jl
 ```
 
 The extended runner includes those cases and larger regression tests.

@@ -238,32 +238,6 @@ end
         @test f.physical_names[(3,4)] == "case"
     end
 
-    @testset "Gmsh v4 rewrite preserves nodes, tags, and CRC" begin
-        gmsh=Sys.which("gmsh")
-        @test gmsh!==nothing
-        if gmsh!==nothing
-            version=strip(read(`$gmsh --version`,String))
-            @test version=="4.15.2" || startswith(version,"4.15.2-")
-            m=_cube()
-            m.tet_tag[1]=Int32(5)
-            names=Dict((3,4)=>"case\tregion",(3,5)=>"insert")
-            source=joinpath(dir,"gmsh_rewrite_source.msh")
-            rewritten=joinpath(dir,"gmsh_rewrite_result.msh")
-            write_msh(source,m;version=4.1,physical_names=names)
-            output=IOBuffer()
-            process=run(pipeline(ignorestatus(
-                `$gmsh $source -0 -save -format msh41 -o $rewritten -v 5`);
-                stdout=output,stderr=output))
-            log=String(take!(output))
-            @test success(process)
-            @test !occursin("Error",log)
-            back=read_msh(rewritten)
-            @test mesh_crc(back.mesh).sha==mesh_crc(m).sha
-            @test back.physical_names==names
-            @test_throws ArgumentError read_msh(rewritten;max_blocks=1)
-        end
-    end
-
     @testset "cross-format v2 → v4 → v2 keeps CRC" begin
         m = _cube()
         p2 = joinpath(dir, "x_v2.msh"); p4 = joinpath(dir, "x_v4.msh"); p2b = joinpath(dir, "x_v2b.msh")
@@ -633,10 +607,14 @@ end
                 value,bucket_origin,maximum_bucket,inv(maximum_bucket))==expected
         end
         measure_bucket(f)=(f();@allocated f())
-        @test measure_bucket(()->Tessella.IO._stl_bucket_index(
-            left,origin,absolute_tol,inv(absolute_tol)))==0
-        @test measure_bucket(()->Tessella.IO._stl_bucket_index(
-            1.,0.,0.125,8.))==0
+        general_bucket_bytes=measure_bucket(()->Tessella.IO._stl_bucket_index(
+            left,origin,absolute_tol,inv(absolute_tol)))
+        dyadic_bucket_bytes=measure_bucket(()->Tessella.IO._stl_bucket_index(
+            1.,0.,0.125,8.))
+        if Base.JLOptions().compile_enabled!=3
+            @test general_bucket_bytes==0
+            @test dyadic_bucket_bytes==0
+        end
 
         # A subnormal tolerance has an infinite reciprocal and uses the existing
         # rational bucket mode. Its corrected patch has the same four-node topology.
@@ -1093,72 +1071,9 @@ end
                 "Field[1] = Distance; Field[1].PointsList = {1:1000000000};\n"
             range_error(huge_range)
             GC.gc()
-            @test (@allocated range_error(huge_range))<=100_000
-
-            gmsh=Sys.which("gmsh")
-            @test gmsh!==nothing
-            if gmsh!==nothing
-                gmsh_version=strip(read(`$gmsh --version`,String))
-                @test gmsh_version=="4.15.2" ||
-                      startswith(gmsh_version,"4.15.2-")
-                function gmsh_range_output(code)
-                    output=IOBuffer()
-                    devnull=Sys.iswindows() ? "NUL" : "/dev/null"
-                    command=ignorestatus(`$gmsh $devnull -parse_and_exit -string $code`)
-                    run(pipeline(command;stdout=output,stderr=output))
-                    return String(take!(output))
-                end
-                values=gmsh_range_output(raw"""
-                    a[] = {1:5}; b[] = {5:1:-2};
-                    c[] = {5:-2:1}; d[] = {5:-2};
-                    Printf("R %g %g %g %g %g %g %g %g %g",
-                           #a[], a[0], a[4], #b[], b[0], b[2], #c[], #d[], d[7]);
-                    """)
-                @test occursin("R 5 1 5 3 5 1 0 8 -2",values)
-                accepted=gmsh_range_output(raw"""
-                    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
-                    Point(3)={2,0,0,1}; Point(4)={3,0,0,1};
-                    Point(5)={4,0,0,1};
-                    Physical Point("ranged", 11)={1:5};
-                    Field[1]=Box; Field[2]=Box; Field[3]=Box;
-                    Field[4]=Box; Field[5]=Box; Field[6]=Min;
-                    Field[6].FieldsList={1:5};
-                    Field[7]=BoundaryLayer; Field[8]=BoundaryLayer;
-                    BoundaryLayer Field={7:8};
-                    """)
-                @test !occursin("Error",accepted)
-                wrapped_accepted=gmsh_range_output(raw"""
-                    Field[1]=BoundaryLayer;
-                    Field[1].PointsList=-{-1:-3};
-                    Field[1].SizesList=-{-0.1:-0.3:-0.1};
-                    Field[3]=Box; Background Field=(1+2)*{1:1};
-                    """)
-                @test !occursin("Error",wrapped_accepted)
-                modulo_values=gmsh_range_output(raw"""
-                    a[]={(5.5%2.2):(5.5%2.2)};
-                    Printf("MOD %g %g", #a[], a[0]);
-                    """)
-                @test occursin("MOD 1 1",modulo_values)
-                precedence_rejected=gmsh_range_output(
-                    "Field[1]=Box; Field[3]=Box; " *
-                    "Background Field=1+2*{1:1};")
-                @test occursin("syntax error",precedence_rejected)
-                cardinality_rejected=gmsh_range_output(
-                    "Field[1]=Box; Background Field=0.4*{3:4};")
-                @test occursin("Only 1 field",cardinality_rejected)
-                comment_rejected=gmsh_range_output(
-                    "Field[1]=BoundaryLayer; " *
-                    "Field[1].SizesList={1/* comment */2:12};")
-                @test occursin("syntax error",comment_rejected)
-                for source in (
-                    "Field[1]=BoundaryLayer; BoundaryLayer Field=-{};",
-                    "Field[1]=BoundaryLayer; BoundaryLayer Field=2*{};",
-                    "Field[1]=Distance; Field[1].PointsList=-{};",
-                    "Field[1]=BoundaryLayer; BoundaryLayer Field=;")
-                    @test occursin("syntax error",gmsh_range_output(source))
-                end
-                rejected=gmsh_range_output("a[] = {1:5:0};")
-                @test occursin("Wrong increment in '1:5:0'",rejected)
+            huge_range_bytes=@allocated range_error(huge_range)
+            if Base.JLOptions().compile_enabled!=3
+                @test huge_range_bytes<=100_000
             end
 
             allocation_path=joinpath(dir,"list_range_allocation.geo")
@@ -1171,8 +1086,10 @@ end
             end
             allocation_2k=range_allocation(2_000)
             allocation_4k=range_allocation(4_000)
-            @test allocation_2k<=1_000_000
-            @test allocation_4k<=1_800_000
+            if Base.JLOptions().compile_enabled!=3
+                @test allocation_2k<=1_000_000
+                @test allocation_4k<=1_800_000
+            end
             @test allocation_4k<=2.15*allocation_2k+75_000
         end
 
@@ -1332,23 +1249,15 @@ end
             @test params.physical_groups[(3,23)]=="first"
             @test params.random_seed==24
 
-            function allocator_error(source)
-                path=joinpath(dir,"dynamic_tag_allocator_error.geo")
-                write(path,source)
-                try
-                    read_geo_params(path)
-                    return nothing
-                catch err
-                    return err
-                end
-            end
-            for (source,message) in (
-                "newp = 2; Mesh.MeshSizeMin = 1;\n"=>"read-only",
-                "newp[] = {2}; Mesh.MeshSizeMin = 1;\n"=>"read-only",
+            for source in (
+                "newp = 2; Mesh.MeshSizeMin = 1;\n",
+                "newp[] = {2}; Mesh.MeshSizeMin = 1;\n",
             )
-                err=allocator_error(source)
-                @test err isa ArgumentError
-                @test occursin(message,sprint(showerror,err))
+                path=joinpath(dir,"dynamic_tag_allocator_error.geo")
+                write(path,source*"Mesh.MeshSizeMax = newp;\n")
+                params=read_geo_params(path)
+                @test any(e->occursin("read-only",e),params.scan_errors)
+                @test params.mesh_size_min==params.mesh_size_max==1.0
             end
             # `newp[0]` is a grammar error upstream (`syntax error ([)`) —
             # recorded, not thrown.
