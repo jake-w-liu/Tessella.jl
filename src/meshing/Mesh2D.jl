@@ -514,7 +514,7 @@ function insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false)
 end
 
 function _insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false,
-                        newtris::Union{Nothing,Vector{Int32}}=nothing)
+                        newtris::Union{Nothing,Vector{Int32}}=nothing,workspace=nothing)
     vid isa Bool && throw(ArgumentError("insert_point!: vertex index must not be Bool"))
     1 <= vid <= T.nreal ||
         throw(ArgumentError("insert_point!: vertex $vid is outside 1:$(T.nreal)"))
@@ -525,9 +525,9 @@ function _insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false,
     vid = Int32(vid)
     px, py = _pt(T, vid)
     t0 = locate(T, px, py, vid)
-    cavity, boundary = _delaunay_cavity(T, t0, vid, constrained)
+    cavity, boundary = _delaunay_cavity(T, t0, vid, constrained;workspace)
     for t in cavity; _killtri!(T, t); end
-    _retriangulate_cavity!(T, boundary, Int32(vid), newtris)
+    _retriangulate_cavity!(T, boundary, Int32(vid), newtris;workspace)
     return nothing
 end
 
@@ -537,11 +537,19 @@ end
 # where `boundary` lists the shell edges `(a, b, outside_neighbour)` — the
 # same structure upstream's `recurFindCavity` produces for `insertVertexB`.
 function _delaunay_cavity(T::Triangulation, t0, vid, constrained::Bool;
-                          circle_test=_in_circumcircle)
-    cavity = Int32[t0]
-    incav = Set{Int32}(); push!(incav, t0)
-    boundary = Tuple{Int32,Int32,Int32}[]     # (edge_a, edge_b, outside neighbour)
-    stack = Int32[t0]
+                          circle_test=_in_circumcircle,workspace=nothing)
+    if workspace===nothing
+        cavity=Int32[t0]
+        incav=Set{Int32}()
+        boundary=Tuple{Int32,Int32,Int32}[]
+        stack=Int32[t0]
+    else
+        cavity=empty!(workspace.cavity);push!(cavity,t0)
+        incav=empty!(workspace.incav)
+        boundary=empty!(workspace.boundary)
+        stack=empty!(workspace.stack);push!(stack,t0)
+    end
+    push!(incav,t0)
     @inbounds while !isempty(stack)
         t = pop!(stack)
         for k in 1:3
@@ -562,8 +570,8 @@ function _delaunay_cavity(T::Triangulation, t0, vid, constrained::Bool;
 end
 
 function _retriangulate_cavity!(T::Triangulation, boundary, vid::Int32,
-                                newtris::Union{Nothing,Vector{Int32}}=nothing)
-    spoke = Dict{Int32, Tuple{Int32,Int32}}()   # boundary vertex w → (new tri, slot)
+                                newtris::Union{Nothing,Vector{Int32}}=nothing;workspace=nothing)
+    spoke=workspace===nothing ? Dict{Int32,Tuple{Int32,Int32}}() : empty!(workspace.spoke)
     anytri = Int32(0)
     for (a, b, nb) in boundary
         t = _newtri!(T, a, b, vid)               # [a, b, vid]; a or b may be GHOST
@@ -1091,8 +1099,17 @@ function delaunay2d(xs::Vector{Float64}, ys::Vector{Float64}; rng_seed::Integer=
     placedset = Set{Int32}(placed)
     order = Int32[i for i in 1:T.nreal if !(Int32(i) in placedset)]
     _shuffle_det!(order, seed)
-    for v in order
-        _insert_point!(T, v)
+    if length(order)>1
+        workspace=(cavity=Int32[],incav=Set{Int32}(),
+            boundary=Tuple{Int32,Int32,Int32}[],stack=Int32[],
+            spoke=Dict{Int32,Tuple{Int32,Int32}}())
+        for v in order
+            _insert_point!(T,v;workspace)
+        end
+    else
+        for v in order
+            _insert_point!(T,v)
+        end
     end
     _assert_consistent(T,"delaunay2d result")
     return T

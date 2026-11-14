@@ -2,6 +2,7 @@
 
 using Test
 using Tessella
+using Random: MersenneTwister
 using Tessella.Predicates: orient2, orient3, diametral_sign
 using Tessella.MeshTypes: tet_dihedral_extrema, tet_radius_edge, tet_circumradius,
                           triangle_area, tet_signed_volume
@@ -52,4 +53,15 @@ using Tessella.Geometry: box_surface
     # capture reassigned (boxed) locals and measure the harness, not the kernel
     edge_p=Int32(length(Qx)-1);edge_q=Int32(length(Qx))
     @test measure(()->_rb_edge_pierces(region,Qx,Qy,Qz,edge_p,edge_q))==0
+end
+
+@testset "Planar triangulation temporary allocation budget" begin
+    if Base.JLOptions().compile_enabled!=3
+        rng=MersenneTwister(492145)
+        xs=rand(rng,1024);ys=rand(rng,1024)
+        mesh=Tessella.Mesh2D.triangulate(xs,ys)
+        @test Tessella.MeshTypes.nnodes(mesh)==1024 && Tessella.MeshTypes.ntris(mesh)>0
+        Tessella.Mesh2D.triangulate(xs,ys)
+        @test (@allocated Tessella.Mesh2D.triangulate(xs,ys))<=1_000_000
+    end
 end
