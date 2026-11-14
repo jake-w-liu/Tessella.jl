@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT AND GPL-2.0-or-later
 # Adapted topology tables and bounded flip routines from Gmsh 4.15.2 Tetgen/BR.
 # Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
-# Preserve the upstream agreement notice in LICENSES/TetgenBR-notice.txt.
+# Preserve the upstream agreement notice in LICENSES/NOTICES.md#tetgenbr.
 # Licenses apply to their respective portions; see LICENSES/README.md.
 
 module ModelNativeTetgenArena

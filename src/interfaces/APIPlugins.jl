@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT AND GPL-2.0-or-later
 # Contains Gmsh 4.15.2 adaptations: geo/MEdge.cpp; SortEdgeConsecutive and plugin compatibility routines.
 # Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
-# Licenses apply to their respective portions; see LICENSES/README.md and gmsh-LICENSE.txt.
+# Licenses apply to their respective portions; see LICENSES/README.md and NOTICES.md#gmsh.
 
 # ---- session plugins ----------------------------------------------------------
 #

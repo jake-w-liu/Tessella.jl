@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT AND GPL-2.0-or-later
 # Contains Gmsh 4.15.2 source adaptations: parser/Gmsh.l; lexer keyword table, and common/DefaultOptions.h option data.
 # Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
-# Licenses apply to their respective portions; see LICENSES/README.md and gmsh-LICENSE.txt.
+# Licenses apply to their respective portions; see LICENSES/README.md and NOTICES.md#gmsh.
 
 """
     IO

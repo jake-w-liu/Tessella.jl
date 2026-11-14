@@ -1,7 +1,7 @@
 # Integer primal-dual weighted Blossom matching, based on Edmonds/Galil.
 # Adapted from NetworkX 3.6.1 (NetworkX Developers, BSD-3-Clause).
-# Full license and pinned source provenance: LICENSES/networkx-BSD-3-Clause.txt
-# and LICENSES/weighted-matching-provenance.md. No foreign production backend.
+# Full license and pinned source provenance: LICENSES/NOTICES.md#networkx
+# and LICENSES/README.md#weighted-matching-provenance. No foreign production backend.
 module WeightedMatching
 
 export minimum_weight_matching

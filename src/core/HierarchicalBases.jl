@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT AND GPL-2.0-or-later
 # Contains Gmsh 4.15.2 adaptations: numeric/OrthogonalPoly.cpp and HierarchicalBasis*; polynomial/orientation routines.
 # Julia adaptation/changes: Tessella contributors, 2026; notices corrected 2026-11-14.
-# Licenses apply to their respective portions; see LICENSES/README.md and gmsh-LICENSE.txt.
+# Licenses apply to their respective portions; see LICENSES/README.md and NOTICES.md#gmsh.
 
 # Hierarchical H1 and H(curl) reference bases matching Gmsh 4.15.2's
 # HierarchicalBasisH1*/HierarchicalBasisHcurl* implementations, including the

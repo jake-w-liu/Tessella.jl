@@ -351,7 +351,7 @@ const _WIN_CLI_PRECISION_KEY = gensym(:TessellaCLIPrecision)
     # */
     # The trig range-reduction policy uses public-domain sinl_internal.S and
     # cosl_internal.S from that source. Full supporting notices are retained in
-    # LICENSES/windows_math.txt. Log uses a guarded, stack-local
+    # LICENSES/NOTICES.md#mingw-w64. Log uses a guarded, stack-local
     # FYL2X/FYL2XP1 chain with FLDLN2, preserving the represented x-1 near unity.
     @inline function _win_x87_exp(x::Float64)
         isnan(x) && return x
