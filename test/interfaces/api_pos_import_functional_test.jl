@@ -93,14 +93,24 @@ function exercise(directory)
         A.initialize()
         try
             A.option("General.Terminal",0)
-            A.merge(joinpath(@__DIR__,"../data/session_pos_import/all-linear-types.pos"))
-            tag=only(A.view.get_tags());types,data=A.view.get_list_data(tag)
-            @test types==split("SP VP TP SL VL TL ST VT TT SQ VQ TQ SS VS TS SH VH TH SI VI TI SY VY TY")
             coords=(reshape([0.,0,0],3,1),[0. 1;0 0;0 0],[0. 1 0;0 0 1;0 0 0],
                 [0. 1 1 0;0 0 1 1;0 0 0 0],[0. 1 0 0;0 0 1 0;0 0 0 1],
                 [0. 1 1 0 0 1 1 0;0 0 1 1 0 0 1 1;0 0 0 0 1 1 1 1],
                 [0. 1 0 0 1 0;0 0 1 0 0 1;0 0 0 1 1 1],
                 [0. 1 1 0 .5;0 0 1 1 .5;0 0 0 0 1])
+            input=joinpath(directory,"all-linear-types.pos")
+            open(input,"w") do stream
+                println(stream,"View \"linear families\" {")
+                for (family,corners) in zip(("P","L","T","Q","S","H","I","Y"),coords),
+                        (field,components) in zip(("S","V","T"),(1,3,9))
+                    println(stream,field,family,"(",join(vec(corners),','),"){",
+                        join(1:components*size(corners,2),','),"};")
+                end
+                println(stream,"};")
+            end
+            A.merge(input)
+            tag=only(A.view.get_tags());types,data=A.view.get_list_data(tag)
+            @test types==split("SP VP TP SL VL TL ST VT TT SQ VQ TQ SS VS TS SH VH TH SI VI TI SY VY TY")
             # The point's literal XYZ are all zero; the remaining corners are distinct source coordinates.
             flat=Vector{Float64}[]
             for (shape,corners) in enumerate(coords),components in (1,3,9)
