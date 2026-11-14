@@ -1,5 +1,5 @@
 # Opt-in exhaustive, native parity and production-size regressions.
-# Historical runner evidence is archived beside this file; see ../README.md.
+# See ../README.md for the supported test commands.
 using Test
 using Tessella
 
