@@ -2,10 +2,10 @@
     MeshSurface
 
 Surface meshing. Two
-routes, both reducing a surface to the exact 2-D machinery of [`Mesh2D`](@ref):
+routes, both reducing a surface to the exact 2-D machinery of [`Tessella.Mesh2D`](@ref):
 
 * **Planar faces** — a face bounded by coplanar loops (outer + holes). Boundary
-  loops are first discretized under the size field ([`Mesh1D`](@ref)), projected
+  loops are first discretized under the size field ([`Tessella.Mesh1D`](@ref)), projected
   to an in-plane orthonormal frame, meshed as a PSLG (constrained Delaunay +
   size-driven Ruppert refinement), then lifted back to 3-D. Isometric ⇒ the 2-D
   quality/size guarantees hold exactly on the surface.
@@ -473,7 +473,7 @@ end
 
 Mesh the lateral surface of a cylinder: axis start `center`, direction `axis`,
 `radius`, `height`. Built as a **graded structured** grid — axial levels are
-size-graded (via [`Mesh1D`](@ref) along the axis), the circumference is divided
+size-graded (via [`Tessella.Mesh1D`](@ref) along the axis), the circumference is divided
 uniformly into `nθ = max(6, ceil(2πR/h))` sectors, and each quad is split into
 two triangles with the seam wrapping (θ_{nθ} ≡ θ_0). Watertight by construction
 (no seam to weld), which a Ruppert mesh of the unrolled rectangle cannot

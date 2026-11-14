@@ -3,7 +3,7 @@
 
 Validated recombined four-sided transfinite quadrangle patches for an affine
 planar surface. Node placement and boundary certification are delegated to the
-public four-sided [`Transfinite.mesh_transfinite_patch`](@ref) contract; the
+public four-sided [`Tessella.Transfinite.mesh_transfinite_patch`](@ref) contract; the
 certified logical grid is emitted as linear Gmsh type-1 boundary lines and
 type-3 quadrangles in an [`Elements.MixedMesh`](@ref).
 

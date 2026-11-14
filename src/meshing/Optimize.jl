@@ -19,7 +19,7 @@ on finalized tetrahedral [`Mesh`](@ref)es:
 All three smoothers preserve total volume (boundary fixed) and mesh validity. The
 first two lift the *mean* dihedral (relaxation, not min-angle optimal);
 `smooth_optimize` targets the *min* angle directly. Slivers whose four vertices are
-topology-locked still need [`Mesh3D.optimize_flips!`](@ref) (2-3/3-2 flips) — the two
+topology-locked still need [`Tessella.Mesh3D.optimize_flips!`](@ref) (2-3/3-2 flips) — the two
 together are the sliver-removal toolkit; the `mesh_volume(optimize=true)` pipeline
 runs flips then optimization smoothing. These properties are verified in the tests.
 """
@@ -279,7 +279,7 @@ slivers. Only vertices whose star quality is below `sliver_deg` are moved (targe
 and a move is accepted only if it *improves* that objective while keeping every
 incident tet positively oriented — so validity and total volume are preserved and the
 per-star worst angle is monotone non-worsening. Complements the topological
-[`Mesh3D.optimize_flips!`](@ref) (flips change connectivity; this repositions nodes).
+[`Tessella.Mesh3D.optimize_flips!`](@ref) (flips change connectivity; this repositions nodes).
 Returns a new `Mesh`.
 """
 function smooth_optimize(m::Mesh; iters::Integer=8, sliver_deg::Real=10.0,
@@ -390,7 +390,7 @@ Validity, total volume, boundary, and region tags are all preserved. Returns the
 improved mesh and a report NamedTuple `(slivers_before, slivers_after,
 min_dihedral_before, min_dihedral_after)`. The topological complement (2-3/3-2
 flips that repair slivers connectivity-smoothing cannot reach) is
-[`Mesh3D.optimize_flips!`](@ref); `mesh_volume(optimize=true)` runs both.
+[`Tessella.Mesh3D.optimize_flips!`](@ref); `mesh_volume(optimize=true)` runs both.
 """
 function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
     nrounds = _opt_count(max_rounds,"remove_slivers","max_rounds")

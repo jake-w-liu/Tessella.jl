@@ -37,3 +37,9 @@ _probe_*.py
 # Local Grok session state (not distributed, never tracked)
 .grok/
 .grok
+
+# Documentation and coverage output
+/docs/build/
+/docs/src/api/
+/lcov.info
+/coverage/

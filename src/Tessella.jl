@@ -1,9 +1,8 @@
 """
     Tessella
 
-A Julia-native, robust, memory-efficient mesh generator. Goal: *design → mesh
-always works*. See `.github/development/README.md` for the current development
-contract and `.github/development/CHECKLIST.md` for the unfinished-work ledger.
+A Julia-native mesh generator with exact predicates, CAD modeling, size fields,
+and boundary recovery. Production meshing requires no external mesher.
 
 Pipeline (0-D → 3-D): exact predicates ([`Predicates`](@ref)) underpin a robust
 2-D Delaunay/CDT/refinement core ([`Mesh2D`](@ref)), 1-D edge + surface meshing
@@ -11,68 +10,66 @@ Pipeline (0-D → 3-D): exact predicates ([`Predicates`](@ref)) underpin a robus
 and a 3-D Delaunay kernel + volume filling ([`Mesh3D`](@ref)), with quality/
 optimization ([`Optimize`](@ref)), surface healing ([`Heal`](@ref)), and gmsh
 `.msh` / STL I/O ([`IO`](@ref)). The top-level [`mesh_volume`](@ref) ties them
-together with the *validated-or-explicit-blocker* contract.
+together and validates the resulting mesh or reports why generation failed.
 """
 module Tessella
 
-# ── Version / capability banner ────────────────────────────────────────────────
-# Highest implemented development stage. Stage 6 includes
-# high-order elements and solver-consumable I/O; stages 0–5 are prerequisites.
-const TESSELLA_STAGE = 6  # full Gmsh parity remains tracked in the checklist
+# ── Capability level ──────────────────────────────────────────────────────────
+const TESSELLA_STAGE = 6
 
 # ── Submodules ────────────────────────────────────────────────────────────────
 include("core/GmshLibm.jl")       # platform-libm shims for Gmsh/OCCT bit parity
-include("core/Predicates.jl")     # Stage 0: adaptive exact orient/incircle/insphere + SoS
-include("core/MeshTypes.jl")      # Stage 0: compact SoA mesh, topology, quality, CRC checksum
-include("core/MeshPointLocation.jl") # P5: robust finalized-simplex reference inversion and AABB lookup
-include("core/MeshElementQuality.jl") # P5: robust Gmsh-shaped linear-simplex quality queries
-include("core/Transform.jl")      # P3: validated affine mesh transformations
-include("core/Elements.jl")       # P2: general fixed-node Gmsh element/entity model + mixed MSH I/O
-include("core/MeshEntityTopology.jl") # P5: deterministic global edge and face catalogs
-include("core/MeshQuadrature.jl") # P5: bounded Gmsh-shaped reference quadrature
-include("core/MeshReferenceGeometry.jl") # P5: robust Gmsh-shaped linear-simplex Jacobians
+include("core/Predicates.jl")     # adaptive exact orient/incircle/insphere + SoS
+include("core/MeshTypes.jl")      # compact SoA mesh, topology, quality, CRC checksum
+include("core/MeshPointLocation.jl") # robust finalized-simplex reference inversion and AABB lookup
+include("core/MeshElementQuality.jl") # robust Gmsh-shaped linear-simplex quality queries
+include("core/Transform.jl")      # validated affine mesh transformations
+include("core/Elements.jl")       # general fixed-node Gmsh element/entity model + mixed MSH I/O
+include("core/MeshEntityTopology.jl") # deterministic global edge and face catalogs
+include("core/MeshQuadrature.jl") # bounded Gmsh-shaped reference quadrature
+include("core/MeshReferenceGeometry.jl") # robust Gmsh-shaped linear-simplex Jacobians
 include("core/FEMLinearSolvers.jl") # shared sparse native FEM solver
-include("core/MeshFunctionSpaces.jl") # P5: arbitrary-order nodal and order-one H1/simplex-H(curl) bases
+include("core/MeshFunctionSpaces.jl") # arbitrary-order nodal and order-one H1/simplex-H(curl) bases
 include("meshing/WeightedMatching.jl") # checked BSD general minimum-cost matching
 include("meshing/OrderedMatching.jl") # directed ordered perfect-matching adapter
-include("meshing/Recombine.jl")   # P4: deterministic triangle-to-quad surface recombination
-include("meshing/Recombine3D.jl") # P4: tet-to-hex volume recombination + trihedra
-include("meshing/Refine.jl")      # P4: deterministic one-level uniform simplex refinement
-include("structured/StructuredNumerics.jl") # P4: shared affine-grid numerical certificates
-include("structured/Transfinite.jl") # P4: validated four-sided planar transfinite patches
-include("structured/TransfiniteCurve.jl") # P4: Gmsh straight-curve transfinite laws
-include("structured/TransfiniteTriangle.jl") # P4: three-sided triangle/quad patches
-include("structured/TransfiniteQuad.jl") # P4: recombined four-sided quadrangle patches
-include("structured/StructuredRecombine.jl") # P4: shared recombined-volume emission/audit
-include("structured/TransfiniteVolume.jl") # P4: affine six-face transfinite volumes
-include("structured/TransfinitePrism.jl") # P4: affine five-face transfinite prisms
-include("structured/StructuredQuadTri.jl") # P4: transfinite boundary-diagonal transitions
-include("structured/TransfiniteHex.jl") # P4: affine six-face recombined hexahedra
-include("meshing/ExactMesh3D.jl") # Stage 3: exact-coordinate (Rational{BigInt}) 3-D Delaunay
-include("interfaces/IO.jl")       # Stage 0: .msh v2/v4 read/write, STL, .geo scan
-include("meshing/Mesh2D.jl")      # Stage 1: 2-D Delaunay + CDT + Ruppert refinement
-include("fields/SizeField.jl")    # Stage 2/4: size fields
-include("meshing/Mesh1D.jl")      # Stage 2: graded 1-D edge meshing
+include("meshing/Recombine.jl")   # deterministic triangle-to-quad surface recombination
+include("meshing/Recombine3D.jl") # tet-to-hex volume recombination + trihedra
+include("meshing/Refine.jl")      # deterministic one-level uniform simplex refinement
+include("structured/StructuredNumerics.jl") # shared affine-grid numerical certificates
+include("structured/Transfinite.jl") # validated four-sided planar transfinite patches
+include("structured/TransfiniteCurve.jl") # Gmsh straight-curve transfinite laws
+include("structured/TransfiniteTriangle.jl") # three-sided triangle/quad patches
+include("structured/TransfiniteQuad.jl") # recombined four-sided quadrangle patches
+include("structured/StructuredRecombine.jl") # shared recombined-volume emission/audit
+include("structured/TransfiniteVolume.jl") # affine six-face transfinite volumes
+include("structured/TransfinitePrism.jl") # affine five-face transfinite prisms
+include("structured/StructuredQuadTri.jl") # transfinite boundary-diagonal transitions
+include("structured/TransfiniteHex.jl") # affine six-face recombined hexahedra
+include("meshing/ExactMesh3D.jl") # exact-coordinate (Rational{BigInt}) 3-D Delaunay
+include("interfaces/IO.jl")       # .msh v2/v4 read/write, STL, .geo scan
+include("meshing/Mesh2D.jl")      # 2-D Delaunay + CDT + Ruppert refinement
+include("fields/SizeField.jl")    # size fields
+include("meshing/Mesh1D.jl")      # graded 1-D edge meshing
 include("meshing/PipelineSupport.jl") # top-level pipeline input/resource certificates
-include("meshing/MeshSurface.jl") # Stage 2: planar / cylinder / parametric surface meshing
-include("meshing/Mesh3D.jl")      # Stage 3: 3-D Delaunay + volume filling (+ multi-region)
-include("meshing/RecoverCDT.jl")  # Stage 3: general conforming-Delaunay boundary recovery (exact)
-include("meshing/Optimize.jl")    # Stage 4: tet quality report + Laplacian smoothing
-include("geometry/Heal.jl")       # Stage 5: surface-defect detection ("heal, don't fail")
-include("geometry/Geometry.jl")   # Stage 5: native constructive primitive surfaces
-include("geometry/CAD.jl")        # Stage 5: native analytical geometry (surfaces + exact imprints), no OCC
-include("geometry/NURBS.jl")      # P3: native B-spline/NURBS evaluation
-include("geometry/BRep.jl")       # P3: ISO-10303-21 STEP / IGES classified-solid and NURBS import
-include("meshing/HighOrder.jl")   # Stage 6: quadratic (P2) tet generation + type-11 I/O
-include("meshing/Periodic.jl")    # P4: periodic identification
-include("geometry/Model.jl")      # P2: tagged geometry/entity kernel
-include("geometry/GeoExec.jl")    # P3: bounded .geo execution
-include("meshing/BoundaryLayer.jl") # P4: prismatic and 2-D quad/fan boundary-layer extrusion
-include("interfaces/Post.jl")     # P5: views and plugins
-include("interfaces/GeoUnrolled.jl") # P5: .geo_unrolled (-0) serialization
-include("interfaces/API.jl")      # P5: model/mesh/option façade
-include("interfaces/CLI.jl")      # P5: command-line entry
-include("interfaces/GUI.jl")      # P5: headless GUI state machine
+include("meshing/MeshSurface.jl") # planar / cylinder / parametric surface meshing
+include("meshing/Mesh3D.jl")      # 3-D Delaunay + volume filling (+ multi-region)
+include("meshing/RecoverCDT.jl")  # general conforming-Delaunay boundary recovery (exact)
+include("meshing/Optimize.jl")    # tet quality report + Laplacian smoothing
+include("geometry/Heal.jl")       # surface-defect detection ("heal, don't fail")
+include("geometry/Geometry.jl")   # native constructive primitive surfaces
+include("geometry/CAD.jl")        # native analytical geometry (surfaces + exact imprints), no OCC
+include("geometry/NURBS.jl")      # native B-spline/NURBS evaluation
+include("geometry/BRep.jl")       # ISO-10303-21 STEP / IGES classified-solid and NURBS import
+include("meshing/HighOrder.jl")   # quadratic (P2) tet generation + type-11 I/O
+include("meshing/Periodic.jl")    # periodic identification
+include("geometry/Model.jl")      # tagged geometry/entity kernel
+include("geometry/GeoExec.jl")    # bounded .geo execution
+include("meshing/BoundaryLayer.jl") # prismatic and 2-D quad/fan boundary-layer extrusion
+include("interfaces/Post.jl")     # views and plugins
+include("interfaces/GeoUnrolled.jl") # .geo_unrolled (-0) serialization
+include("interfaces/API.jl")      # model/mesh/option façade
+include("interfaces/CLI.jl")      # command-line entry
+include("interfaces/GUI.jl")      # headless GUI state machine
 
 using .MeshTypes: Mesh, validate, mesh_crc, tet_signed_volume, boundary_faces,
                   _throw_simplex_validation
@@ -223,7 +220,7 @@ export P2Mesh, P2SegMesh, P2TriMesh, p2_segmesh, p2_tetmesh, p2_trimesh,
 """
     stage() -> Int
 
-Current implemented development stage; this does not certify full Gmsh parity.
+Capability level supported by this build.
 """
 stage() = TESSELLA_STAGE
 
@@ -784,7 +781,7 @@ end
 Robust volume mesh of the closed triangulated `surface`, with the "always-valid or
 explicit blocker" contract: the surface is first screened by [`is_meshable`](@ref)
 (unless `check=false`); a defect raises an `ArgumentError` carrying the precise
-[`Heal.SurfaceReport`](@ref) — never a silent bad mesh. Otherwise an initial
+[`Tessella.Heal.SurfaceReport`](@ref) — never a silent bad mesh. Otherwise an initial
 [`tetrahedralize`](@ref) fill must pass the exact PLC-boundary conformity gate; a
 non-conforming convex-hull cap falls through [`recover_boundary`](@ref) and then
 [`recover_boundary_cdt`](@ref). If `smooth`, the conforming fill is Laplacian-smoothed

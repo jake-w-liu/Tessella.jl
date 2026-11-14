@@ -1484,7 +1484,7 @@ function _remove_physical_groups(dim_tags=())
     end
 end
 
-"""Gmsh-style geometry-model, topology, and Physical-group operations for the active [`API`](@ref) session."""
+"""Gmsh-style geometry-model, topology, and Physical-group operations for the active [`Tessella.API`](@ref) session."""
 module model
 import ...Model
 using ..API: _with_model, add_point!, add_line!, add_curve_loop!, add_plane_surface!

@@ -2691,7 +2691,7 @@ Non-positive scalar results become `GMSH_MAX_SIZE` when `crop_negative=true`.
 Element records built through `PostViewField(records)` may additionally carry
 a `.scheme` (`Post.PosScheme`-compatible) custom-interpolation basis — the
 `SL2`/`INTERPOLATION_SCHEME` high-order `.pos` extension. Scheme elements are
-stored as [`_PVSchemeCell`](@ref)s: the value basis evaluates
+stored as `_PVSchemeCell`s: the value basis evaluates
 `Σₜ coefval[i,t]·Mₜ` and an optional `coefgeo`/`expgeo` pair curves the
 reference map, inverted per query by Newton iteration. Mixed component counts
 and non-planar first-order quadrangles are still rejected.

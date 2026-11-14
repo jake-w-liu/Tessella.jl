@@ -9,7 +9,7 @@ meet — e.g. a cylinder bore piercing a planar wall is an exact circle, not a f
 
 This is the analytical geometry model gmsh gets from OpenCASCADE, built natively: the mesh
 nodes lie on the exact surfaces (to round-off), boolean interface curves are exact, and
-high-order (P2) elements curve onto the true surface ([`HighOrder.curve_to_cylinder!`](@ref)).
+high-order (P2) elements curve onto the true surface ([`Tessella.HighOrder.curve_to_cylinder!`](@ref)).
 The volume mesh, as always, is a piecewise approximation that converges to the exact model.
 """
 module CAD

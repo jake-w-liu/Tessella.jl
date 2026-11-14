@@ -14,7 +14,7 @@ planar-polyline extrusion to type-3 quads with optional convex-corner fans
 (type-2 triangles in the first layer, type-3 quads in subsequent layers),
 and filled extrusion where the remaining core after a layer extrusion is
 tetrahedralized behind a certified conforming prism/tetrahedron interface.
-This is the element-topology counterpart of [`BoundaryLayerField`](@ref).
+This is the element-topology counterpart of [`Tessella.SizeField.BoundaryLayerField`](@ref).
 """
 module BoundaryLayer
 

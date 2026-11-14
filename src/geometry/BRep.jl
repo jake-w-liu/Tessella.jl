@@ -351,7 +351,7 @@ classified `MixedMesh`, retaining one discrete closed-shell Surface and Region
 per source solid in source-ID order. Strictly disjoint bounding boxes certify
 separation; touching/overlapping boxes are an explicit unsupported context.
 Explicit rigid mapped occurrences through one shape-definition root are supported;
-see `.github/reference/step_mapped_occurrences.md` for placement and assembly restrictions.
+see `docs/src/reference/step_mapped_occurrences.md` for placement and assembly restrictions.
 Nested `NEXT_ASSEMBLY_USAGE_OCCURRENCE` product graphs are expanded along every
 root-to-leaf path of an acyclic product-definition forest; each edge binds its
 actual parent/child representations, frames and declared unit contexts, physical

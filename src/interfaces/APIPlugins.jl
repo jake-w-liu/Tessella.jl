@@ -126,8 +126,8 @@
 # Session views carry no per-element visibility flags, so the upstream `Visible`
 # options are accepted and stored but currently never hide an element.
 # `Skin FromMesh` publishes discrete boundary entities while retaining source
-# node ownership. `Remove`/`Warp` currently reject model-based views;
-# their remaining successful native model-data contexts require qualification. CutSphere and Isosurface register `RecurLevel`/
+# node ownership. `Remove` rejects model-based views.
+# CutSphere and Isosurface register `RecurLevel`/
 # `TargetError` like upstream;
 # they steer the adaptive subdivision of *curved* elements, which our linear
 # record catalog never produces, so they are stored without effect (the

@@ -5586,7 +5586,7 @@ end
     tetrahedralize_conforming_exact(surfaces; rng_seed=1) -> Mesh
 
 Like [`tetrahedralize_conforming`](@ref) but tetrahedralizes the shared region-vertex
-set with the **exact-coordinate** Delaunay kernel ([`ExactMesh3D.delaunay3d_exact`](@ref))
+set with the **exact-coordinate** Delaunay kernel ([`Tessella.ExactMesh3D.delaunay3d_exact`](@ref))
 instead of the Float64 `perturb=false` kernel. The exact kernel breaks the cospherical/
 coplanar degeneracies *deterministically and validly* (no jitter, no degenerate tets),
 so it **conformingly meshes multi-region assemblies the Float64 path cannot** — e.g. a

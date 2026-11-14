@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -19,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         julia: ['1.12', '1.13']
     steps:
       - uses: actions/checkout@v4
@@ -31,4 +32,40 @@ jobs:
         shell: julia --project=. --startup-file=no --check-bounds=yes {0}
         run: |
           using Pkg
-          Pkg.test()
+          Pkg.test(; coverage="user")
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-julia-${{ matrix.julia }}
+          path: lcov.info
+          if-no-files-found: error
+      - name: Record coverage
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          lines = Path("lcov.info").read_text().splitlines()
+          found = sum(int(line[3:]) for line in lines if line.startswith("LF:"))
+          hit = sum(int(line[3:]) for line in lines if line.startswith("LH:"))
+          if found == 0:
+              raise RuntimeError("Coverage contains no instrumented source lines")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"Source coverage: {hit}/{found} lines ({100 * hit / found:.2f}%). Full LCOV report is attached to this run.\n")
+
+  docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.13'
+      - uses: julia-actions/cache@v2
+      - name: Install documentation dependencies
+        run: julia --project=docs -e 'using Pkg; Pkg.instantiate()'
+      - name: Build and publish documentation
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
+        run: julia --project=docs docs/make.jl

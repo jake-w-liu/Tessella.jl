@@ -2,8 +2,8 @@
     Geometry
 
 Native constructive primitives. Each builder returns a **closed, manifold, outward-oriented** triangle
-[`Mesh`](@ref) — a boundary surface ready for [`Mesh3D.tetrahedralize`](@ref) /
-[`mesh_volume`](@ref). All are verified `Heal.is_meshable` and, when filled, to
+[`Mesh`](@ref) — a boundary surface ready for [`Tessella.Mesh3D.tetrahedralize`](@ref) /
+[`Tessella.mesh_volume`](@ref). All are verified `Heal.is_meshable` and, when filled, to
 reproduce the exact analytic volume.
 
 These are the primitives the ASCENT `solid_model` emits (boxes, cylinders, cones,
@@ -199,7 +199,7 @@ The boundary has **two** components: the outer box surface (12 outward triangles
 the [`box_surface`](@ref) pattern) and the inner cavity surface (the same pattern
 with **reversed** triangle winding, so its normals face the cavity interior — i.e.
 point out of the solid shell). Together they form a closed, manifold, 2-component
-surface with zero open edges, ready for [`Mesh3D.tetrahedralize`](@ref) — which
+surface with zero open edges, ready for [`Tessella.Mesh3D.tetrahedralize`](@ref) — which
 fills the shell and reports the exact volume `outer − inner`.
 """
 function box_shell_surface(ox0,ox1,oy0,oy1,oz0,oz1,

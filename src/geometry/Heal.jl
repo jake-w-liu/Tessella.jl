@@ -18,6 +18,13 @@ using ..MeshTypes: Mesh, nnodes, ntris, ntets, node, triangle_area,
 
 export SurfaceReport, surface_diagnostics, is_meshable
 
+"""
+    SurfaceReport
+
+Surface topology and defect counts returned by [`surface_diagnostics`](@ref).
+Includes closure, manifoldness, orientation, coincident-vertex counts,
+minimum edge length, and diagnostic messages.
+"""
 struct SurfaceReport
     closed::Bool                    # no open (boundary) edges
     manifold::Bool                  # every edge shared by ≤ 2 triangles

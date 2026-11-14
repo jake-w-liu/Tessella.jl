@@ -1651,7 +1651,7 @@ const _OCC_IGES_PRIMITIVE_ROOTS=(150,156,158,160)
 
 """
 Import an IGES file's topology into the OCC kernel — the `.igs`/`.iges`
-counterpart of [`_model_occ_import_shapes`](@ref) STEP import. MSBO
+counterpart of `_model_occ_import_shapes` STEP import. MSBO
 (186) solids bind as volumes, bounded faces (143/144/114/510) as
 surfaces, bare supported surfaces as natural-domain faces, unreferenced
 curves/points as edges/points, and CSG primitives (150/156/158/160) as

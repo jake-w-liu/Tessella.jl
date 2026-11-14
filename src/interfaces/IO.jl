@@ -17708,6 +17708,13 @@ end
 # These IO helpers expose envelope metadata and section counts. API.open
 # and API.merge use the native Model BREP reader for CAD materialization.
 
+"""
+    BrepFile
+
+CASCADE BREP header and geometry/topology section counts returned by
+[`read_brep`](@ref). `tshapes` counts vertices, edges, wires, faces, shells,
+solids, compsolids, and compounds.
+"""
 struct BrepFile
     header::String                    # e.g. "CASCADE Topology V1, (c) Matra-Datavision"
     locations::Int
