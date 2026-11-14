@@ -32,14 +32,29 @@ jobs:
         shell: julia --project=. --startup-file=no --check-bounds=yes {0}
         run: |
           using Pkg
-          Pkg.test(; coverage="user")
+          Pkg.test()
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.13'
+      - uses: julia-actions/cache@v2
+      - name: Run compiled native kernel coverage
+        run: julia --project=. --startup-file=no --compiled-modules=no --check-bounds=yes --code-coverage=user -O2 test/coverage/runtests.jl
+      - name: Verify executed function coverage
+        run: python test/coverage/verify.py
       - uses: julia-actions/julia-processcoverage@v1
+        with:
+          directories: src
       - uses: actions/upload-artifact@v4
         with:
-          name: coverage-${{ matrix.os }}-julia-${{ matrix.julia }}
+          name: coverage-native-kernels-julia-1.13
           path: lcov.info
           if-no-files-found: error
-      - name: Record coverage
+      - name: Record compiled kernel coverage
         shell: python
         run: |
           import os
@@ -47,10 +62,10 @@ jobs:
           lines = Path("lcov.info").read_text().splitlines()
           found = sum(int(line[3:]) for line in lines if line.startswith("LF:"))
           hit = sum(int(line[3:]) for line in lines if line.startswith("LH:"))
-          if found == 0:
-              raise RuntimeError("Coverage contains no instrumented source lines")
+          if found == 0 or hit == 0:
+              raise RuntimeError("Coverage contains no executed source lines")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write(f"Source coverage: {hit}/{found} lines ({100 * hit / found:.2f}%). Full LCOV report is attached to this run.\n")
+              summary.write(f"Compiled native kernel suite: {hit}/{found} source lines ({100 * hit / found:.2f}%). Full LCOV report is attached. Functional tests on three operating systems and two Julia versions run separately without coverage instrumentation.\n")
 
   docs:
     runs-on: ubuntu-latest
