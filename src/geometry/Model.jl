@@ -2287,7 +2287,7 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         haskey(m.discrete,(3,requested))) && throw(ArgumentError(
             "$caller: Volume[$requested] already exists"))
     # operand snapshots are operation-time — take them before any mutation
-    meshes=[_volume_surface(m,t,caller) for t in tags]
+    meshes=Mesh[_volume_surface(m,t,caller) for t in tags]
     kept,touched=_brep_collect_faces_n(m,op,tags,nobj,caller)
     if isempty(kept)
         # empty result — OCC binds nothing; operands still get removed per

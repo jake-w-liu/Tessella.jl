@@ -5687,7 +5687,11 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
     N=length(tags)
     N<=62 || throw(ArgumentError(
         "$caller: at most 62 Boolean operands per operation"))
-    solids=[_brep_extract(m,t,caller) for t in tags]
+    # Collect actual values without inferring every CAD evaluator for a generator's element type.
+    solids=isempty(tags) ? NamedTuple[] : [_brep_extract(m,first(tags),caller)]
+    for t in Iterators.drop(tags,1)
+        push!(solids,_brep_extract(m,t,caller))
+    end
     coinc=NTuple{4,Int}[]
     sections=NamedTuple[]
     touched=falses(N)

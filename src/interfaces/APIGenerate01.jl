@@ -1017,7 +1017,7 @@ function _dim01_native_plane_support!(frames,m,assembly,cell,primary,slot,owner,
     elseif family===:qua
         row=only(_native_inner_rows(:qua,2))
         boundary=cell.nodes
-        uv=[_dim01_native_plane_surface_face_uv_cached!(frames,m,assembly,node,owner[2]) for node in boundary]
+        uv=Union{Nothing,Vector{Float64}}[_dim01_native_plane_surface_face_uv_cached!(frames,m,assembly,node,owner[2]) for node in boundary]
         if all(value->value!==nothing,uv)
             parameter=zeros(Float64,2)
             for (column,weight) in row
