@@ -5744,11 +5744,17 @@ function _model_surface_projection(
     # (`_model_occ_snap_coord`), but evaluated boundary samples keep their
     # record arithmetic — the same rim lands ~ulp off the snapped vertex,
     # and the exact orient3 certificate compares unlike quantities.
-    # Running every coordinate through the same canonicalization makes
-    # the predicate decide geometry, not evaluation dust; genuinely
-    # non-planar boundaries still fail at any meaningful offset.
+    # Running varying components through the same canonicalization makes
+    # the predicate decide geometry, not evaluation dust; non-planar
+    # boundaries still fail at any meaningful offset. Keep exactly constant
+    # components fixed: rounding their common value can translate a plane
+    # at large coordinate offsets.
+    source_coordinates=coordinates
+    constant_axes=ntuple(axis->all(point->point[axis]==source_coordinates[1][axis],
+                                  source_coordinates),3)
     coordinates=NTuple{3,Float64}[
-        _model_occ_snap_coord.(c) for c in coordinates]
+        ntuple(axis->constant_axes[axis] ? c[axis] : _model_occ_snap_coord(c[axis]),3)
+        for c in source_coordinates]
     anchor=coordinates[1]
     second_index=findfirst(point->point!=anchor,@view coordinates[2:end])
     second_index===nothing && throw(ArgumentError(
