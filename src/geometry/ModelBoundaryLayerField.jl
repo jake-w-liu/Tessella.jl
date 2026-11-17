@@ -10,10 +10,8 @@
 # Bounded scope, matching the upstream option set the field record carries:
 # - Plane surfaces (and `allow_ruled` projections) with straight *or* curved
 #   wall curves — the strip is built in the face's planar coordinates, so a
-#   curved wall's inward-normal columns work exactly like upstream's
-#   `parFromPoint` construction (verified on circle walls: oracle ring
-#   radii match the geometric schedule). Genuinely non-planar parametric
-#   (u,v) column construction stays a loud rejection.
+#   curved wall's inward-normal columns follow upstream's `parFromPoint`
+#   construction. Non-planar parametric (u,v) column construction is unsupported.
 # - `Size`/`Ratio`/`Thickness`/`Quads`/`FanPointsList`/`ExcludedSurfacesList`
 #   and the `BetaLaw`/`NbLayers`/`Beta` schedule apply. `IntersectMetrics`
 #   and `AnisoMax` are metric-operator options that never fire on `.geo`
@@ -43,7 +41,7 @@
 #   matching upstream's dispatch order (transfinite/extruded paths run
 #   before the boundary-layer pass and return first). A swept lateral
 #   (`EXTRUDED_ENTITY`) counts as "not another face" when a wall's
-#   `setupFor2d` adjacency is audited, so a BL wall shared by a source
+#   `setupFor2d` counts adjacent faces, so a BL wall shared by a source
 #   plane and its extruded sibling still grows the source's layer —
 #   and a transfinite *curve* composes with `PointsList` injection
 #   (`addBoundaryLayerPoints` runs before `meshGEdgeProcessing`, which
@@ -331,6 +329,9 @@ function _model_curve_bl_grade_params(m::GeoModel,curve::Integer,
     else
         _model_curve_transfinite_params(m,curve,tb,te,transfinite,caller,
                                         options;_native_producer)
+    end
+    if isempty(begin_params) && isempty(end_params) && middle isa _ModelNativeCurveGrade
+        return middle
     end
     inner=length(middle)>2 ? middle[2:end-1] : Float64[]
     return Float64[t0;begin_params;inner;reverse(end_params);t1]

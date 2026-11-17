@@ -2,6 +2,7 @@ module BoundaryLayerCurvedEndChecks
 using Test,Tessella
 const A=Tessella.API
 const B=Tessella.BoundaryLayer
+const M=Tessella.Model
 const fixture=joinpath(@__DIR__,"..","fixtures","geo_boundary_layer_curved_end.geo")
 
 @testset "Boundary-layer columns retain curved adjacent-edge nodes" begin
@@ -75,5 +76,64 @@ const fixture=joinpath(@__DIR__,"..","fixtures","geo_boundary_layer_curved_end.g
             @test Tessella.Elements.validate(result.mesh).ok
         end
     end
+end
+
+@testset "Empty endpoint layers retain native curve births" begin
+    model=Tessella.GeoModel()
+    Tessella.add_point!(model,0.,0.,0.;tag=1,mesh_size=.25)
+    Tessella.add_point!(model,1.,0.,0.;tag=2,mesh_size=.25)
+    Tessella.add_line!(model,1,2;tag=1)
+    caller="empty endpoint layer regression"
+    options=M._model_default_mesh1d_options(model,caller)
+    ordinary=M._model_mesh_curve!(model,1,options,caller;_native_producer=true)
+    spec=Tessella.IO.GeoFieldSpec(1,"BoundaryLayer",Dict(
+        "PointsList"=>"{1,2}","Size"=>"0.5","Thickness"=>"1"))
+    layer=M._ModelBoundaryLayerField(1,
+        Tessella.SizeField._geo_boundary_layer_config(spec,5),caller)
+    for (first,last) in ((nothing,nothing),(layer,nothing),(nothing,layer),(layer,layer))
+        graded=M._model_curve_bl_grade_params(model,1,first,last,0.,1.,1.,
+            options,caller;_native_producer=true)
+        @test graded isa M._ModelNativeCurveGrade
+        @test (graded.parameters,graded.rows,graded.count)==
+            (ordinary.parameters,ordinary.rows,ordinary.count)
+    end
+
+    square="""
+    Point(1)={0,0,0,0.25}; Point(2)={1,0,0,0.25};
+    Point(3)={1,1,0,0.25}; Point(4)={0,1,0,0.25};
+    Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+    Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+    """
+    plain,layered=map(("","""
+    Field[1]=BoundaryLayer; Field[1].PointsList={1};
+    Field[1].Size=0.5; Field[1].Thickness=1; BoundaryLayer Field=1;
+    """)) do fields
+        mktemp() do path,io
+            write(io,square*fields);close(io)
+            execute_geo(path;mesh_dim=2)
+        end
+    end
+    @test isempty(plain.errors) && isempty(layered.errors)
+    mesh=layered.mesh
+    @test Tessella.Elements.validate(mesh).ok
+    @test isequal(mesh.coords,plain.mesh.coords)
+    @test mesh.segs==plain.mesh.segs && mesh.tris==plain.mesh.tris
+    areas=[((mesh.coords[1,b]-mesh.coords[1,a])*(mesh.coords[2,c]-mesh.coords[2,a])-
+            (mesh.coords[2,b]-mesh.coords[2,a])*(mesh.coords[1,c]-mesh.coords[1,a]))/2
+           for (a,b,c) in eachcol(mesh.tris)]
+    @test all(>(0),areas)
+    @test isapprox(sum(areas),1.;rtol=64eps(Float64))
+    actual=layered.model.meshing.mesh_authority.mesh
+    expected=plain.model.meshing.mesh_authority.mesh
+    @test Tessella.Elements.validate(actual).ok
+    @test isequal(actual.coords,expected.coords)
+    @test [(b.msh,b.nodes,b.tags) for b in actual.blocks]==
+        [(b.msh,b.nodes,b.tags) for b in expected.blocks]
+    data=actual.entity_data;expected_data=expected.entity_data
+    @test isequal((data.external_node_tags,data.node_entities,data.node_parametric,
+                   data.external_element_tags,data.block_entities),
+                  (expected_data.external_node_tags,expected_data.node_entities,
+                   expected_data.node_parametric,expected_data.external_element_tags,
+                   expected_data.block_entities))
 end
 end
