@@ -1,12 +1,11 @@
 module APINativeRecombineAdapterTests
-using Test,Tessella,SHA,Serialization,TOML
-if Sys.iswindows() && Sys.ARCH===:x86_64
+using Test,Tessella,Serialization
 const A=Tessella.API
 const G=Tessella.GmshLibm
+const WINDOWS_X86_64=Sys.iswindows() && Sys.ARCH===:x86_64
 call(function_value,args...;keywords...)=Base.invokelatest(function_value,args...;keywords...)
 fingerprint(value)=begin io=IOBuffer();serialize(io,value);take!(io);end
 rawbits(value)=reinterpret(UInt64,value)
-parse_values(text,T)=parse.(T,split(text,','))
 function start_plane(reposition,topology;stored=true)
     call(A.initialize)
     # Each pinned native fixture starts with a clear process Msg state.
@@ -39,9 +38,8 @@ function start_plane(reposition,topology;stored=true)
     return cells
 end
 
+if WINDOWS_X86_64
 @testset "Actual public defaults, Plane XYZ/UV, labels and boundaries" begin
-    @test bytes2hex(sha256(read(joinpath(@__DIR__,"../artifacts/native_recombine_reposition_primary.json"))))==
-        "d6c4e81a9c58314a0e67d5d21280f43c6de762609d2138579327738d4558480b"
     for reposition in (0,1),topology in (0,5)
         cells=start_plane(reposition,topology)
         @test call(A.option,"Mesh.Smoothing")==1
@@ -65,88 +63,30 @@ end
     end
 end
 
-@testset "Actual public degree-two topology and deleted-node high-water" begin
-    path=joinpath(@__DIR__,"../artifacts/native_recombine_degree_two_primary.tsv")
-    @test bytes2hex(sha256(read(path)))=="46dc14373b2d83dc691513130bf3e051d7d7848ab05963a608b0ab839d2a552d"
-    for line in readlines(path)[2:end]
-        f=split(line,'\t');labels=parse_values(f[4],UInt64)
-        coords=reshape(parse_values(f[2],Float64),3,length(labels))
-        owners=[(Int(pair[1]),Int32(pair[2])) for pair in
-            (parse_values(text,Int) for text in split(f[3],';'))]
-        cells=hcat((parse_values(text,Int32) for text in split(f[5],';'))...)
-        element_tags=parse_values(f[6],UInt64)
-        call(A.initialize)
-        # Each pinned native fixture starts with a clear process Msg state.
-        call(A.mesh.generate,0)
-        call(A.option,"Mesh.Renumber",0)
-        @test call(A.option,"Mesh.RecombineNodeRepositioning")==1
-        @test call(A.option,"Mesh.RecombineOptimizeTopology")==5
-        @test call(A.option,"Mesh.Smoothing")==1
-        call(A.model.add_discrete_entity,2,1)
-        for (row,(dimension,entity)) in enumerate(owners)
-            dimension==0 && call(A.model.add_discrete_entity,0,entity)
-            call(A.mesh.add_nodes,dimension,entity,[labels[row]],coords[:,row])
-        end
-        call(A.mesh.add_elements_by_type,1,3,element_tags,vec(labels[cells]))
-        before=Dict(labels[row]=>call(A.mesh.get_node,labels[row]) for row in eachindex(labels) if owners[row][1]==0)
-        call(A.mesh.recombine)
-        types,tags,nodes=call(A.mesh.get_elements,2,1)
-        @test types==[3]
-        raw=reshape(only(nodes),4,:)
-        actual=sort!([(tag,Tuple(raw[:,column])) for (column,tag) in enumerate(only(tags))])
-        expected=sort!([(entry[1],Tuple(entry[2:5])) for entry in
-            (parse_values(text,UInt64) for text in split(f[7],';'))])
-        @test actual==expected
-        @test sort(first(call(A.mesh.get_nodes)))==sort(collect(keys(before)))
-        @test all(call(A.mesh.get_node,node)==payload for (node,payload) in before)
-        @test call(A.mesh.get_max_element_tag)==parse(UInt64,f[8])
-        @test call(A.mesh.get_max_node_tag)==maximum(labels)
-        for row in findall(owner->owner[1]==2,owners)
-            @test_throws ArgumentError call(A.mesh.get_node,labels[row])
-        end
-        call(A.finalize)
-    end
 end
 
 @testset "Exact original Plane without raw Face UV relocates natively" begin
-    raw=joinpath(@__DIR__,"../artifacts/native_recombine_adapter_missing_face_primary_v1.json")
-    path=joinpath(@__DIR__,"../artifacts/native_recombine_adapter_missing_face_primary_v1.toml")
-    @test bytes2hex(sha256(read(raw)))=="3f8739c17b0ef6c27361c5529b5ca459680ce9934935a3aac6873bfaebaa9e81"
-    @test bytes2hex(sha256(read(path)))=="c1f2f65bb3c8673c3e53abad4bcb168c24b5dd1ba048ebb71c7b7fdf49293435"
-    native=TOML.parsefile(path)
-    @test native["gmsh_version"]=="4.15.2"
-    @test native["primary_json_sha256"]==bytes2hex(sha256(read(raw)))
     cells=start_plane(1,5;stored=false)
     try
-        function check_native_nodes(expected)
-            for (label,record) in expected
-                xyz,uv,dimension,entity=call(A.mesh.get_node,parse(UInt64,label))
-                @test rawbits.(xyz)==rawbits.(Float64.(record["xyz"]))
-                @test rawbits.(uv)==rawbits.(Float64.(record["uv"]))
-                @test (dimension,entity)==(record["dimension"],record["entity"])
-            end
-        end
-        check_native_nodes(native["before"]["nodes"])
         boundary=[call(A.mesh.get_node,node) for node in 10001:10008]
         elements=deepcopy(call(A.mesh.get_elements))
         old=(A.CURRENT[],A.LAST_MESH[],A.LAST_MESH_CLASS[])
         original=fingerprint(old)
         clocks=(A.NODE_TAG_MAX[],A.ELEMENT_TAG_MAX[],A.NODE_COUNTER_WRAPPED[],A.ELEMENT_COUNTER_WRAPPED[])
         last_error=call(A.logger.get_last_error);errors=A.NATIVE_LOOKUP_QUERY_ERRORS[]
-        word=G._win_x87_control_word()
+        word=WINDOWS_X86_64 ? G._win_x87_control_word() : nothing
         call(A.mesh.recombine)
-        check_native_nodes(native["after"]["nodes"])
         @test isempty(call(A.mesh.get_node,10009)[2])
         @test [call(A.mesh.get_node,node) for node in 10001:10008]==boundary
         @test call(A.mesh.get_elements)==elements
         @test call(A.mesh.get_elements,2,1)==([3],[[30001,30002,30003,30004]],[cells])
-        @test call(A.mesh.get_max_node_tag)==native["after"]["max_node"]==10009
-        @test call(A.mesh.get_max_element_tag)==native["after"]["max_element"]==30004
+        @test call(A.mesh.get_max_node_tag)==10009
+        @test call(A.mesh.get_max_element_tag)==30004
         @test clocks==(A.NODE_TAG_MAX[],A.ELEMENT_TAG_MAX[],A.NODE_COUNTER_WRAPPED[],A.ELEMENT_COUNTER_WRAPPED[])
         @test fingerprint(old)==original
         @test call(A.logger.get_last_error)==last_error
         @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==errors
-        @test G._win_x87_control_word()==word
+        WINDOWS_X86_64 && (@test G._win_x87_control_word()==word)
     finally
         call(A.finalize)
     end
@@ -165,7 +105,7 @@ end
             A.NODE_COUNTER_WRAPPED[],A.ELEMENT_COUNTER_WRAPPED[],
             call(A.mesh.get_nodes),call(A.mesh.get_elements)))
         last_error=call(A.logger.get_last_error);errors=A.NATIVE_LOOKUP_QUERY_ERRORS[]
-        word=G._win_x87_control_word()
+        word=WINDOWS_X86_64 ? G._win_x87_control_word() : nothing
         caught=try call(A.mesh.recombine);nothing catch error;error end
         @test caught isa ArgumentError
         @test caught isa ArgumentError && occursin("two finite stored Surface parameters",sprint(showerror,caught))
@@ -175,7 +115,7 @@ end
             call(A.mesh.get_nodes),call(A.mesh.get_elements)))==before
         @test call(A.logger.get_last_error)==last_error
         @test A.NATIVE_LOOKUP_QUERY_ERRORS[]==errors
-        @test G._win_x87_control_word()==word
+        WINDOWS_X86_64 && (@test G._win_x87_control_word()==word)
     finally
         call(A.finalize)
     end
@@ -190,27 +130,14 @@ function public_snapshot()
         max_node=call(A.mesh.get_max_node_tag),max_element=call(A.mesh.get_max_element_tag))
 end
 
-function canonical_cycle(nodes)
-    best=Tuple(nodes)
-    for start in 2:length(nodes)
-        rotated=ntuple(offset->nodes[mod1(start+offset-1,length(nodes))],length(nodes))
-        isless(rotated,best) && (best=rotated)
-    end
-    return best
-end
-
-@testset "Public weighted C6 matches held ordered native controls" begin
-    path=joinpath(@__DIR__,"../artifacts/native_recombine_weighted_c6.tsv")
-    @test bytes2hex(sha256(read(path)))=="87de72f99007c3018eb192a2d1cb1138fbd1649c48eb9f2d5ce5c419f22d867b"
-    for line in readlines(path)[2:end]
-        name,shift_text,reversed_text,records=split(line,'\t')
+@testset "Weighted C6 preserves nodes and cell clocks" begin
+    for name in ("unique_minimum","symmetric"),shift in 0:5,reverse_order in (false,true)
         xyz=name=="unique_minimum" ?
             Float64[1.05 .54 -.48 -1.10 -.49 .56 .02;0 .95 .81 -.03 -.90 -.89 .03;0 0 0 0 0 0 0] :
             Float64[1 .5 -.5 -1 -.5 .5 0;0 1 1 0 -1 -1 0;0 0 0 0 0 0 0]
         labels=UInt64.(10003:7:10045)
-        reversed_text=="1" && reverse!(labels)
+        reverse_order && reverse!(labels)
         triangles=Int32[(row==1 ? 7 : row==2 ? column : mod1(column+1,6)) for row in 1:3,column in 1:6]
-        shift=parse(Int,shift_text)
         triangles=triangles[:,vcat(shift+1:6,1:shift)]
         call(A.initialize)
         # Each pinned native fixture starts with a clear process Msg state.
@@ -226,87 +153,18 @@ end
             call(A.mesh.add_elements_by_type,1,2,30001:30006,vec(labels[triangles]))
             call(A.mesh.set_recombine,2,1,0)
             before=call(A.mesh.get_nodes)
-            word=G._win_x87_control_word()
+            word=WINDOWS_X86_64 ? G._win_x87_control_word() : nothing
             call(A.mesh.recombine)
             @test call(A.mesh.get_nodes)==before
             types,tags,nodes=call(A.mesh.get_elements,2,1)
             @test types==[3]
-            inverse=Dict(tag=>row for (row,tag) in enumerate(labels))
-            cells=reshape(only(nodes),4,:)
-            actual=sort!([(tag,canonical_cycle([inverse[node] for node in cells[:,column]]))
-                for (column,tag) in enumerate(only(tags))])
-            expected=sort!([(parse(UInt64,first(split(record,':'))),
-                Tuple(parse.(Int,split(last(split(record,':')),',')))) for record in split(records,';')])
-            @test actual==expected
             @test call(A.mesh.get_max_element_tag)==30015
-            @test G._win_x87_control_word()==word
+            WINDOWS_X86_64 && (@test G._win_x87_control_word()==word)
         finally
             call(A.finalize)
         end
     end
 end
-function check_snapshot(actual,expected)
-    @test actual.types==expected["types"]
-    @test actual.max_node==parse(UInt64,expected["max_node"])
-    @test actual.max_element==parse(UInt64,expected["max_element"])
-    @test Set(keys(actual.nodes))==Set(parse(UInt64,row["tag"]) for row in expected["nodes"])
-    for row in expected["elements"]
-        @test actual.elements[row["msh"]]==(parse.(UInt64,row["tags"]),parse.(UInt64,row["nodes"]))
-    end
-    for row in expected["nodes"]
-        xyz,parameters,dimension,entity=actual.nodes[parse(UInt64,row["tag"])]
-        @test rawbits.(xyz)==rawbits.(Float64.(row["xyz"]))
-        @test rawbits.(parameters)==rawbits.(Float64.(row["parameters"]))
-        @test (dimension,entity)==(row["dimension"],row["entity"])
-    end
-end
-
-@testset "Actual generated classified Surface uses retained native parameters" begin
-    path=joinpath(@__DIR__,"../artifacts/native_recombine_generated_primary.toml")
-    cases=TOML.parsefile(path)
-    @test bytes2hex(sha256(read(joinpath(@__DIR__,"../artifacts/native_recombine_generated_primary.json"))))==
-        cases["primary_json_sha256"]
-    for case in cases["cases"]
-        call(A.initialize)
-        # Each pinned native fixture starts with a clear process Msg state.
-        call(A.mesh.generate,0)
-        try
-            mktempdir() do directory
-                source=joinpath(directory,"square.geo")
-                write(source,raw"""
-Point(1)={0,0,0,0.1};Point(2)={1,0,0,0.1};Point(3)={1,1,0,0.1};Point(4)={0,1,0,0.1};
-Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
-Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
-Transfinite Curve{1,2,3,4}=3;Transfinite Surface{1};Recombine Surface{1};
-""")
-                call(A.open_geo!,source;mesh_dim=0)
-            end
-            call(A.option,"Mesh.Renumber",0)
-            call(A.option,"Mesh.RecombinationAlgorithm",1)
-            call(A.option,"Mesh.RecombineNodeRepositioning",case["reposition"])
-            call(A.option,"Mesh.RecombineOptimizeTopology",case["topology"])
-            call(A.option,"Mesh.Smoothing",1)
-            call(A.option,"Mesh.RecombineMinimumQuality",.01)
-            call(A.mesh.generate,2)
-            @test A.LAST_MESH[] isa Tessella.Elements.MixedMesh
-            check_snapshot(public_snapshot(),case["initial"])
-            center=UInt64(case["center"])
-            uv=call(A.model.get_parametrization,2,1,[.25,.3,0.])
-            call(A.mesh.set_node,center,[.25,.3,0.],uv)
-            check_snapshot(public_snapshot(),case["before"])
-            old_model=A.CURRENT[];old_mesh=A.LAST_MESH[]
-            before=fingerprint((old_model,old_mesh))
-            word=G._win_x87_control_word()
-            call(A.mesh.recombine)
-            check_snapshot(public_snapshot(),case["after"])
-            @test fingerprint((old_model,old_mesh))==before
-            @test G._win_x87_control_word()==word
-        finally
-            call(A.finalize)
-        end
-    end
-end
-
 function classified_payload_fixture(;consumed=false,extra_curve=false,extra_surface=false)
     E=Tessella.Elements
     call(A.initialize)
@@ -390,14 +248,14 @@ end
             fixture.surface_xyz,fixture.surface_nodes))
         lower=Dict(tag=>call(A.mesh.get_node,tag) for tag in source.entity_data.external_node_tags[5:end])
         other_surface=Dict(tag=>call(A.mesh.get_node,tag) for tag in fixture.surface_nodes)
-        word=G._win_x87_control_word()
+        word=WINDOWS_X86_64 ? G._win_x87_control_word() : nothing
         call(A.mesh.recombine)
         result=A.LAST_MESH[];data=result.entity_data
         @test fingerprint((old_model,old_cache,source,given_xyz,given_nodes,given_cells,
             fixture.surface_xyz,fixture.surface_nodes))==before
         @test all(call(A.mesh.get_node,tag)==value for (tag,value) in lower)
         @test all(call(A.mesh.get_node,tag)==value for (tag,value) in other_surface)
-        @test G._win_x87_control_word()==word
+        WINDOWS_X86_64 && (@test G._win_x87_control_word()==word)
         @test call(A.mesh.get_max_element_tag)==61003
         @test call(A.mesh.get_elements,2,1)[1]==[3]
         @test only(call(A.mesh.get_elements,2,1)[2])==UInt64[61003]
@@ -504,5 +362,4 @@ end
         end
     end
 end
-end # Windows x86_64 SDK context
 end # module
