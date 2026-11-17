@@ -69,6 +69,27 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write(f"Compiled native kernel suite: {hit}/{found} source lines ({100 * hit / found:.2f}%). Full LCOV report is attached. Functional tests on three operating systems and two Julia versions run separately without coverage instrumentation.\n")
 
+  coverage-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.14.0-beta1'
+      - uses: julia-actions/cache@v2
+      - name: Run interpreted session API coverage
+        run: julia --project=. --startup-file=no --compiled-modules=no --check-bounds=yes --compile=min -O0 --code-coverage=user test/coverage/api.jl
+      - name: Verify executed API function coverage
+        run: python test/coverage/verify.py api
+      - uses: julia-actions/julia-processcoverage@v1
+        with:
+          directories: src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-session-api-julia-1.14
+          path: lcov.info
+          if-no-files-found: error
+
   docs:
     runs-on: ubuntu-latest
     permissions:

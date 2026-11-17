@@ -34,6 +34,17 @@ covered source-line counts for this suite. Session API tests run separately.
 On Julia 1.12 and 1.13, minimal compilation does not reliably emit function
 coverage counters.
 
+A separate coverage job runs the session API suite on Julia 1.14 beta, which
+supports interpreted function-body counters. Stable Julia versions remain in
+the correctness matrix. Its LCOV artifact and the compiled kernel report have
+separate line denominators because Julia instruments the two compiler modes
+differently.
+
+```sh
+julia +1.14.0-beta1 --project=. --startup-file=no --compiled-modules=no --check-bounds=yes --compile=min -O0 --code-coverage=user test/coverage/api.jl
+python3 test/coverage/verify.py api
+```
+
 Run the same coverage suite locally:
 
 ```sh

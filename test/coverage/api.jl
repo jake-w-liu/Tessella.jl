@@ -1,0 +1,6 @@
+VERSION >= v"1.14.0-beta1" || error("Interpreted function coverage requires Julia 1.14 or later")
+Base.JLOptions().compile_enabled==3 || error("Run API coverage with --compile=min")
+report_dir=joinpath(@__DIR__,"..","..","coverage")
+mkpath(report_dir)
+write(joinpath(report_dir,"api-runner-pid"),string(getpid()))
+include(joinpath(@__DIR__,"..","runtests.jl"))
