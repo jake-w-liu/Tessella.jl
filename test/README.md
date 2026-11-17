@@ -4,6 +4,10 @@ CI tests Julia 1.12 and 1.13 on Linux, Windows, and macOS. The default suite che
 with analytic values, topology, ownership, and error-path checks. It needs no
 external mesher or solver.
 
+Keep tests small and deterministic. Each test should cover public behavior,
+a numerical invariant, or a specific bug. Reuse fixtures and remove duplicate
+cases. Keep benchmarks separate from package tests.
+
 Run ordinary package tests from the repository root:
 
 ```powershell

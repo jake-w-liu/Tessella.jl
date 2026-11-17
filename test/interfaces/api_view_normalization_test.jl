@@ -34,16 +34,5 @@ const R=Rational{BigInt}
     finally A.finalize() end
 end
 
-@testset "Field certificate closures retain concrete locals" begin
-    for fn in (F._pv_rebased_geometry_bounds,F._pv_scheme_precise_certificate)
-        @test all(methods(fn)) do method
-            info=Base.uncompressed_ast(method)
-            !any(info.code) do statement
-                statement isa Expr && statement.head==:(=) || return false
-                rhs=statement.args[2]
-                rhs isa Expr && rhs.head==:call && rhs.args[1]==GlobalRef(Core,:Box)
-            end
-        end
-    end
-end
+
 end

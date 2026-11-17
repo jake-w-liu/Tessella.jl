@@ -3,20 +3,6 @@ using Test,Tessella
 const A=Tessella.API
 call(f,args...;kwargs...)=Base.invokelatest(f,args...;kwargs...)
 
-function _boxed_slots(f)
-    slots=Symbol[]
-    for method in methods(f)
-        method.module===A || continue
-        info=Base.uncompressed_ast(method)
-        for statement in info.code
-            statement isa Expr && statement.head==:(=) || continue
-            rhs=statement.args[2]
-            (rhs isa Expr && rhs.head==:call && rhs.args[1]==GlobalRef(Core,:Box)) || continue
-            push!(slots,info.slotnames[statement.args[1].id])
-        end
-    end
-    return slots
-end
 
 function _fixture()
     call(A.initialize)
@@ -35,9 +21,7 @@ function _fixture()
     return coords,parameters,cells,A.CURRENT[]
 end
 
-@testset "Surface optimizer closures retain typed local state" begin
-    @test isempty(_boxed_slots(A._surface_optimize_good_move))
-    @test isempty(_boxed_slots(A._surface_relocate_vertex!))
+@testset "Surface optimizer preserves boundary and CAD coordinates" begin
     coords,parameters,cells,model=_fixture()
     try
         original=copy(coords)

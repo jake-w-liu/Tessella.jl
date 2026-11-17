@@ -118,27 +118,5 @@ end
     end
 end
 
-@testset "Model interpolation keeps captured arrays unboxed" begin
-    boxed=Symbol[]
-    inspected=0
-    for name in names(A;all=true)
-        replace(String(name),r"^#|#\d+$"=>"")=="_plugin_probe_model" || continue
-        isdefined(A,name) || continue
-        object=getfield(A,name)
-        object isa Function || continue
-        for method in methods(object)
-            method.module===A || continue
-            inspected+=1
-            info=Base.uncompressed_ast(method)
-            for statement in info.code
-                statement isa Expr && statement.head==:(=) || continue
-                rhs=statement.args[2]
-                (rhs isa Expr && rhs.head==:call && rhs.args[1]==GlobalRef(Core,:Box)) || continue
-                push!(boxed,info.slotnames[statement.args[1].id])
-            end
-        end
-    end
-    @test inspected>0
-    @test isempty(boxed)
-end
+
 end
