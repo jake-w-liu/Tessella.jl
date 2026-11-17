@@ -8183,8 +8183,7 @@ function _set_order_native_lookup_live(order)
                 incomplete=!iszero(OPTIONS["Mesh.SecondOrderIncomplete"]))
             plan.model.meshing.order=Int(order)
             plan=_high_order_optimize_plan!(plan,"API.mesh.set_order")
-            authority=class===nothing || class.public_tags===nothing ? plan.authority : class.public_tags.authority
-            _commit_tagged_plan_locked!(plan;authority,
+            _commit_tagged_plan_locked!(plan;
                                        preserve_visibility=true,
                                        element_tag_map=plan.visibility_tag_map)
             return nothing
