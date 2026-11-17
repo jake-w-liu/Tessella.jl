@@ -184,7 +184,7 @@ end
 function _view_probe_precise_coordinates!(location,geometry)
     location.precise===nothing || return location.precise
     certified=SizeField._pv_scheme_precise_inverse(geometry.cell,location.point,
-        location.reference,MeshPointLocation.STRICT_REFERENCE_TOLERANCE)
+        location.reference,MeshPointLocation.STRICT_REFERENCE_TOLERANCE;full_precision=true)
     certified===nothing && return nothing
     location.precise=certified
     return certified

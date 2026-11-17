@@ -128,6 +128,27 @@ end
                 @test isequal(A.view.get_list_data(tag),before)
             end
         end
+        @testset "endpoint offsets survive scalar, vector and tensor scaling" begin
+            for length in (1e16,2.0^1000), offset in (.25,nextfloat(0.)),
+                    components in (1,3,9), reverse in (false,true)
+                first,last=reverse ? (-length,0.) : (0.,length)
+                point=reverse ? -offset : offset
+                factors=collect(1.:components)
+                left=reverse ? length.*factors : zeros(components)
+                right=reverse ? zeros(components) : length.*factors
+                tag=A.view.add("scaled endpoint offset")
+                A.view.add_list_data(tag,components==1 ? "SL" : components==3 ? "VL" : "TL",1,
+                    [first,last,0.,0.,0.,0.,left...,right...])
+                # Exact interpolation of the supplied binary coordinates and
+                # data is independent of the production inverse and value fold.
+                parameter=(R(point)-R(first))/(R(last)-R(first))
+                expected=Float64.((1-parameter).*R.(left).+parameter.*R.(right))
+                @test A.view.probe(tag,point,0.,0.)==(expected,0.)
+                expected_gradient=Float64.((R.(right).-R.(left))./(R(last)-R(first)))
+                @test A.view.probe(tag,point,0.,0.;gradient=true)==
+                    (vec(permutedims(hcat(expected_gradient,zeros(components,2)))),0.)
+            end
+        end
         @test precision(BigFloat)==saved_precision
         @test rounding(BigFloat)==saved_rounding
     finally

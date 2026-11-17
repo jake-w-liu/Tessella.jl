@@ -4895,7 +4895,9 @@ function _pv_precise_scope(f::F) where {F}
     end
 end
 
-function _pv_scheme_precise_certificate(cell,coordinates,query,base,scale,tolerance,step)
+function _pv_scheme_precise_certificate(cell,coordinates,query,base,scale,tolerance,step;
+                                        relative_accuracy=64eps(Float64),
+                                        absolute_accuracy=nextfloat(0.))
     mapped=_pv_scheme_map(cell,coordinates...,base,scale)
     all(isfinite,mapped) || return nothing
     residual=ntuple(axis->query[axis]-mapped[axis],3)
@@ -4921,15 +4923,16 @@ function _pv_scheme_precise_certificate(cell,coordinates,query,base,scale,tolera
     hypot(residual...)<=world_tolerance || return nothing
     # Certify intrinsic accuracy independently of a rounded world residual.
     for axis in 1:dim
-        abs(step[axis])<=max(BigFloat(nextfloat(0.)),
-            BigFloat(64eps(Float64))*abs(coordinates[axis])) || return nothing
+        abs(step[axis])<=max(BigFloat(absolute_accuracy),
+            BigFloat(relative_accuracy)*abs(coordinates[axis])) || return nothing
     end
     result=(reference[1],reference[2],reference[3])
     _pv_scheme_inside(cell.kind,result...,tolerance) || return nothing
     return result
 end
 
-@noinline function _pv_scheme_precise_inverse(cell,point,seed,tolerance)
+@noinline function _pv_scheme_precise_inverse(cell,point,seed,tolerance;
+                                             full_precision::Bool=false)
     scale=_pv_scheme_scale(cell)
     scale>0 || return nothing
     return _pv_precise_scope() do
@@ -4937,6 +4940,8 @@ end
         query=ntuple(axis->(BigFloat(point[axis])-base[axis])/BigFloat(scale),3)
         dim=_pv_scheme_dim(cell.kind)
         coordinates=ntuple(axis->axis<=dim ? BigFloat(seed[axis]) : BigFloat(0),3)
+        relative_accuracy=full_precision ? 64eps(BigFloat) : BigFloat(64eps(Float64))
+        absolute_accuracy=full_precision ? relative_accuracy : BigFloat(nextfloat(0.))
         for _ in 1:64
             mapped=_pv_scheme_map(cell,coordinates...,base,scale)
             all(isfinite,mapped) || return nothing
@@ -4951,12 +4956,13 @@ end
                 return nothing
             end
             all(isfinite,step) || return nothing
-            # Stop at the intrinsic accuracy the certificate actually needs;
-            # demanding BigFloat epsilon can stall at map roundoff.
-            if all(axis->abs(step[axis])<=max(BigFloat(nextfloat(0.)),
-                    BigFloat(64eps(Float64))*abs(coordinates[axis])),1:dim)
+            # Field admission needs Float64 intrinsic accuracy. Raw view
+            # values can amplify a much smaller coordinate error, so those
+            # callers retain the available precision with a map-roundoff floor.
+            if all(axis->abs(step[axis])<=max(absolute_accuracy,
+                    relative_accuracy*abs(coordinates[axis])),1:dim)
                 certified=_pv_scheme_precise_certificate(cell,coordinates,query,
-                    base,scale,tolerance,step)
+                    base,scale,tolerance,step;relative_accuracy,absolute_accuracy)
                 certified===nothing || return certified
             end
             previous=sum(abs2,residual);alpha=BigFloat(1);advanced=false
