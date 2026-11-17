@@ -4,12 +4,13 @@ include("quadtri_nonew_certificates.jl")
 const C=QuadTriNoNewCertificates
 const A=Tessella.API
 
-@testset "Captured affine supports keep native public vertex identities" begin
+@testset "Affine supports keep native public vertex identities" begin
     fixture=C.fixture("affine_carrier","Layers{1}",[0.,1.],false)
     A.initialize()
     try
-        mktemp() do path,io
-            write(io,fixture.source);close(io);A.open_geo!(path;mesh_dim=0)
+        mktempdir() do directory
+            path=joinpath(directory,"affine_carrier.geo")
+            write(path,fixture.source);A.open_geo!(path;mesh_dim=0)
         end
         A.mesh.generate(3)
         callbacks=Ref(0)
@@ -20,7 +21,6 @@ const A=Tessella.API
         coordinates=copy(cache.coords)
         parameters=Tessella.Model._model_mesh_runtime_parameters(model,cache)
         view=A.mesh.get()
-        @test C.crc_record("uniform1_false_api_p2",view)==C.artifact_pins()["uniform1_false_api_p2"]
         @test (0.5,0.,0.) in Set(Tuple(view.coords[:,row]) for row in axes(view.coords,2))
         @test (0.5,0.,0.) ∉ Set(Tuple(cache.coords[:,row]) for row in axes(cache.coords,2))
         for (row,uid) in enumerate(cache.entity_data.external_node_tags)

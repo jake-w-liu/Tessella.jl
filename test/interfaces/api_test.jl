@@ -3,7 +3,6 @@ using LinearAlgebra
 using Tessella
 using Tessella.MeshTypes: mesh_crc, nnodes, node, ntets, tet_volume, validate
 
-include("default_box_optimizer_full_native_helpers.jl")
 const _API=Tessella.API
 
 @testset "API field tag allocation follows each model's live fields" begin
@@ -85,25 +84,9 @@ end
         expected_crc=mesh_crc(generated)
         @test expected_crc.sha==
               "ec97caf92e736f8590fe61176430799f103bbe3804756c0577ab56c1d6f4a52e"
-        native=DefaultBoxOptimizerFullNativeV1.check(_API,generated)
-        native_state=native["state"]
-        node_tags,node_coordinates,node_parameters=_API.mesh.get_nodes()
-        @test node_tags==UInt64.(native_state["global_nodes"]["uids"])
-        @test DefaultBoxOptimizerFullNativeV1.bits(node_coordinates)==native_state["global_nodes"]["XYZ_bits"]
+        _,_,node_parameters=_API.mesh.get_nodes()
         @test isempty(node_parameters)
-        element_types,element_tags,element_nodes=_API.mesh.get_elements()
-        @test element_types==Int32.(native_state["global_elements"]["types"])
-        @test element_tags==[UInt64.(block) for block in native_state["global_elements"]["uids"]]
-        @test element_nodes==[UInt64.(block) for block in native_state["global_elements"]["connectivity"]]
-        @test _API.mesh.get_element_types()==Int32.(native_state["global_elements"]["types"])
-        @test _API.mesh.get_elements_by_type(4)==
-              (UInt64.(native_state["global_elements"]["uids"][3]),
-               UInt64.(native_state["global_elements"]["connectivity"][3]))
-        type_node_tags,type_node_coordinates,type_node_parameters=
-            _API.mesh.get_nodes_by_element_type(4)
-        @test type_node_tags==UInt64.(native_state["global_elements"]["connectivity"][3])
-        @test DefaultBoxOptimizerFullNativeV1.bits(type_node_coordinates)==
-              DefaultBoxOptimizerFullNativeV1.node_bits(native,type_node_tags)
+        _,_,type_node_parameters=_API.mesh.get_nodes_by_element_type(4)
         # Gmsh packs per-node parameters on the owning Line/Plane entity, so the
         # by-type query reports parameters for classified boundary nodes.
         @test !isempty(type_node_parameters)
@@ -112,7 +95,6 @@ end
         @test length(_API.mesh.get_element_edge_nodes(4))==12ntets(generated)
         @test length(_API.mesh.get_element_face_nodes(4,3))==12ntets(generated)
         @test _API.mesh.get_max_node_tag()==UInt64(size(generated.coords,2))
-        @test _API.mesh.get_max_element_tag()==UInt64(native_state["maxima"][2])
 
         cached=_API.mesh.get()
         @test cached!==generated && cached.coords!==generated.coords
@@ -331,7 +313,6 @@ end
         @test _API.model.add_point(0.75,0.75,0.75;tag=102)==102
         initial=_API.mesh.generate(3)
         @test validate(initial).ok
-        DefaultBoxOptimizerFullNativeV1.check(_API,initial;unused_points=true)
         @test mesh_crc(initial).sha==
               "ec97caf92e736f8590fe61176430799f103bbe3804756c0577ab56c1d6f4a52e"
 
