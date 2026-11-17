@@ -374,7 +374,7 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
     cursors=Dict(msh=>0 for msh in keys(counts))
     external=tagged ? Dict(msh=>Vector{UInt64}(undef,n) for (msh,n) in counts) : nothing
     element_max=tagged ? max(element_max,maximum(stored_class.public_tags.element_tags;
-        init=UInt64(0))) : UInt64(0)
+        init=UInt64(0))) : native_labels ? element_max : UInt64(0)
     if tagged
         converted=sum(length(block.tags) for block in linear.blocks if block.msh!=15;init=0)
         element_max<=typemax(Int32)-2converted || throw(ArgumentError(
