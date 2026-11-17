@@ -2,6 +2,11 @@
 # SetOrder1 and every allocation complete before any session state is published.
 include("APIGenerateNoNewIdentity.jl")
 function _higher_native_parameters!(assembly,m)
+    isempty(assembly.nodes) && return nothing
+    return (Base.inferencebarrier(_higher_native_parameters_pending!)(assembly,m))::Nothing
+end
+
+function _higher_native_parameters_pending!(assembly,m)
     for position in eachindex(assembly.nodes)
         node=assembly.nodes[position]
         node.parameter===nothing || continue
@@ -1711,7 +1716,7 @@ end
 # The dim-2 keep/mesh scan `_higher_surface_phase!` runs before its unit
 # merge: fully discrete, MeshOnlyVisible-hidden and MeshOnlyEmpty-occupied
 # Faces retain their cells; every other Face meshes and sheds its stale
-# products.  PAR01 runs the same scan ahead of the Curve phase as well (the
+# products. The same scan runs ahead of the Curve phase as well (the
 # keep predicates are phase-stable — the Curve phase only appends dim-0/1
 # cells, so a Face's `have` membership and visibility do not move) so that
 # detached Surfaces can spawn as soon as their boundary Curve products land.
@@ -1747,7 +1752,7 @@ end
 
 # The dim-3 keep/mesh scan `_higher_volume_phase!` runs before its merge: a
 # Region meshes unless it is fully discrete, MeshOnlyVisible-hidden or a
-# MeshOnlyEmpty-occupied non-swept primitive.  PAR01 runs the same scan inside
+# MeshOnlyEmpty-occupied non-swept primitive. The same scan runs inside
 # the Surface merge loop so eligible Regions can spawn while Surfaces still
 # merge; the Region phase re-derives it verbatim before adopting the slots.
 function _higher_volume_mesh_tags(m,entities,options,have)
@@ -1822,140 +1827,12 @@ function _higher_volume_spawn_input(assembly,m,done;ranks,old_supports,
     end
 end
 
-function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
-                                size_field=nothing,metric_surface=nothing,
-                                source_nodes=length(assembly.nodes),ranks=nothing,
-                                old_supports=nothing,geometry_parts=nothing,dimension=2,
-                                 geometry_cells=nothing,geometry_birth=nothing,
-                                 geometry_alternates=nothing,curve_births=Dict{Tuple{Int,Int32},Vector{UInt64}}(),
-                                 periodic_pairs=nothing,native_orphan_births=nothing,native_recombine_events=nothing,
-                                 surface_constructor_inputs=nothing,
-                                 surface_forward=nothing,optimize_pyramids::Float64=0.0)
-    # Mesh2D resets all face statuses before OnlyEmpty/OnlyVisible dispatch.
-    filter!(owner->owner[1]!=2,done)
-    have=Set(cell.owner for cell in assembly.cells)
-    meshed,retained=_higher_surface_mesh_scan(m,entities,options,have,
-        discarded,assembly.caller;dimension)
-    filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
-    _higher_discrete_surface_transport!(assembly,m,entities;options,
-        discarded,parts=geometry_parts,geometry_cells)
-    # The actual products are supplied to extrusion source/cap consumers. A
-    # retained surface's cell order is its stored order, including cap pairs.
-    ranks===nothing || _higher_complete_ranks!(ranks,assembly)
-    input=_higher_assembly_authority(assembly,m,done;ranks,old_supports)
-    input=_higher_bind_producer_rows(input,assembly,
-        geometry_parts===nothing ? Tuple[] : geometry_parts,
-        m.meshing.mesh_authority;curve_births)
-    input=Model._model_mesh_with_curve_births(input,curve_births;caller=assembly.caller)
-    emitted=Set{Tuple{Int,Int32}}()
-    scope=isempty(meshed) ? nothing : Model._extrude_nonew_scope(
-        m,assembly.caller;size_field=size_field,_working_model=true,_mesh_input=input)
-    periodic_masters=Set(Int(constraint.master_entity) for constraint in
-        Model.model_periodic_constraints(m) if constraint.dim==2)
-    # A copied top and a later Region consume the just-emitted actual Source,
-    # including its edited coordinates and its own constructor row identities.
-    ordinary_sources=Set{Int}()
-    unmerged_nonew_sources=Set{Int}()
-    for volume in keys(m.volumes)
-        Model._extrude_nonew_unmerged_b4_incidence(m,volume,assembly.caller) || continue
-        push!(unmerged_nonew_sources,abs(m.meshing.extrude_sources[(3,volume)][2]))
-    end
-    for ((dim,entity),link) in m.meshing.extrude_sources
-        dim in (2,3) && link[1]==2 || continue
-        params=Model._extrude_gate(m,dim,entity)
-        params!==nothing && params.quad_to_tri===:none || continue
-        push!(ordinary_sources,abs(link[2]))
-    end
-    constructor_inputs=surface_constructor_inputs===nothing ?
-        Dict{Tuple{Int,Int32},MixedMesh}() : surface_constructor_inputs
-    # These Faces have already lost their old cells from the detached assembly.
-    # Kept Faces retain their owned constructor vectors; fresh Faces publish
-    # new vectors as their actual cell events arrive in this phase.
-    for tag in meshed
-        delete!(constructor_inputs,(2,Int32(tag)))
-    end
-    units=_higher_surface_units(m,_generate_units(m,2,sort!(meshed)),assembly.caller)
-    # PAR01 — `General.NumThreads` detaches runs of independent singleton
-    # Surfaces: each eligible unit produces its receipt on a transaction copy
-    # under `Threads.@threads`, and the unchanged serial merge below replays or
-    # re-runs each slot in unit order.  `nothing` keeps the exact serial path.
-    parallel_units=_parallel_surface_prepare(m,units,assembly.caller;
-        metric_surface,scope,periodic_masters,ordinary_sources,
-        unmerged_nonew_sources,size_field,geometry_birth)
-    parallel_results=parallel_units===nothing ? nothing :
-        fill!(Vector{Any}(undef,length(units)),nothing)
-    parallel_dirty=_ParallelDirty()
-    parallel_precise=parallel_units===nothing ? false :
-        GmshLibm._win_cli_precision()
-    # Cross-phase adoption: `_dim01_curve_phase!` may already have spawned
-    # detached Surfaces once their boundary Curve products landed.  Adopt
-    # exactly the slots this phase's real eligibility scan still admits
-    # (footprint/deps/scope are phase-stable, so the adopted work records are
-    # interchangeable) and fold its ledger entries into the merge-time dirty
-    # set so every mark the workers observed — or missed — is honoured.
-    if parallel_units!==nothing && surface_forward!==nothing &&
-            surface_forward.units==units
-        for (ui,work) in enumerate(parallel_units)
-            work===nothing && continue
-            spawned=surface_forward.results[ui]
-            spawned===nothing && continue
-            parallel_results[ui]=spawned
-        end
-        union!(parallel_dirty,surface_forward.dirty)
-        parallel_precise=surface_forward.precise
-    end
-    parallel_last=parallel_units===nothing ? 0 :
-        something(findlast(!isnothing,parallel_units),0)
-    # Cross-phase scheduling the other way: precompute the Region eligibility
-    # plan so eligible Regions spawn inside the merge loop below while later
-    # Surfaces still produce.  The Region phase re-verifies each adopted slot
-    # against its real `extruded`/`staged`/hybrid gates and discards whatever
-    # it cannot adopt.  `parallel_dirty` is shared with the spawn ledger so a
-    # Region spawned now still observes every later Surface mutation.
-    volume_forward=nothing
-    if dimension==3
-        volume_tags=sort!(_higher_volume_mesh_tags(m,entities,options,have))
-        volume_plan=isempty(volume_tags) ? nothing :
-            _parallel_volume_prepare(m,volume_tags,input,assembly.caller;
-                size_field,scope=nothing,extruded=nothing,
-                hybrid_batch=nothing,staged=false)
-        volume_plan===nothing || (volume_forward=(
-            tags=volume_tags,prepared=volume_plan[1],
-            pos_draws=volume_plan[2],
-            results=fill!(Vector{Any}(undef,length(volume_tags)),nothing),
-            dirty=parallel_dirty,precise=GmshLibm._win_cli_precision(),
-            size_field=size_field))
-    end
-    for (ui,tags) in enumerate(units)
-        work=parallel_units===nothing ? nothing : parallel_units[ui]
-        if work!==nothing && parallel_results[ui]===nothing
-            vend=ui
-            while vend<length(units) && parallel_units[vend+1]!==nothing
-                vend+=1
-            end
-            _parallel_surface_fill!(parallel_results,ui:vend,m,parallel_units,
-                input,options,assembly,parallel_dirty,parallel_precise,
-                geometry_birth;size_field)
-        end
-        refs=ui<parallel_last || volume_forward!==nothing ?
-            _parallel_surface_param_refs(m) : nothing
-        products=metric_surface!==nothing ? [(only(tags),mesh_model_surface(m,only(tags),size_field;
-            max_metric_edge=metric_surface.max_metric_edge,max_nodes=metric_surface.max_nodes,
-            max_triangles=metric_surface.max_triangles,_mesh_input=input,_mesh1d_options=options,
-            _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
-            _return_surface_production=true,_boundary_regrade=false))] : work!==nothing &&
-            parallel_results[ui]!==nothing ?
-            _parallel_surface_products(m,work,parallel_results[ui],
-                parallel_dirty,assembly;input,scope,options,size_field,
-                geometry_birth,caller=assembly.caller) :
-            length(tags)==1 ? [(tags[1],mesh_model_surface(m,tags[1];
-            size_field=size_field,_extrude_scope=scope,_mesh_input=input,_mesh1d_options=options,
-            _mesh_node_high_water=assembly.node_max,_return_surface_production=true,
-            _mesh_element_high_water=assembly.cell_max,_boundary_regrade=false,
-            _geometry_points=_higher_geometry_source_points(assembly,geometry_birth)))] :
-            _compound_surface_meshes(m,tags,assembly.caller;size_field=size_field,
-                _mesh1d_options=options)
-        for (tag,produced) in products
+# Merge one concrete producer without widening its mesh and ownership types.
+function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,discarded,done;
+        emitted,source_nodes,geometry_cells,native_orphan_births,curve_births,
+        parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
+        periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
+        metric_surface,constructor_inputs,size_field,native_recombine_events)
             alternate=produced isa Model._ModelSurfaceGeometryProduction ? produced.geometry : nothing
             source_binding=produced isa Model._ModelSurfaceGeometryProduction ? produced.production :
                 produced isa Model._ModelSurfaceProduction ? produced : nothing
@@ -2060,6 +1937,150 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                         _working_model=true,_mesh_input=input)
                 end
             end
+    return input,scope
+end
+
+function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
+                                size_field=nothing,metric_surface=nothing,
+                                source_nodes=length(assembly.nodes),ranks=nothing,
+                                old_supports=nothing,geometry_parts=nothing,dimension=2,
+                                 geometry_cells=nothing,geometry_birth=nothing,
+                                 geometry_alternates=nothing,curve_births=Dict{Tuple{Int,Int32},Vector{UInt64}}(),
+                                 periodic_pairs=nothing,native_orphan_births=nothing,native_recombine_events=nothing,
+                                 surface_constructor_inputs=nothing,
+                                 surface_forward=nothing,optimize_pyramids::Float64=0.0)
+    # Mesh2D resets all face statuses before OnlyEmpty/OnlyVisible dispatch.
+    filter!(owner->owner[1]!=2,done)
+    have=Set(cell.owner for cell in assembly.cells)
+    meshed,retained=_higher_surface_mesh_scan(m,entities,options,have,
+        discarded,assembly.caller;dimension)
+    filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
+    _higher_discrete_surface_transport!(assembly,m,entities;options,
+        discarded,parts=geometry_parts,geometry_cells)
+    # The actual products are supplied to extrusion source/cap consumers. A
+    # retained surface's cell order is its stored order, including cap pairs.
+    ranks===nothing || _higher_complete_ranks!(ranks,assembly)
+    input=_higher_assembly_authority(assembly,m,done;ranks,old_supports)
+    input=_higher_bind_producer_rows(input,assembly,
+        geometry_parts===nothing ? Tuple[] : geometry_parts,
+        m.meshing.mesh_authority;curve_births)
+    input=Model._model_mesh_with_curve_births(input,curve_births;caller=assembly.caller)
+    emitted=Set{Tuple{Int,Int32}}()
+    scope=isempty(meshed) ? nothing : Model._extrude_nonew_scope(
+        m,assembly.caller;size_field=size_field,_working_model=true,_mesh_input=input)
+    periodic_masters=Set(Int(constraint.master_entity) for constraint in
+        Model.model_periodic_constraints(m) if constraint.dim==2)
+    # A copied top and a later Region consume the just-emitted actual Source,
+    # including its edited coordinates and its own constructor row identities.
+    ordinary_sources=Set{Int}()
+    unmerged_nonew_sources=Set{Int}()
+    for volume in keys(m.volumes)
+        Model._extrude_nonew_unmerged_b4_incidence(m,volume,assembly.caller) || continue
+        push!(unmerged_nonew_sources,abs(m.meshing.extrude_sources[(3,volume)][2]))
+    end
+    for ((dim,entity),link) in m.meshing.extrude_sources
+        dim in (2,3) && link[1]==2 || continue
+        params=Model._extrude_gate(m,dim,entity)
+        params!==nothing && params.quad_to_tri===:none || continue
+        push!(ordinary_sources,abs(link[2]))
+    end
+    constructor_inputs=surface_constructor_inputs===nothing ?
+        Dict{Tuple{Int,Int32},MixedMesh}() : surface_constructor_inputs
+    # These Faces have already lost their old cells from the detached assembly.
+    # Kept Faces retain their owned constructor vectors; fresh Faces publish
+    # new vectors as their actual cell events arrive in this phase.
+    for tag in meshed
+        delete!(constructor_inputs,(2,Int32(tag)))
+    end
+    units=_higher_surface_units(m,_generate_units(m,2,sort!(meshed)),assembly.caller)
+    # `General.NumThreads` detaches runs of independent singleton
+    # Surfaces: each eligible unit produces its receipt on a transaction copy
+    # under `Threads.@threads`, and the unchanged serial merge below replays or
+    # re-runs each slot in unit order.  `nothing` keeps the exact serial path.
+    parallel_units=_parallel_surface_prepare(m,units,assembly.caller;
+        metric_surface,scope,periodic_masters,ordinary_sources,
+        unmerged_nonew_sources,size_field,geometry_birth)
+    parallel_results=parallel_units===nothing ? nothing :
+        fill!(Vector{Any}(undef,length(units)),nothing)
+    parallel_dirty=_ParallelDirty()
+    parallel_precise=parallel_units===nothing ? false :
+        GmshLibm._win_cli_precision()
+    # Cross-phase adoption: `_dim01_curve_phase!` may already have spawned
+    # detached Surfaces once their boundary Curve products landed.  Adopt
+    # exactly the slots this phase's real eligibility scan still admits
+    # (footprint/deps/scope are phase-stable, so the adopted work records are
+    # interchangeable) and fold its ledger entries into the merge-time dirty
+    # set so every mark the workers observed — or missed — is honoured.
+    if parallel_units!==nothing && surface_forward!==nothing &&
+            surface_forward.units==units
+        for (ui,work) in enumerate(parallel_units)
+            work===nothing && continue
+            spawned=surface_forward.results[ui]
+            spawned===nothing && continue
+            parallel_results[ui]=spawned
+        end
+        union!(parallel_dirty,surface_forward.dirty)
+        parallel_precise=surface_forward.precise
+    end
+    parallel_last=parallel_units===nothing ? 0 :
+        something(findlast(!isnothing,parallel_units),0)
+    # Cross-phase scheduling the other way: precompute the Region eligibility
+    # plan so eligible Regions spawn inside the merge loop below while later
+    # Surfaces still produce.  The Region phase re-verifies each adopted slot
+    # against its real `extruded`/`staged`/hybrid gates and discards whatever
+    # it cannot adopt.  `parallel_dirty` is shared with the spawn ledger so a
+    # Region spawned now still observes every later Surface mutation.
+    volume_forward=nothing
+    if dimension==3
+        volume_tags=sort!(_higher_volume_mesh_tags(m,entities,options,have))
+        volume_plan=isempty(volume_tags) ? nothing :
+            (Base.inferencebarrier(_parallel_volume_prepare)(m,volume_tags,input,assembly.caller;
+                size_field,scope=nothing,extruded=nothing,
+                hybrid_batch=nothing,staged=false))::Union{Nothing,Tuple{Vector{Any},Vector{Union{Nothing,UInt32}}}}
+        volume_plan===nothing || (volume_forward=(
+            tags=volume_tags,prepared=volume_plan[1],
+            pos_draws=volume_plan[2],
+            results=fill!(Vector{Any}(undef,length(volume_tags)),nothing),
+            dirty=parallel_dirty,precise=GmshLibm._win_cli_precision(),
+            size_field=size_field))
+    end
+    for (ui,tags) in enumerate(units)
+        work=parallel_units===nothing ? nothing : parallel_units[ui]
+        if work!==nothing && parallel_results[ui]===nothing
+            vend=ui
+            while vend<length(units) && parallel_units[vend+1]!==nothing
+                vend+=1
+            end
+            _parallel_surface_fill!(parallel_results,ui:vend,m,parallel_units,
+                input,options,assembly,parallel_dirty,parallel_precise,
+                geometry_birth;size_field)
+        end
+        refs=ui<parallel_last || volume_forward!==nothing ?
+            _parallel_surface_param_refs(m) : nothing
+        products=metric_surface!==nothing ? [(only(tags),Base.inferencebarrier(mesh_model_surface)(m,only(tags),size_field;
+            max_metric_edge=metric_surface.max_metric_edge,max_nodes=metric_surface.max_nodes,
+            max_triangles=metric_surface.max_triangles,_mesh_input=input,_mesh1d_options=options,
+            _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
+            _return_surface_production=true,_boundary_regrade=false))] : work!==nothing &&
+            parallel_results[ui]!==nothing ?
+            Base.inferencebarrier(_parallel_surface_products)(m,work,parallel_results[ui],
+                parallel_dirty,assembly;input,scope,options,size_field,
+                geometry_birth,caller=assembly.caller) :
+            length(tags)==1 ? [(tags[1],Base.inferencebarrier(mesh_model_surface)(m,tags[1];
+            size_field=size_field,_extrude_scope=scope,_mesh_input=input,_mesh1d_options=options,
+            _mesh_node_high_water=assembly.node_max,_return_surface_production=true,
+            _mesh_element_high_water=assembly.cell_max,_boundary_regrade=false,
+            _geometry_points=_higher_geometry_source_points(assembly,geometry_birth)))] :
+            Base.inferencebarrier(_compound_surface_meshes)(m,tags,assembly.caller;size_field=size_field,
+                _mesh1d_options=options)
+        for (tag,produced) in products
+            input,scope=(Base.inferencebarrier(_higher_surface_merge_product!)(
+                assembly,m,tag,produced,input,scope,discarded,done;
+                emitted,source_nodes,geometry_cells,native_orphan_births,curve_births,
+                parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
+                periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
+                metric_surface,constructor_inputs,size_field,native_recombine_events))::
+                Tuple{Model._ModelMeshAuthority,Union{Nothing,Model._ExtrudeNoNewScope}}
         end
         # State this unit left behind that a later detached produce still
         # reads: stored discretizations (writeback, grading, remesh) and
@@ -2077,8 +2098,10 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             for (vi,vwork) in enumerate(volume_forward.prepared)
                 vwork===nothing && continue
                 volume_forward.results[vi]===nothing || continue
-                all(dep->dep[1]!=2 || dep in done ||
-                    haskey(input.products,dep),vwork.deps) || continue
+                (let current_input=input
+                    all(dep->dep[1]!=2 || dep in done ||
+                        haskey(current_input.products,dep),vwork.deps)
+                end) || continue
                 if spawn_input===nothing
                     spawn_input=_higher_volume_spawn_input(assembly,m,done;
                         ranks,old_supports,surface_parts=geometry_parts,
@@ -2185,6 +2208,12 @@ function _higher_ingest_native_inputs!(assembly,m,authority)
     authority===nothing && return nothing
     have=Set(cell.owner for cell in assembly.cells)
     owners=Set(keys(authority.native_inputs))
+    # Compile retained native-input classification only when inputs are present.
+    isempty(owners) && return nothing
+    return (Base.inferencebarrier(_higher_ingest_pending_native_inputs!)(assembly,m,authority,have,owners))::Nothing
+end
+
+function _higher_ingest_pending_native_inputs!(assembly,m,authority,have,owners)
     for (owner,mesh) in sort!(collect(authority.native_inputs);by=first)
         owner in have && continue
         # These are the original completed boundary products, retained when a
@@ -2965,6 +2994,10 @@ end
 function _higher_ordinary_lateral_plans(assembly,m,input,extruded,caller)
     plans=Dict{Int,Any}()
     extruded===nothing && return plans
+    return (Base.inferencebarrier(_higher_ordinary_lateral_plans_extruded))(assembly, m, input, extruded, caller, plans)::Dict{Int, Any}
+end
+
+function _higher_ordinary_lateral_plans_extruded(assembly, m, input, extruded, caller, plans)
     for tag in sort!(collect(extruded.remesh))
         entry=Model._extrude_entity_params(m,2,tag,caller)
         entry===nothing && throw(ArgumentError(
@@ -3355,9 +3388,9 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         all(tag->haskey(extruded.productions,tag) ||
             haskey(extruded.parts,tag),meshed) || throw(ArgumentError(
             "$(assembly.caller): ordinary subdivision combined with another Region planner lacks a complete birth plan"))
-        _higher_ordinary_volume_stage!(assembly,m,input,extruded,meshed,lateral_plans,
+        ((Base.inferencebarrier(_higher_ordinary_volume_stage!)(assembly,m,input,extruded,meshed,lateral_plans,
             discarded,done,emitted;source_nodes,geometry_parts,geometry_cells,native_orphan_births,
-            scope,geometry_birth)
+            scope,geometry_birth))::Nothing)
     end
     hybrid_batch=nothing;hybrid_batch_receipt=nothing
     retained_periodic=periodic_surface_pairs!==nothing && any(constraint->
@@ -3388,13 +3421,13 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 assembly.caller;slave_tags)
         end
         births=Model._ModelNativeVolumeBirths(assembly.node_max,assembly.cell_max)
-        hybrid_batch=Model._model_native_hybrid_batch_production(m,meshed,input,options,births,
-            assembly.caller;size_field,optimize_pyramids,periodic_surface_pairs)
+        hybrid_batch=((Base.inferencebarrier(Model._model_native_hybrid_batch_production)(m,meshed,input,options,births,
+            assembly.caller;size_field,optimize_pyramids,periodic_surface_pairs))::Model._ModelNativeHybridBatchProduction)
         hybrid_batch_receipt=_higher_native_hybrid_batch_receipt(assembly,m,hybrid_batch,input,
             meshed,assembly.caller)
     end
     volume_tags=staged ? Int[] : sort!(meshed)
-    # PAR01 — `General.NumThreads` detaches runs of independent Regions: each
+    # `General.NumThreads` detaches runs of independent Regions: each
     # eligible unit produces its receipt on a transaction copy under
     # `Threads.@threads`, and the unchanged serial merge below replays or
     # re-runs each slot in Region order.  `nothing` keeps the exact serial path.
@@ -4146,7 +4179,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[]
     discarded=Set{Tuple{Int,Int32}}()
     native_orphan_births=Set{UInt64}()
-    # PAR01 cross-phase scheduling state: `surface_forward` plans the Surface
+    # Cross-phase scheduling state: `surface_forward` plans the Surface
     # units before Mesh1D so the Curve merge loop can detach each eligible
     # Face the moment its boundary products land; `volume_forward` plans the
     # Region units inside `_higher_surface_phase!` so each eligible Region can
@@ -4223,7 +4256,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                 push!(discarded,(3,Int32(entity[2])))
         end
         filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
-        _,_,retained_surfaces,volume_forward=_higher_surface_phase!(assembly,m,options,entities,discarded,done;
+        _,_,retained_surfaces,volume_forward=Base.inferencebarrier(_higher_surface_phase!)(assembly,m,options,entities,discarded,done;
                                size_field,metric_surface,source_nodes=length(high_order),ranks,old_supports=high_order,
                                 geometry_parts=surface_parts,dimension,geometry_cells,
                                 geometry_birth,geometry_alternates,curve_births,periodic_pairs,native_orphan_births,native_recombine_events,
@@ -4231,7 +4264,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                                 optimize_pyramids=Float64(get(generation_meshing,:optimize_pyramids,0.0)))
     end
     if phases.three
-        _higher_volume_phase!(assembly,m,options,entities,discarded,done;
+        Base.inferencebarrier(_higher_volume_phase!)(assembly,m,options,entities,discarded,done;
                              size_field,source_nodes=length(high_order),ranks,old_supports=high_order,
                              geometry_parts,surface_parts,geometry_cells,geometry_birth,native_orphan_births,
                              periodic_surface_pairs=periodic_pairs,
@@ -4296,10 +4329,10 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     # P1/P3 cells converts rather than hitting the P2 pass's first-element guard.
     if element_order>2 || (p2_pass && (incomplete ||
             any(cell->msh_spec(cell.msh).order>2,assembly.cells)))
-        _dim01_higher_order!(assembly,m,entities,element_order;
+        Base.inferencebarrier(_dim01_higher_order!)(assembly,m,entities,element_order;
             only_visible=options.mesh_only_visible,linear,incomplete)
     elseif p2_pass
-        _dim01_quadratic!(assembly,m,entities;only_visible=options.mesh_only_visible,linear)
+        Base.inferencebarrier(_dim01_quadratic!)(assembly,m,entities;only_visible=options.mesh_only_visible,linear)
     end
     _higher_complete_ranks!(ranks,assembly)
     constructor_cells=Dict{UInt64,_Dim01Cell}()
@@ -4961,62 +4994,62 @@ function _generate_higher_frontend_plan(m,cached,parts,remaps,node_owner,dimensi
         operation=:generate,element_order=1,renumber=true,save_all=false,linear=false,incomplete=false,
         max_nodes=typemax(Int32),max_cells=typemax(Int32),error_callback=nothing,kwargs...)
     if operation===:bind_completed
-        source=Model._model_mesh_transaction_copy(m)
-        authority=_higher_authority_from_parts(source,cached,parts,remaps,node_owner,caller;
+        source=Base.inferencebarrier(Model._model_mesh_transaction_copy)(m)
+        authority=Base.inferencebarrier(_higher_authority_from_parts)(source,cached,parts,remaps,node_owner,caller;
             node_max=initial_max_node_tag,element_max=initial_max_element_tag,
             producer_order=get(kwargs,:producer_order,nothing),
             producer_parameters=get(kwargs,:producer_parameters,nothing),
             producer_coordinates=get(kwargs,:producer_coordinates,nothing))
         if dimension==1 && get(kwargs,:producer_order,nothing)!==nothing
-            return _higher_bind_completed_dim01!(source,authority,parts,caller;
+            return Base.inferencebarrier(_higher_bind_completed_dim01!)(source,authority,parts,caller;
                 initial_max_node_tag,initial_max_element_tag,renumber,save_all,
                 producer_remaps=remaps,
                 producer_geometry_parameters=get(kwargs,:producer_geometry_parameters,nothing))
         end
         source.meshing.mesh_authority=authority
-        actual=authority.mesh;class=_higher_classification_from_data(actual,caller)
+        actual=authority.mesh;class=Base.inferencebarrier(_higher_classification_from_data)(actual,caller)
         maximum_node=max(UInt64(initial_max_node_tag),maximum(actual.entity_data.external_node_tags;init=UInt64(0)))
         maximum_element=max(UInt64(initial_max_element_tag),maximum(
             (maximum(tags;init=UInt64(0)) for tags in actual.entity_data.external_element_tags);init=UInt64(0)))
         nodes=Dict(tag=>tag for tag in actual.entity_data.external_node_tags)
-        _dim01_reconcile_records!(source,model_entities(source),actual,nodes)
+        Base.inferencebarrier(_dim01_reconcile_records!)(source,model_entities(source),actual,nodes)
         return (model=source,mesh=actual,class=class,max_node_tag=maximum_node,
             max_element_tag=maximum_element)
     end
-    source,actual,class=_higher_frontend_input(m,cached,parts,remaps,node_owner,caller;
+    source,actual,class=Base.inferencebarrier(_higher_frontend_input)(m,cached,parts,remaps,node_owner,caller;
         initial_max_node_tag,initial_max_element_tag)
     if operation===:generate
         if dimension in (0,1)
-            plan=_generate_dim01_plan(source,actual,class,dimension,options,caller;
+            plan=Base.inferencebarrier(_generate_dim01_plan)(source,actual,class,dimension,options,caller;
                 initial_max_node_tag,initial_max_element_tag,element_order,renumber,save_all,linear,incomplete,
                 initial_node_counter_wrapped=get(kwargs,:initial_node_counter_wrapped,false),
                 initial_element_counter_wrapped=get(kwargs,:initial_element_counter_wrapped,false),
                 max_nodes,max_cells,generation_meshing=get(kwargs,:generation_meshing,nothing),
                 reuse_curve_params=get(kwargs,:reuse_curve_params,false))
-            return _higher_capture_dim01_authority!(plan)
+            return Base.inferencebarrier(_higher_capture_dim01_authority!)(plan)
         end
-        return _generate_higher_plan(source,actual,class,dimension,options,caller;
+        return Base.inferencebarrier(_generate_higher_plan)(source,actual,class,dimension,options,caller;
             initial_max_node_tag,initial_max_element_tag,element_order,renumber,save_all,linear,incomplete,kwargs...)
     end
     if operation===:native_bipartite_recombine
         native_options=get(kwargs,:native_recombine_options,nothing)
         native_options!==nothing || throw(ArgumentError(
             "$caller: experimental recombination lacks its detached options"))
-        return _api_native_recombine_plan(source,actual,class,caller;options=native_options,
+        return Base.inferencebarrier(_api_native_recombine_plan)(source,actual,class,caller;options=native_options,
             initial_max_node_tag,initial_max_element_tag,max_nodes,max_cells,
             skip_recombination=get(kwargs,:native_recombine_skip,false))
     end
     actual===nothing && throw(ArgumentError("$caller: mesh operation requires actual products"))
     if operation in (:geo_renumber_nodes,:geo_renumber_elements)
-        return _higher_geo_renumber_plan(source,actual,class,operation,caller;
+        return Base.inferencebarrier(_higher_geo_renumber_plan)(source,actual,class,operation,caller;
             initial_max_node_tag,initial_max_element_tag,save_all)
     elseif operation===:recombine
-        return _higher_recombine_plan(source,actual,caller;
+        return Base.inferencebarrier(_higher_recombine_plan)(source,actual,caller;
             algorithm=get(kwargs,:algorithm,:greedy),initial_max_node_tag,
             initial_max_element_tag,max_nodes,max_cells)
     elseif operation===:homology
-        cells,coordinates=Model._native_homology_actual_cells(actual)
-        output=Model.compute_homology!(source,cells;coordinates,initial_max_element_tag,error_callback)
+        cells,coordinates=Base.inferencebarrier(Model._native_homology_actual_cells)(actual)
+        output=Base.inferencebarrier(Model.compute_homology!)(source,cells;coordinates,initial_max_element_tag,error_callback)
         if isempty(output)
             return (model=source,mesh=actual,class=class,
                 max_node_tag=max(UInt64(initial_max_node_tag),maximum(
@@ -5026,12 +5059,12 @@ function _generate_higher_frontend_plan(m,cached,parts,remaps,node_owner,dimensi
                      actual.entity_data.external_element_tags);init=UInt64(0))),
                 homology_output=output)
         end
-        completed=_reclassify_nodes_plan(source,actual,class,caller;
+        completed=Base.inferencebarrier(_reclassify_nodes_plan)(source,actual,class,caller;
             node_max=UInt64(initial_max_node_tag),element_max=UInt64(initial_max_element_tag))
         return merge(completed,(homology_output=output,))
     end
     plan=if operation===:refine
-        result=_mixed_refine_detached(source,actual,class,max_nodes,max_cells;
+        result=Base.inferencebarrier(_mixed_refine_detached)(source,actual,class,max_nodes,max_cells;
             node_max=UInt64(initial_max_node_tag),element_max=UInt64(initial_max_element_tag),
             renumber,save_all,linear_nodes=linear)
         result.plan===nothing && error("$caller: actual refinement lost entity metadata")
@@ -5039,17 +5072,17 @@ function _generate_higher_frontend_plan(m,cached,parts,remaps,node_owner,dimensi
         carrier_tags=previous.mesh.entity_data.external_node_tags[previous.carrier_rows]
         merge(result.plan,(refine_carrier_tags=carrier_tags,))
     elseif operation===:order
-        _set_order_dim01_plan(source,actual,class,element_order,caller;
+        Base.inferencebarrier(_set_order_dim01_plan)(source,actual,class,element_order,caller;
             initial_max_node_tag,initial_max_element_tag,renumber,save_all,max_nodes,max_cells,linear,incomplete)
     elseif operation in (:renumber_nodes,:renumber_elements)
         kind=operation===:renumber_nodes ? :node : :element
-        _tagged_renumber_plan(source,actual,class,(),(),kind,caller;
+        Base.inferencebarrier(_tagged_renumber_plan)(source,actual,class,(),(),kind,caller;
             overlay=nothing,mid_owners=nothing,
             node_max=initial_max_node_tag,element_max=initial_max_element_tag)
     else
         throw(ArgumentError("$caller: unsupported actual mesh operation $operation"))
     end
-    return _higher_rebind_plan_authority!(plan,source.meshing.mesh_authority)
+    return Base.inferencebarrier(_higher_rebind_plan_authority!)(plan,source.meshing.mesh_authority)
 end
 
 Model._MODEL_HIGHER_GENERATOR[]=_generate_higher_frontend_plan

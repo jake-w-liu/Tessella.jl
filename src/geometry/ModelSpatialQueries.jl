@@ -220,6 +220,14 @@ function _model_curve_bounding_box(
             i<=3 ? minimum(values) : maximum(values)
         end,caller,"Curve[$curve]")
     end
+    if _occ_geometry(m,curve)===nothing && _curve_type(m,curve)===:line
+        return _model_bounds_from_points(
+            m,m.curves[curve],caller,"Curve[$curve]")
+    end
+    return (Base.inferencebarrier(_model_curve_bounding_box_non_line)(m,curve,caller))::NTuple{6}
+end
+
+function _model_curve_bounding_box_non_line(m::GeoModel,curve::Int,caller::AbstractString)
     occ=_occ_geometry_checked(m,curve,caller)
     occ!==nothing && occ.occ===:copied_curve && return _model_bounds_checked(
         _model_occ_curve_bbox(occ.curve),caller,"Curve[$curve]")
@@ -319,52 +327,63 @@ function _model_entity_bounding_box(
     entities=_model_entity_dictionary(m,dimension)
     haskey(entities,tag) || throw(ArgumentError(
         "$caller: unknown entity ($dimension,$tag)"))
-    if dimension==0
-        point=m.points[tag]
-        return _model_bounds_checked(
-            (point[1],point[2],point[3],point[1],point[2],point[3]),
-            caller,"Point[$tag]")
-    elseif dimension==1
-        return _model_curve_bounding_box(m,tag,caller)
-    elseif dimension==2
-        surface_geometry=get(m.surface_geometry,tag,nothing)
-        surface_geometry!==nothing && hasproperty(surface_geometry,:natural_bounds) &&
-            return _model_bounds_checked(_occ_natural_surface_bbox(surface_geometry),
-                caller,"Surface[$tag]")
-        if _model_nurbs_surface(surface_geometry)
-            controls=surface_geometry.patch.surface.controls
-            return ntuple(6) do index
-                axis=mod1(index,3)
-                values=(point[axis] for point in controls)
-                index<=3 ? minimum(values)-1e-7 : maximum(values)+1e-7
-            end
+    return (Base.inferencebarrier(_model_entity_bounding_box_selected)(m,
+        dimension==0 ? Val(0) : dimension==1 ? Val(1) : dimension==2 ? Val(2) : Val(3),
+        tag,caller))::NTuple{6}
+end
+
+function _model_entity_bounding_box_selected(m::GeoModel,::Val{0},tag::Int,caller::AbstractString)
+    point=m.points[tag]
+    return _model_bounds_checked(
+        (point[1],point[2],point[3],point[1],point[2],point[3]),
+        caller,"Point[$tag]")
+end
+
+function _model_entity_bounding_box_selected(m::GeoModel,::Val{1},tag::Int,caller::AbstractString)
+    return _model_curve_bounding_box(m,tag,caller)
+end
+
+function _model_entity_bounding_box_selected(m::GeoModel,::Val{2},tag::Int,caller::AbstractString)
+    surface_geometry=get(m.surface_geometry,tag,nothing)
+    surface_geometry!==nothing && hasproperty(surface_geometry,:natural_bounds) &&
+        return _model_bounds_checked(_occ_natural_surface_bbox(surface_geometry),
+            caller,"Surface[$tag]")
+    if _model_nurbs_surface(surface_geometry)
+        controls=surface_geometry.patch.surface.controls
+        return ntuple(6) do index
+            axis=mod1(index,3)
+            values=(point[axis] for point in controls)
+            index<=3 ? minimum(values)-1e-7 : maximum(values)+1e-7
         end
-        # A sphere's wire only spans a single meridian; its face bbox is the
-        # analytic ball box. Cylinder/cone faces reduce to their end circles,
-        # which the boundary-curve union already covers exactly.
-        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ) &&
-                surface_geometry.occ===:sphere
-            C=surface_geometry.center; r=surface_geometry.radius
-            return _model_bounds_checked(
-                (C[1]-r,C[2]-r,C[3]-r,C[1]+r,C[2]+r,C[3]+r),
-                caller,"Surface[$tag]")
-        end
-        # A partial torus's extrema can sit on interior meridians no wire
-        # covers; the face box is the exact one-variable sweep maximization.
-        if surface_geometry!==nothing && hasproperty(surface_geometry,:occ) &&
-                surface_geometry.occ===:torus
-            return _model_bounds_checked(
-                _occ_torus_bounding_box(surface_geometry),
-                caller,"Surface[$tag]")
-        end
-        bounds=_MODEL_EMPTY_BOUNDS
-        for curve in _model_boundary_curves(
-            m,2,tag,caller,"Surface[$tag]")
-            bounds=_model_bounds_union(
-                bounds,_model_curve_bounding_box(m,curve,caller))
-        end
-        return _model_bounds_checked(bounds,caller,"Surface[$tag]")
     end
+    # A sphere's wire only spans a single meridian; its face bbox is the
+    # analytic ball box. Cylinder/cone faces reduce to their end circles,
+    # which the boundary-curve union already covers exactly.
+    if surface_geometry!==nothing && hasproperty(surface_geometry,:occ) &&
+            surface_geometry.occ===:sphere
+        C=surface_geometry.center; r=surface_geometry.radius
+        return _model_bounds_checked(
+            (C[1]-r,C[2]-r,C[3]-r,C[1]+r,C[2]+r,C[3]+r),
+            caller,"Surface[$tag]")
+    end
+    # A partial torus's extrema can sit on interior meridians no wire
+    # covers; the face box is the exact one-variable sweep maximization.
+    if surface_geometry!==nothing && hasproperty(surface_geometry,:occ) &&
+            surface_geometry.occ===:torus
+        return _model_bounds_checked(
+            _occ_torus_bounding_box(surface_geometry),
+            caller,"Surface[$tag]")
+    end
+    bounds=_MODEL_EMPTY_BOUNDS
+    for curve in _model_boundary_curves(
+        m,2,tag,caller,"Surface[$tag]")
+        bounds=_model_bounds_union(
+            bounds,_model_curve_bounding_box(m,curve,caller))
+    end
+    return _model_bounds_checked(bounds,caller,"Surface[$tag]")
+end
+
+function _model_entity_bounding_box_selected(m::GeoModel,::Val{3},tag::Int,caller::AbstractString)
     return _model_volume_bounds(m,tag,caller)
 end
 

@@ -1,6 +1,24 @@
 @testset "public API reference queries, session state and mesh lifecycle" begin
     api = Tessella.API
     api.finalize()
+    let saved_start=api._SESSION_START_TIME[]
+        try
+            api._SESSION_START_TIME[]=time()-3600
+            before=time()
+            api.__init__()
+            after=time()
+            @test before<=api._SESSION_START_TIME[]<=after
+            origin=api._SESSION_START_TIME[]
+            lower=time()-origin
+            elapsed=api.get_time()
+            upper=time()-origin
+            @test lower<=elapsed<=upper
+            @test api.CURRENT[]===nothing && api.LAST_MESH[]===nothing &&
+                isempty(api.MODEL_SLOTS)
+        finally
+            api._SESSION_START_TIME[]=saved_start
+        end
+    end
     @test_throws ArgumentError api.mesh.get()
     @test_throws ArgumentError api.model.add_point(0, 0, 0)
 

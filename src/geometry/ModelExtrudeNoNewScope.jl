@@ -536,7 +536,7 @@ function _extrude_nonew_b4_geometry(m::GeoModel,t::Int,completed::_ExtrudeNoNewC
     return geometry
 end
 
-# ─── Shared-surface slice (LAY01) ───────────────────────────────────────────
+# ─── Shared-surface slice ───────────────────────────────────────────
 # Adjacent QuadTriNoNewVerts sweeps may share literal lateral Surfaces when
 # every NoNewVerts owner records the same linear translation operation
 # modulo the layer grid. Upstream (Gmsh 4.15.2 oracle) admits one literal
@@ -1260,6 +1260,19 @@ function _extrude_nonew_scope(m::GeoModel,caller::AbstractString;
         _extrude_is_nonew(_extrude_gate(m,3,tag)) && push!(selected,tag)
     end
     isempty(selected) && return nothing
+    # Keep optional extrusion planning outside inference when no Region is selected.
+    return (Base.inferencebarrier(_extrude_nonew_scope_selected)(m,caller,selected;
+        tags,min_angle_deg,max_periodic_passes,size_field,_working_model,_mesh_input,_trace_columns))::_ExtrudeNoNewScope
+end
+
+function _extrude_nonew_scope_selected(m::GeoModel,caller::AbstractString,
+        selected;
+                               tags=keys(m.volumes),
+                               min_angle_deg::Real=25.0,
+                               max_periodic_passes=8,
+                               size_field::Union{Nothing,AbstractSizeField}=nothing,
+                               _working_model::Bool=false,_mesh_input=nothing,
+                               _trace_columns::Bool=false)
     sort!(selected)
     working=_working_model ? m : deepcopy(m)
     # Discover every certified shared Surface before any planning, so
@@ -1466,10 +1479,10 @@ function _extrude_nonew_surface_mesh(m::GeoModel,t::Int,
                     (top=owner;break)
             end
             top!=0 || _extrude_nonew_shared_planner_error(caller,t)
-            part=_extrude_nonew_complete_plan(m,top,caller;
+            part=((Base.inferencebarrier(_extrude_nonew_complete_plan)(m,top,caller;
                 min_angle_deg=min_angle_deg,
                 max_periodic_passes=max_periodic_passes,
-                size_field=size_field,_mesh_input=_mesh_input).surfaces[t]
+                size_field=size_field,_mesh_input=_mesh_input))::_ExtrudeNoNewCompletePlan).surfaces[t]
             get(m.meshing.reverse,(2,t),false) &&
                 (part=_reversed_surface_mesh(part,caller,t))
             return part
@@ -1497,9 +1510,9 @@ function _extrude_nonew_surface_mesh(m::GeoModel,t::Int,
                 size_field=size_field,_mesh_input=_mesh_input)
             return built.surfaces[t]
         end
-        completed=_extrude_nonew_complete_plan(m,owner,caller;
+        completed=((Base.inferencebarrier(_extrude_nonew_complete_plan)(m,owner,caller;
             min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
-            size_field=size_field,_mesh_input=_mesh_input)
+            size_field=size_field,_mesh_input=_mesh_input))::_ExtrudeNoNewCompletePlan)
         part=completed.surfaces[t]
         get(m.meshing.reverse,(2,t),false) &&
             (part=_reversed_surface_mesh(part,caller,t))

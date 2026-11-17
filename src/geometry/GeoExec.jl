@@ -10328,185 +10328,39 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     high_order=dim>=1 && _geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"ElementOrder"),1.0),caller)>1
     records=any(!isempty(record.node_tags) || !isempty(record.element_tags) for
-        (_,record) in Model._discrete_mesh_records_model(m))
-    if dim>=2 || actual || high_order || records || (dim>=1 && only_empty) || Model._model_mesh_has_native_sources(m) || (dim>=2 &&
+        (_,record) in Base.inferencebarrier(Model._discrete_mesh_records_model)(m))
+    if dim>=2 || actual || high_order || records || (dim>=1 && only_empty) || Base.inferencebarrier(Model._model_mesh_has_native_sources)(m) || (dim>=2 &&
             context.mesh!==nothing && m.meshing.mesh_authority!==nothing)
         return Base.inferencebarrier(_geo_mesh_actual_higher)(m,dim,context,caller)
     end
     original=m
     # First-order Curve emission and its identity completion are one detached
     # operation. Geometry rows retain their existing emitter/merge order.
-    dim==1 && (m=Model._model_mesh_transaction_copy(m))
-    # For an ordinary native transfinite first-order producer, record its
-    # actual Point/Curve/Surface scheduling before the merged carrier exists.
-    # Extruded and unstructured factory traces have their separate planner.
-    bind_completed=dim==1 || (dim==2 && context.mesh===nothing && !isempty(m.surfaces) &&
-        something(_geo_option_number(context,"Mesh",0,"ElementOrder"),1.0)==1)
-    if bind_completed && dim==2
-        for tag in keys(m.surfaces)
-            if !haskey(m.meshing.transfinite_surfaces,tag) || _extrude_gate(m,2,tag)!==nothing
-                bind_completed=false
-                break
-            end
-        end
-    end
-    producer_order=Tuple{Int,Int}[]
-    bind_completed && append!(producer_order,((0,tag) for tag in sort!(collect(keys(m.points)))))
-    # QuadTri certificates can reject after source grading. Stage the complete
-    # operation, including 1-D grading and homology, so a failed request does
-    # not publish model discretizations or mesh parts.
-    staged=false
-    if dim>=2
-        for tag in keys(m.volumes)
-            params=_extrude_gate(m,3,tag)
-            if _extrude_is_nonew(params) ||
-                    (dim==3 && _extrude_is_quadtri(params))
-                staged=true
-                break
-            end
-        end
-    end
-    staged && (m=deepcopy(m))
-    _geo_sync_meshing_options!(m,context)
+    dim==1 && (m=Base.inferencebarrier(Model._model_mesh_transaction_copy)(m))
+    Base.inferencebarrier(_geo_sync_meshing_options!)(m,context)
     parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[]
-    if dim>=1
-        options=_geo_mesh_1d_options(m,context,caller)
-        if dim==1
-            append!(parts,_model_mesh_dim01!(m,options,caller))
-        else
-            # Grade first (`meshDone1D` upstream); the parts are emitted only
-            # after surface meshing so boundary splits written back to
-            # `curve_params` by `meshGFace`-equivalent writeback appear in the
-            # line elements.
-            _model_mesh_dim01_grade!(m,options,caller)
-        end
-        bind_completed && append!(producer_order,((1,tag) for tag in sort!(collect(keys(m.curve_params)))))
-    end
-    # NoNew finalizes its region and boundary together. Keep this completed
-    # plan within the current Mesh operation, including Mesh 2 queries of its
-    # cap/laterals, instead of retaining a geometry-sensitive session cache.
-    extrude_scope=dim>=2 ?
-        _extrude_nonew_scope(m,caller;_working_model=staged) : nothing
-    if dim>=2
-        # OCC-curved primitive faces (Cylinder/Sphere/Cone/Torus side walls)
-        # cannot standalone-mesh; when the face bounds a volume its facets
-        # ride the volume's boundary recovery instead of emitting tri
-        # elements (upstream emits the face's own tris — a documented gap).
-        # A standalone unmeshable surface still fails through
-        # `mesh_model_surface`'s own diagnostic.
-        boundary_surfaces=Set{Int}()
-        if dim==3
-            for tag in keys(m.volumes)
-                # Only the declared boundary list is needed for the OCC-curved
-                # side-wall skip; the strict shell certification belongs to the
-                # volume-mesh path, which admits valid unmerged sweep topology.
-                for signed in _model_volume_boundary_surfaces(m,tag,caller;
-                        certify_shells=false)
-                    push!(boundary_surfaces,abs(signed))
-                end
-            end
-        end
-        for tag in sort!(collect(keys(m.surfaces)))
-            if dim==3 && tag in boundary_surfaces &&
-                    _surface_type(m,tag) in (:cylinder,:sphere,:cone,:torus)
-                continue
-            end
-            push!(parts,(2,tag,mesh_model_surface(
-                m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options,
-                _boundary_regrade=false)))
-            bind_completed && push!(producer_order,(2,tag))
-        end
-    end
-    if dim==3
-        # `meshGRegionExtruded` sweeps every `Layers`-marked volume ahead of
-        # the unstructured pass, then `SubdivideExtrudedMesh` picks the
-        # shared prism-face diagonals globally and remeshes the affected
-        # lateral surfaces against that edge set.
-        pass=_extrude_volume_pass(m,caller;scope=extrude_scope)
-        for tag in sort!(collect(keys(m.volumes)))
-            if pass!==nothing && haskey(pass.parts,tag)
-                push!(parts,(3,tag,pass.parts[tag]))
-            else
-                push!(parts,(3,tag,mesh_model_volume(
-                    m,tag;_extrude_scope=extrude_scope,_mesh1d_options=options,
-                    _boundary_regrade=false)))
-            end
-        end
-        if pass!==nothing && !isempty(pass.remesh)
-            for (i,(pdim,ptag,_)) in enumerate(parts)
-                pdim==2 && ptag in pass.remesh || continue
-                parts[i]=(2,ptag,mesh_model_surface(
-                    m,ptag;_extrude_edges=pass.edges,_extrude_scope=extrude_scope,
-                    _mesh1d_options=options,_boundary_regrade=false))
-            end
-        end
-    end
-    if dim>=2
-        point_parts=_model_point_mesh_parts(m,caller;
-            _mesh1d_options=options)
-        # NoNew retains CAD control points as well as the completed sweep.
-        # Give those point parts a stable order within this scoped product.
-        extrude_scope!==nothing && sort!(point_parts;by=part->part[2])
-        append!(parts,point_parts)
-        append!(parts,_model_curve_mesh_parts(m,caller))
+    if dim==1
+        options=Base.inferencebarrier(_geo_mesh_1d_options)(m,context,caller)
+        append!(parts,Base.inferencebarrier(_model_mesh_dim01!)(m,options,caller))
     end
     isempty(parts) && throw(ArgumentError(
         "$caller $dim: no entities to mesh"))
-    node_entities=_geo_mesh_part_node_entities(m,parts,caller)
+    node_entities=Base.inferencebarrier(_geo_mesh_part_node_entities)(m,parts,caller)
     merged,owner,rows=_geo_merge_entity_meshes(parts;node_entities,return_remaps=true)
-    if dim==1 && bind_completed
-        produced=_geo_dim01_producer_trace(m,merged,parts,rows,caller)
-        births=_geo_dim01_native_curve_births!(m,merged,parts,rows,produced,options,caller)
-        plan=Model._model_mesh_generate_higher(m,merged,parts,rows,produced.owners,
-            dim,nothing,caller;operation=:bind_completed,
-            producer_order=produced.order,producer_parameters=births.parameters,
-            producer_coordinates=births.coordinates,
-            producer_geometry_parameters=births.geometry_parameters,
-            renumber=!iszero(something(_geo_option_number(context,"Mesh",0,"Renumber"),1.0)),
-            save_all=!iszero(something(_geo_option_number(context,"Mesh",0,"SaveAll"),0.0)),
-            initial_max_node_tag=context.mesh_node_max,
-            initial_max_element_tag=context.mesh_element_max)
-        plan=merge(plan,(geometry_parts=parts,geometry_part_rows=rows))
-        return _geo_publish_actual_plan!(original,context,plan,caller;
-            homology=true,carrier=merged)
-    end
-    parameters=_geo_mesh_stored_parameters(m,merged,owner,context)
-    # Retain the per-entity decomposition so classified projections
-    # (`model_to_mixed`) can recover each entity's own mesh from the merged
-    # product — upstream serializes vertex/edge/face/region cells to their
-    # owning entity, and the part mesh is that view.
-    _geo_run_homology!(m,merged,parts,caller;node_owner=owner,
-        part_node_entities=node_entities,error_callback=_geo_homology_error_callback(context))
-    completed_plan=bind_completed ? Model._model_mesh_generate_higher(m,merged,parts,rows,
-        owner,dim,nothing,caller;operation=:bind_completed,producer_order,
+    produced=Base.inferencebarrier(_geo_dim01_producer_trace)(m,merged,parts,rows,caller)
+    births=Base.inferencebarrier(_geo_dim01_native_curve_births!)(m,merged,parts,rows,produced,options,caller)
+    plan=Base.inferencebarrier(Model._model_mesh_generate_higher)(m,merged,parts,rows,produced.owners,
+        dim,nothing,caller;operation=:bind_completed,
+        producer_order=produced.order,producer_parameters=births.parameters,
+        producer_coordinates=births.coordinates,
+        producer_geometry_parameters=births.geometry_parameters,
+        renumber=!iszero(something(_geo_option_number(context,"Mesh",0,"Renumber"),1.0)),
+        save_all=!iszero(something(_geo_option_number(context,"Mesh",0,"SaveAll"),0.0)),
         initial_max_node_tag=context.mesh_node_max,
-        initial_max_element_tag=context.mesh_element_max) : nothing
-    if completed_plan!==nothing
-        parts,rows=_geo_actual_product_parts(completed_plan.model.meshing.mesh_authority,caller)
-        owner=_geo_actual_carrier_owners(completed_plan.model.meshing.mesh_authority,merged)
-        for name in fieldnames(GeoModel)
-            setfield!(m,name,getfield(completed_plan.model,name))
-        end
-    end
-    if staged
-        for name in fieldnames(GeoModel)
-            setfield!(original,name,getfield(m,name))
-        end
-    end
-    context.mesh_parts=parts
-    context.mesh_part_rows=rows
-    context.mesh_geometry_parts=nothing
-    if completed_plan===nothing
-        context.mesh_node_max=max(context.mesh_node_max,UInt64(nnodes(merged)))
-        context.mesh_element_max=max(context.mesh_element_max,UInt64(sum(
-            _geo_mesh_dim_cells(merged,dimension) for dimension in 1:3)))
-        original.meshing.mesh_authority=Model._model_mesh_completed(original,dim)
-    else
-        context.mesh_node_max=completed_plan.max_node_tag
-        context.mesh_element_max=completed_plan.max_element_tag
-    end
-    context.mesh_node_parametric=parameters
-    return merged,owner
+        initial_max_element_tag=context.mesh_element_max)
+    plan=merge(plan,(geometry_parts=parts,geometry_part_rows=rows))
+    return _geo_publish_actual_plan!(original,context,plan,caller;
+        homology=true,carrier=merged)
 end
 
 function _geo_mesh_working_model(m,context)
@@ -11502,6 +11356,10 @@ end
 
 function _geo_mesh_constraint_point_owners(m,parts,caller)
     isempty(m.embeds) && return nothing
+    return (Base.inferencebarrier(_geo_mesh_constraint_point_owners_nonempty)(m,parts,caller))::Dict{Int,Dict{NTuple{3,Int},Tuple{Int,Int}}}
+end
+
+function _geo_mesh_constraint_point_owners_nonempty(m,parts,caller)
     aliases=Dict{Int,Dict{NTuple{3,Int},Tuple{Int,Int}}}()
     entities=Dict((dim,tag)=>mesh for (dim,tag,mesh) in parts)
     for ((dim,tag),constraints) in m.embeds
@@ -11579,7 +11437,7 @@ function _geo_mesh_part_node_entities(m,parts,caller)
                 end
             end
         else
-            pending=_geo_mesh_children(m,dim,tag,caller)
+            pending=((Base.inferencebarrier(_geo_mesh_children)(m,dim,tag,caller))::Vector{Tuple{Int,Int}})
             seen=Set{Tuple{Int,Int}}()
             entries=Dict{NTuple{3,Int},Tuple{Int,Int}}[]
             boundary_capacity=0
@@ -11593,7 +11451,7 @@ function _geo_mesh_part_node_entities(m,parts,caller)
                     push!(entries,entry)
                     boundary_capacity=Base.checked_add(boundary_capacity,length(entry))
                 end
-                child[1]>0 && append!(pending,_geo_mesh_children(m,child...,caller))
+                child[1]>0 && append!(pending,((Base.inferencebarrier(_geo_mesh_children)(m,child...,caller))::Vector{Tuple{Int,Int}}))
             end
             # Interior-heavy parts need capacity for their actual child maps,
             # rather than for every interior vertex in the carrier mesh.

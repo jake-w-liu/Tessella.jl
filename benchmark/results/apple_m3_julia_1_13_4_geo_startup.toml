@@ -1,0 +1,52 @@
+host = "Apple M3"
+threads = 1
+fresh_process_captures_per_case = 1
+warm_calls_per_case = 7
+
+[cache_build]
+method = "Base.compilecache"
+compatible_cache_before_build = false
+optimization_level = 2
+check_bounds = 1
+threads = 1
+seconds = 630.358001625
+julia_version = "1.13.4"
+source_tree_sha256 = "a12ea2c479c2d62f975013f4cc9600fecce05082a052a6aba40a60037ff2f0e8"
+
+[transfinite]
+case = "transfinite"
+check_bounds = 1
+compatible_cache_before_load = true
+compiled_modules_mode = 2
+first_mesh_bytes = 11953584
+first_mesh_compile_seconds = 0.476129999
+first_mesh_gc_seconds = 0.0
+first_mesh_seconds = 0.500221667
+julia_version = "1.13.4"
+mesh_crc = "04d43d180d0a31704eb4485205e786518304346dae5bf191f7b8a7eedf360aa0"
+nodes = 25
+optimization_level = 2
+package_load_seconds = 6.725366042
+source_tree_sha256 = "a12ea2c479c2d62f975013f4cc9600fecce05082a052a6aba40a60037ff2f0e8"
+tessella_version = "0.1.0"
+triangles = 32
+warm_median_seconds = 0.007742708
+
+[unstructured]
+case = "unstructured"
+check_bounds = 1
+compatible_cache_before_load = true
+compiled_modules_mode = 2
+first_mesh_bytes = 16397784
+first_mesh_compile_seconds = 0.086662628
+first_mesh_gc_seconds = 0.0
+first_mesh_seconds = 0.122889
+julia_version = "1.13.4"
+mesh_crc = "6da678136c140dfdc32437793325f7557d82be61fb01fa108252cc081704442b"
+nodes = 30
+optimization_level = 2
+package_load_seconds = 2.040385375
+source_tree_sha256 = "a12ea2c479c2d62f975013f4cc9600fecce05082a052a6aba40a60037ff2f0e8"
+tessella_version = "0.1.0"
+triangles = 42
+warm_median_seconds = 0.021674834

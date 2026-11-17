@@ -1,4 +1,6 @@
-# Raw point-cloud benchmark
+# Meshing benchmarks
+
+## Raw point-cloud benchmark
 
 This benchmark compares Tessella's Julia mesh kernels with Gmsh's public C API
 for planar triangulation and spatial tetrahedralization. Results apply to raw
@@ -120,3 +122,36 @@ import followed a successful import of identical source. The disabled captures
 used `--compiled-modules=no`; all captures used `--compile=yes -O2` and one
 thread. Tessella's package loading and first-call compilation add startup cost
 beyond the warm meshing measurements above.
+
+## GEO startup
+
+Run each case in a fresh Julia process from the repository root. Prepare the
+dependencies and measure package precompilation separately:
+
+```sh
+JULIA_PKG_PRECOMPILE_AUTO=0 julia --project=. --startup-file=no -O2 --check-bounds=yes --threads=1 \
+  -e 'using Pkg; Pkg.instantiate(); @time Pkg.precompile()'
+```
+
+Then measure a transfinite or unstructured unit square:
+
+```sh
+julia --project=. --startup-file=no --compiled-modules=existing --pkgimages=yes \
+  --compile=yes -O2 --check-bounds=yes --threads=1 \
+  benchmark/geo_startup.jl transfinite transfinite.toml
+julia --project=. --startup-file=no --compiled-modules=existing --pkgimages=yes \
+  --compile=yes -O2 --check-bounds=yes --threads=1 \
+  benchmark/geo_startup.jl unstructured unstructured.toml
+```
+
+The TOML separates package loading, the first meshing call, and the median of
+seven warm calls. It records cache availability, runtime options, source hash,
+mesh size, and checksum. Each case checks positive triangle areas, unit-square
+coverage, and identical coordinates and connectivity checksums across repeats.
+Omit the output filename to print TOML to standard output.
+
+The [example captures](results/apple_m3_julia_1_13_4_geo_startup.toml) report one
+run of each case. Julia loaded a compatible cache with optimization level 2,
+bounds checks, and one thread. The cache build was timed separately using
+`Base.compilecache`. Re-run on an idle host for the source and Julia version
+being used.

@@ -814,4 +814,6 @@ function mesh_volume(surface::Mesh; smooth=true, smooth_iters=5,
     return m
 end
 
+include("precompile.jl")
+
 end # module Tessella

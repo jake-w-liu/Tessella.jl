@@ -469,6 +469,10 @@ end
 # rebound so the commit stays atomic.
 function _high_order_optimize_plan!(plan, caller::AbstractString)
     _high_order_optimize_relocation() || return plan
+    return Base.inferencebarrier(_high_order_optimize_enabled_plan!)(plan, caller)
+end
+
+function _high_order_optimize_enabled_plan!(plan, caller::AbstractString)
     if get(plan, :mesh, nothing) isa MixedMesh
         mesh = plan.mesh
         if mesh === LAST_MESH[]

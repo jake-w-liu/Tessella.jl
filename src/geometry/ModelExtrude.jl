@@ -1649,6 +1649,16 @@ function _extrude_bl_prepare_inner!(m::GeoModel,caller::AbstractString;
     end
     isempty(pending) && isempty(pending_surf) && isempty(pending_lat) &&
         return nothing
+    # Avoid compiling optional CAD construction when no boundary-layer work is pending.
+    return (Base.inferencebarrier(_extrude_bl_prepare_pending!)(m,caller,pending,pending_surf,pending_lat;
+        _fields,_mesh_input,_options,_model,_mesh1d_options,_size_field))::Nothing
+end
+
+function _extrude_bl_prepare_pending!(m::GeoModel,caller::AbstractString,
+        pending,pending_surf,pending_lat;
+                              _fields=nothing,_mesh_input=nothing,
+                              _options=nothing,_model=nothing,
+                              _mesh1d_options=nothing,_size_field=nothing)
     field_model=_model===nothing ? m : _model
     # The chains and source-face meshes these maps key on must be the
     # *native* 1-D grading — the parameters the curve phase will publish —
@@ -2573,6 +2583,14 @@ function _extrude_surface_mesh(m::GeoModel,t::Int,caller::AbstractString;
     entry=_extrude_entity_params(m,2,t,caller;_mesh_input,
         _mesh1d_options=_options,_size_field=size_field)
     entry===nothing && return nothing
+    return (Base.inferencebarrier(_extrude_surface_mesh_entry)(m,t,caller,entry;
+        min_angle_deg,max_periodic_passes,size_field,edges,
+        _mesh_input,_return_production,_options))::Union{Nothing,Mesh,MixedMesh,_ExtrudeMeshProduction}
+end
+
+function _extrude_surface_mesh_entry(m::GeoModel,t::Int,caller::AbstractString,entry;
+        min_angle_deg,max_periodic_passes,size_field,edges,
+        _mesh_input,_return_production,_options)
     params,spec,link=entry
     if spec isa NamedTuple && get(spec,:type,nothing)===:boundary_layer &&
         link[1]==1 && !haskey(spec,:levels)
@@ -2639,6 +2657,10 @@ function _extrude_volume_pass(m::GeoModel,caller::AbstractString;
         _extrude_gate(m,3,tag)===nothing || push!(tags,tag)
     end
     isempty(tags) && return nothing
+    return (Base.inferencebarrier(_extrude_volume_pass_selected))(m, caller, tags; scope, _mesh_input)::NamedTuple{(:parts, :productions, :temporary_elements, :edges, :remesh, :scope), <:Tuple{Dict{Int, Union{Mesh, MixedMesh}}, Dict{Int, _ExtrudeMeshProduction}, Dict{Int, Int}, Union{Nothing, Set{NTuple{2, NTuple{3, Float64}}}}, Set{Int}, Union{typeof(scope), Nothing, _ExtrudeNoNewScope}}}
+end
+
+function _extrude_volume_pass_selected(m::GeoModel, caller::AbstractString, tags; scope, _mesh_input)
     sort!(tags)
     scope===nothing && (scope=_extrude_nonew_scope(m,caller;tags=tags,_mesh_input))
     sweeps=_ExtrudeVolumeSweep[]

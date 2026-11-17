@@ -184,30 +184,32 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     local params,count,rows
     done=false
     for _attempt in 1:8
-        evaluate=function(t,at_begin,at_end)
-            point=gamma(t)
-            speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
-            if aniso
-                metric=if at_begin
-                    _model_vertex_bgm_metric(m,a,point,runopts,caller;_native_producer)
-                elseif at_end
-                    _model_vertex_bgm_metric(m,b,point,runopts,caller;_native_producer)
-                else
-                    _model_curve_bgm_metric(m,curve,t,point,0.0,1.0,runopts,caller;
-                        _native_producer)
+        evaluate=let current_runopts=runopts
+            function(t,at_begin,at_end)
+                point=gamma(t)
+                speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
+                if aniso
+                    metric=if at_begin
+                        _model_vertex_bgm_metric(m,a,point,current_runopts,caller;_native_producer)
+                    elseif at_end
+                        _model_vertex_bgm_metric(m,b,point,current_runopts,caller;_native_producer)
+                    else
+                        _model_curve_bgm_metric(m,curve,t,point,0.0,1.0,current_runopts,caller;
+                            _native_producer)
+                    end
+                    lc=_metric_displacement(metric,tangent[1],tangent[2],tangent[3],caller)
+                    isfinite(lc) && lc>0 || throw(ArgumentError(
+                        "$caller: native Line metric density is nonpositive or not representable"))
+                    return _IntegrationPoint(t,lc,0.0,speed,1.0)
                 end
-                lc=_metric_displacement(metric,tangent[1],tangent[2],tangent[3],caller)
+                endpoint=at_begin ? _model_vertex_bgm(m,a,point,current_runopts,caller;_native_producer) :
+                         at_end ? _model_vertex_bgm(m,b,point,current_runopts,caller;_native_producer) : GMSH_MAX_SIZE
+                h=min(endpoint,_model_curve_bgm(m,curve,t,point,0.0,1.0,current_runopts,caller;_native_producer))
+                lc=speed/h
                 isfinite(lc) && lc>0 || throw(ArgumentError(
-                    "$caller: native Line metric density is nonpositive or not representable"))
-                return _IntegrationPoint(t,lc,0.0,speed,1.0)
+                    "$caller: native Line density is nonpositive or not representable"))
+                return _IntegrationPoint(t,lc,0.0,speed,h)
             end
-            endpoint=at_begin ? _model_vertex_bgm(m,a,point,runopts,caller;_native_producer) :
-                     at_end ? _model_vertex_bgm(m,b,point,runopts,caller;_native_producer) : GMSH_MAX_SIZE
-            h=min(endpoint,_model_curve_bgm(m,curve,t,point,0.0,1.0,runopts,caller;_native_producer))
-            lc=speed/h
-            isfinite(lc) && lc>0 || throw(ArgumentError(
-                "$caller: native Line density is nonpositive or not representable"))
-            return _IntegrationPoint(t,lc,0.0,speed,h)
         end
         points=_gmsh_curve_integration(evaluate,0.0,1.0,options.integration_precision,caller)
         try
@@ -222,20 +224,24 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
         params=_gmsh_curve_parameters(points,nedge+1,caller)
         coordinates=NTuple{3,Float64}[gamma(t) for t in params]
         field=_ModelCurveEntityField(m,runopts,String(caller))
-        size_function=t->_model_curve_bgm(m,curve,t,gamma(t),0.0,1.0,runopts,caller;_native_producer)
+        size_function=let current_runopts=runopts
+            t->_model_curve_bgm(m,curve,t,gamma(t),0.0,1.0,current_runopts,caller;_native_producer)
+        end
         count=length(params)-2
         rows=_birth_rows ? collect(eachindex(params)) : nothing
         if aniso
             # Equal-primitive marks invert a few ulps past the strict
             # `metric_edge_length` certificate — re-bisect interior nodes to the
             # conservative share (the endpoint stays at t1=1.0).
-            metric_of=function(u,xyz,entity)
-                dim,tag=entity===nothing ? (1,curve) :
-                    (Int(entity[1]),Int(entity[2]))
-                dim==0 ? _model_vertex_bgm_metric(
-                             m,tag,xyz,runopts,caller;_native_producer) :
-                         _model_curve_bgm_metric(
-                             m,tag,u,xyz,0.0,1.0,runopts,caller;_native_producer)
+            metric_of=let current_runopts=runopts
+                function(u,xyz,entity)
+                    dim,tag=entity===nothing ? (1,curve) :
+                        (Int(entity[1]),Int(entity[2]))
+                    dim==0 ? _model_vertex_bgm_metric(
+                                 m,tag,xyz,current_runopts,caller;_native_producer) :
+                             _model_curve_bgm_metric(
+                                 m,tag,u,xyz,0.0,1.0,current_runopts,caller;_native_producer)
+                end
             end
             _undershoot_metric_edges!(gamma,metric_of,params,coordinates,1.0,
                                       (1,curve),mass/nedge,false,caller)

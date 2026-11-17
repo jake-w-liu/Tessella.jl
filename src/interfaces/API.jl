@@ -130,6 +130,8 @@ export initialize, finalize, clear, option, model, mesh, open_geo!, write, open,
 
 const _SESSION_START_TIME = Ref{Float64}(time())
 
+__init__() = (_SESSION_START_TIME[] = time(); nothing)
+
 """Return the wall-clock seconds elapsed since `initialize()` (or session start)."""
 function get_time()
     return time()-_SESSION_START_TIME[]
@@ -2798,11 +2800,11 @@ function _generate_native_lookup_live(dim::Integer)
         if dimension<=1
             cached=LAST_MESH[]
             class=cached===nothing ? nothing : _cached_classification_locked(cached)
-            actual,actual_class=_dim01_actual_cache(cached,class;physical_names=source_model.physical_names)
+            actual,actual_class=(Base.inferencebarrier(_dim01_actual_cache)(cached,class;physical_names=source_model.physical_names))::Tuple{Union{Nothing,Mesh,MixedMesh},Union{Nothing,_MeshClassification}}
             if dimension==1 && actual!==nothing && actual_class!==nothing && actual_class.public_tags===nothing
                 actual,actual_class=_dim01_complete_native_cache(source_model,actual,actual_class,caller)
             end
-            plan=_generate_dim01_plan(source_model,actual,actual_class,dimension,
+            plan=(Base.inferencebarrier(_generate_dim01_plan)(source_model,actual,actual_class,dimension,
                 _session_mesh1d_options(source_model,caller),caller;
                 element_order=order,linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
                 incomplete=!iszero(OPTIONS["Mesh.SecondOrderIncomplete"]),
@@ -2812,22 +2814,22 @@ function _generate_native_lookup_live(dim::Integer)
                 initial_max_element_tag=ELEMENT_TAG_MAX[],
                 initial_node_counter_wrapped=NODE_COUNTER_WRAPPED[],
                 initial_element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[],
-                generation_meshing=_generation_meshing_options(order))
-            _higher_capture_dim01_authority!(plan)
-            plan=_high_order_optimize_plan!(plan,caller)
-            _commit_tagged_plan_locked!(plan;preserve_visibility=true,
-                                       element_tag_map=plan.visibility_tag_map)
+                generation_meshing=_generation_meshing_options(order)))::NamedTuple
+            Base.inferencebarrier(_higher_capture_dim01_authority!)(plan)
+            plan=(Base.inferencebarrier(_high_order_optimize_plan!)(plan,caller))::NamedTuple
+            (Base.inferencebarrier(_commit_tagged_plan_locked!)(plan;preserve_visibility=true,
+                                       element_tag_map=plan.visibility_tag_map))::Nothing
             # Native renumber/completed generation clears lookup state before
             # queued homology can report an error from the published mesh.
             _native_lookup_invalidate_locked!()
             # Native generation runs queued homology after publishing its
             # completed mesh, including the constructor clocks on an error.
-            isempty(CURRENT[].meshing.homology_requests) || _compute_homology()
-            return _copy_mesh(plan.geometry_carrier)
+            isempty(CURRENT[].meshing.homology_requests) || Base.inferencebarrier(_compute_homology)()
+            return (Base.inferencebarrier(_copy_mesh)(plan.geometry_carrier))::Union{Mesh,MixedMesh}
         end
         class=previous===nothing ? nothing : _cached_classification_locked(previous)
-        actual,actual_class=_dim01_actual_cache(previous,class;
-            physical_names=source_model.physical_names)
+        actual,actual_class=(Base.inferencebarrier(_dim01_actual_cache)(previous,class;
+            physical_names=source_model.physical_names))::Tuple{Union{Nothing,Mesh,MixedMesh},Union{Nothing,_MeshClassification}}
         authority=source_model.meshing.mesh_authority
         preserve_geometry=iszero(OPTIONS["Mesh.MeshOnlyEmpty"]) &&
             (previous===nothing || previous isa Mesh ||
@@ -2840,7 +2842,7 @@ function _generate_native_lookup_live(dim::Integer)
               isequal(previous.coords,authority.carrier.coords)))
         # Lower-dimensional generation must not infer the unrelated volume
         # producer tree. Resolve the higher planner only on this executed route.
-        plan=Base.inferencebarrier(_generate_higher_plan)(source_model,actual,actual_class,dimension,
+        plan=(Base.inferencebarrier(_generate_higher_plan)(source_model,actual,actual_class,dimension,
             _session_mesh1d_options(source_model,caller),caller;
             generation_meshing=_generation_meshing_options(order),element_order=order,
             linear=!iszero(OPTIONS["Mesh.SecondOrderLinear"]),
@@ -2849,17 +2851,17 @@ function _generate_native_lookup_live(dim::Integer)
             save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
             size_field=_session_size_field_locked(source_model),
             initial_max_node_tag=NODE_TAG_MAX[],initial_max_element_tag=ELEMENT_TAG_MAX[],
-            preserve_geometry)
-        plan=_high_order_optimize_plan!(plan,caller)
-        _commit_tagged_plan_locked!(plan;preserve_visibility=true,
-            element_tag_map=plan.visibility_tag_map)
+            preserve_geometry))::NamedTuple
+        plan=(Base.inferencebarrier(_high_order_optimize_plan!)(plan,caller))::NamedTuple
+        (Base.inferencebarrier(_commit_tagged_plan_locked!)(plan;preserve_visibility=true,
+            element_tag_map=plan.visibility_tag_map))::Nothing
         for (kind,message) in get(plan,:native_recombine_events,())
             kind===:error ? _native_mesh_input_error_locked(message) :
                 _native_diagnostic_emit_locked(kind,message)
         end
         _native_lookup_invalidate_locked!()
-        isempty(CURRENT[].meshing.homology_requests) || _compute_homology()
-        _copy_mesh(plan.model.meshing.mesh_authority.carrier)
+        isempty(CURRENT[].meshing.homology_requests) || Base.inferencebarrier(_compute_homology)()
+        (Base.inferencebarrier(_copy_mesh)(plan.model.meshing.mesh_authority.carrier))::Union{Mesh,MixedMesh}
     end
 end
 

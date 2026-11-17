@@ -7626,22 +7626,43 @@ function _mesh_model_surface_once(m::GeoModel,t::Int,forced,min_angle_deg,
             m,t,param_sizes,caller;size_field,_mesh_input,_mesh_node_high_water,
             _return_surface_production,_geometry_points),NTuple{2,Int}[]
     end
+    # Compile an unstructured producer only after transfinite admission fails.
+    (Base.inferencebarrier(_mesh_model_surface_unstructured_once)(m,t,forced,min_angle_deg,caller;
+        size_field,_mesh1d_options,_mesh_input,_mesh_node_high_water,_mesh_element_high_water,
+        _return_surface_production,_geometry_points,_boundary_regrade,param_sizes,_periodic_positions))::Tuple{Union{Mesh,MixedMesh,_ModelSurfaceProduction},Vector{NTuple{2,Int}}}
+end
+
+function _mesh_model_surface_unstructured_once(m::GeoModel,t::Int,forced,min_angle_deg,
+                                  caller::AbstractString;
+                                  size_field::Union{Nothing,AbstractSizeField}=
+                                      nothing,
+                                  _mesh1d_options=nothing,
+                                  _mesh_input=nothing,
+                                  _mesh_node_high_water=nothing,
+                                  _mesh_element_high_water=UInt64(0),
+                                  _return_surface_production=false,
+                                  _geometry_points=nothing,
+                                  _boundary_regrade::Bool=true,
+                                  param_sizes::Dict{Tuple{Int,Float64},
+                                                   Float64}=
+                                      Dict{Tuple{Int,Float64},Float64}(),
+                                  _periodic_positions=nothing)
     algorithm=_normal_surface_mesh_algorithm(m,t,caller;metric=true)
-    algorithm==1 && return _meshadapt_surface_algorithm_mesh(m,t,caller;
+    algorithm==1 && return ((Base.inferencebarrier(_meshadapt_surface_algorithm_mesh)(m,t,caller;
         size_field,_mesh_input,_mesh1d_options,_mesh_node_high_water,
-        _mesh_element_high_water,_boundary_regrade),
+        _mesh_element_high_water,_boundary_regrade))::_ModelSurfaceProduction),
         get(m.embeds,(2,t),NTuple{2,Int}[])
     # Upstream's algorithm 7 (BAMG) selects the native metric-driven surface
     # construction: the conforming tensor-bisection producer, fed by the
     # selected tensor background field or the isotropic scalar-context metric.
     # Non-planar and other unsupported Surface contexts reject through its
     # admission contract rather than being silently substituted.
-    algorithm==7 && return _metric_surface_algorithm_mesh(m,t,caller;
+    algorithm==7 && return ((Base.inferencebarrier(_metric_surface_algorithm_mesh)(m,t,caller;
         size_field=size_field,_mesh_input=_mesh_input,
         _mesh1d_options=_mesh1d_options,
         _mesh_node_high_water=_mesh_node_high_water,
         _mesh_element_high_water=_mesh_element_high_water,
-        _boundary_regrade=_boundary_regrade),
+        _boundary_regrade=_boundary_regrade))::_ModelSurfaceProduction),
         get(m.embeds,(2,t),NTuple{2,Int}[])
     geometry=get(m.surface_geometry,t,nothing)
     builtin_plane=_surface_type(m,t)===:plane &&
@@ -9697,12 +9718,12 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             "implemented"))
         if algorithm in (1,7)
             producer=algorithm==1 ? _model_occ_meshadapt_surface_mesh : _model_occ_metric_surface_mesh
-            production=producer(m,t,caller;
+            production=((Base.inferencebarrier(producer)(m,t,caller;
                 size_field=size_field,_mesh_input=_mesh_input,
                 _mesh1d_options=options,
                 _mesh_node_high_water=_mesh_node_high_water,
                 _mesh_element_high_water=_mesh_element_high_water,
-                _boundary_regrade=_boundary_regrade)
+                _boundary_regrade=_boundary_regrade))::_ModelSurfaceProduction)
             mesh=production.mesh
             diag=validate(mesh)
             diag.ok || throw(ErrorException(
@@ -9729,8 +9750,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             # native path — while interior vertices mint fresh labels.
             lower_input,lower_limit=_gmsh_native_surface_lower_input(
                 m,options,_mesh_input,_mesh_node_high_water,caller)
-            mesh,owners,params,_=_model_occ_curved_surface_mesh_tracked(
-                m,t,caller;initial_only=algorithm==3,_mesh1d_options=options)
+            mesh,owners,params,_=((Base.inferencebarrier(_model_occ_curved_surface_mesh_tracked)(
+                m,t,caller;initial_only=algorithm==3,_mesh1d_options=options))::Tuple{Mesh, Vector{Tuple{Int, Int32}}, Vector{Union{Nothing, Vector{Float64}}}, NamedTuple})
             diag=validate(mesh)
             diag.ok || throw(ErrorException(
                 "$caller: invalid mesh — "*join(diag.messages,"; ")))
@@ -9742,8 +9763,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                 _occ_curved_surface_production(m,t,mesh,owners,params,
                 lower_input,lower_limit,caller))
         end
-        mesh=_model_occ_curved_surface_mesh(m,t,caller;
-            initial_only=algorithm==3,_mesh1d_options=options)
+        mesh=((Base.inferencebarrier(_model_occ_curved_surface_mesh)(m,t,caller;
+            initial_only=algorithm==3,_mesh1d_options=options))::Mesh)
         diag=validate(mesh)
         diag.ok || throw(ErrorException(
             "$caller: invalid mesh — "*join(diag.messages,"; ")))
@@ -9798,10 +9819,10 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         # boundaries the plane projection cannot represent); plane surfaces
         # keep the identical plane frame.
         uv=_surface_type(m,t) in (:ruled,:tric)
-        mesh,bl_owners,bl_params=_model_bl_surface_mesh(
+        mesh,bl_owners,bl_params=((Base.inferencebarrier(_model_bl_surface_mesh)(
             m,t,bl_specs,forced,param_sizes,plane,caller;
             _periodic_positions=periodic_positions,uv=uv,
-            dropped_curves=bl_dropped)
+            dropped_curves=bl_dropped))::Tuple{Union{Mesh, MixedMesh}, Vector{Tuple{Int, Int32}}, Vector{Union{Nothing, Vector{Float64}}}})
         get(m.meshing.reverse,(2,t),false) &&
             (mesh=_reversed_surface_mesh(mesh,caller,t))
         mesh=_model_surface_boundary_writeback!(m,t,mesh,caller)

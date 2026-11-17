@@ -838,6 +838,13 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
         return _model_native_line_grade_params(m,Int(curve),options,caller;
                                                _native_producer,_birth_rows=_native_producer)
     end
+    return (Base.inferencebarrier(_model_curve_grade_params_general)(m,curve,t0,t1,options,caller;
+        _native_producer,_point_store,_l1_bounds,_skip_filter))::Vector{Float64}
+end
+
+function _model_curve_grade_params_general(m::GeoModel,curve::Integer,t0::Float64,t1::Float64,
+        options::_ModelMesh1DOptions,caller::AbstractString;
+        _native_producer,_point_store,_l1_bounds,_skip_filter)
     γ=u->_model_curve_point(m,curve,u,caller)
     a,b=m.curves[curve]
     closed=a==b
@@ -1638,8 +1645,8 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
             m,curve,master,master_params,constraint.reversed,caller)
     end
     record!==nothing &&
-        return _model_discrete_curve_grade_params(
-            m,curve,record,options,caller)
+        return (Base.inferencebarrier(_model_discrete_curve_grade_params)(
+            m,curve,record,options,caller))::Vector{Float64}
     a,b=m.curves[curve]
     # Upstream warns "Skipping curve with no begin or end point" at the
     # vertex-creation stage and leaves the curve PENDING (retried, never
@@ -1700,9 +1707,9 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         kind===:line || throw(ArgumentError(
             "$caller: Boundary layer end point should lie on a straight " *
             "line (curve $curve)"))
-        return _model_curve_bl_grade_params(
+        return (Base.inferencebarrier(_model_curve_bl_grade_params)(
             m,curve,bl_ends[1],bl_ends[2],t0,t1,length,options,caller;
-            transfinite=spec,_native_producer=_native_producer)
+            transfinite=spec,_native_producer=_native_producer))::Union{Vector{Float64},_ModelNativeCurveGrade}
     end
     if spec!==nothing
         if _native_producer && spec.coef!=0.0 &&
@@ -1715,9 +1722,9 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
     end
     if _native_producer &&
             (kind in (:circle,:ellipse,:tensor_bezier,:tensor_bspline) || kind in _SPLINE_CURVE_TYPES)
-        return _model_native_curve_grade_params(m,Int(curve),options,caller;_birth_rows=true)
+        return (Base.inferencebarrier(_model_native_curve_grade_params)(m,Int(curve),options,caller;_birth_rows=true))::_ModelNativeCurveGrade
     end
-    return _model_curve_grade_params(m,curve,t0,t1,options,caller;_native_producer)
+    return (Base.inferencebarrier(_model_curve_grade_params)(m,curve,t0,t1,options,caller;_native_producer))::Union{Vector{Float64},_ModelNativeCurveGrade}
 end
 
 # `Mesh1D` — every curve starts PENDING; periodic slaves and curve-extruded
@@ -1899,7 +1906,7 @@ function _model_mesh_part_node_entities(m::GeoModel,dim::Int,tag::Int,mesh,
         return owners
     end
     dim in (2,3) || throw(ArgumentError("$caller: invalid mesh part dimension $dim"))
-    projected=model_to_mixed(m,mesh,dim,tag)
+    projected=(Base.inferencebarrier(model_to_mixed)(m,mesh,dim,tag))::MixedMesh
     data=projected.entity_data
     data!==nothing && length(data.node_entities)==nnodes(mesh) ||
         throw(ErrorException("$caller: mesh part projection changed the node set"))

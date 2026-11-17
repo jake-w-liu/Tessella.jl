@@ -1,4 +1,4 @@
-# PAR01 — detached independent-Region production under `General.NumThreads`.
+# Detached independent-Region production under `General.NumThreads`.
 #
 # `_higher_volume_phase!` still owns the serial `sort!(meshed)` traversal, the
 # `_higher_append_part!` publication merge and every authority/certificate
@@ -386,6 +386,10 @@ end
 function _parallel_volume_prepare(m::GeoModel,volume_tags,input,caller;
         size_field,scope,extruded,hybrid_batch,staged)
     _parallel_volume_workers()>=2 || return nothing
+    return (Base.inferencebarrier(_parallel_volume_prepare_workers))(m, volume_tags, input, caller; size_field, scope, extruded, hybrid_batch, staged)::Union{Nothing, Tuple{Vector{Any}, Vector{Union{Nothing, UInt32}}}}
+end
+
+function _parallel_volume_prepare_workers(m::GeoModel, volume_tags, input, caller; size_field, scope, extruded, hybrid_batch, staged)
     (scope===nothing && extruded===nothing &&
         hybrid_batch===nothing && !staged &&
         m.meshing.size_callback===nothing) || return nothing
