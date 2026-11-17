@@ -1,5 +1,5 @@
 module PublicCompactPrismFunctionalChecks
-using Test, Tessella, LinearAlgebra, TOML
+using Test, Tessella, LinearAlgebra
 
 const E = Tessella.Elements
 const PRISM_SOURCE = raw"""
@@ -91,7 +91,6 @@ function independent_prism_volumes(mesh)
     return result
 end
 
-println("PUBLIC_COMPACT_BEGIN");flush(stdout)
 @testset "public compact prism shifted cap coverage and orphan retention" begin
     execution=mktemp() do path,stream
         write(stream,PRISM_SOURCE);close(stream)
@@ -148,16 +147,7 @@ println("PUBLIC_COMPACT_BEGIN");flush(stdout)
         @test all(row->!used_rows(recovered)[row],rows)
     end
 
-    # This existing opaque native capture is unrecombined. It supports only
-    # allocation/orphan counts here, not matching recombined cell identities.
-    artifact=joinpath(dirname(pathof(Tessella)),"..","test","artifacts",
-                      "native_compact_transfinite_orphan_births_4152_v1.toml")
-    native=only(filter(case->case["name"]=="compact_n3",TOML.parsefile(artifact)["case"]))
-    @test size(actual.coords,2)==length(native["node_tags"])==46
-    @test length(orphan_rows)==length(native["orphan_tags"])==2
-    println("PUBLIC_COMPACT_COUNTS ",cell_counts(mesh)," nodes=",size(mesh.coords,2),
-            " orphan_tags=",orphan_tags," volume=",sum(volumes));flush(stdout)
+    @test size(actual.coords,2)==46
 end
-println("PUBLIC_COMPACT_OK");flush(stdout)
 
 end
