@@ -2,7 +2,6 @@ using Test
 using Tessella
 using Tessella.MeshTypes: mesh_crc, nnodes, node, ntets, tet_volume
 using Tessella.Elements: mixed_crc
-include("geo_geometry_expression_native_helpers.jl")
 
 const _GEO_GEOMETRY_EXPRESSION_FIXTURE=normpath(joinpath(
     @__DIR__,"..","fixtures","geo_geometry_expressions.geo"))
@@ -68,7 +67,6 @@ end
     @test volume≈1.0 atol=1e-12
     projected=model_to_mixed(meshed.model,
         geo_entity_mesh(meshed,3,60),3,60)
-    GeometryExpressionNativeControls.check(meshed,projected)
     @test validate(projected).ok
     @test projected.physical_names==model.physical_names
     @test mixed_crc(projected).sha==

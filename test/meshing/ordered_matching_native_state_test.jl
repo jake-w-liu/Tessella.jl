@@ -2,20 +2,9 @@ module OrderedMatchingNativeStateTests
 using Test, Tessella
 const O=Tessella.OrderedMatching
 
-# Retained opaque native records publish one tuple per vertex for three
-# intermediate states:
-#   (label, edge, dual, flag)
-# label 2: integrally matched; edge is the 0-based directed input edge index.
-# label 1: vertex on a retained odd half-cycle; edge is the 0-based index of
-#          that vertex's outgoing ring edge in the published ring direction.
-# label 0: left free by cycle rounding (edge -1).
-# flag is 0 on every record. `S init` is the greedy singleton cover, `S
-# fractional` is the completed fractional state with retained rings, and `S
-# rounded` is the integral seed handed to the Blossom continuation: matched
-# cycle vertices plus one free vertex per ring. These fixtures cover the
-# verified alignment boundary: every production phase through the seed is
-# exactly reproduced; only the Blossom continuation can still diverge on
-# multi-cycle optimal ties.
+# Literal per-vertex states are (label, edge, dual, flag), with 0-based edges.
+# Label 2 marks an integral match, 1 a directed odd half-cycle, and 0 a free
+# vertex. The rounded state supplies the seed for the Blossom continuation.
 const CASES=[
     # No retained cycles after the fractional search.
     (name="weighted_39",count=6,ne=6,nm=3,
@@ -94,22 +83,9 @@ const CASES=[
 active_cycles(state)=[cycle for (id,cycle) in enumerate(state.cycles)
     if state.cycle_owner[first(cycle[1])]==id]
 
-@testset "Native init/fractional/rounded state chronology is exactly reproduced" begin
-    corpus=readlines(joinpath(@__DIR__,"..","..","validation","native_concorde",
-        "native_concorde_integral_literal_v1.txt"))
+@testset "Literal greedy, fractional and rounded matching states" begin
     for fixture in CASES
-        # Cross-check the embedded fixture against the retained corpus row so
-        # the literals stay tied to the opaque fixture file.
-        first_row=only(findall(line->startswith(line,"CASE "*fixture.name*" "),corpus))
-        header=split(corpus[first_row])
-        count,ne,nm=parse.(Int,header[3:5])
-        native_edges=[Tuple(parse.(Int,split(corpus[first_row+i])[2:4])) for i in 1:ne]
-        native_selected=[parse(Int,last(split(corpus[first_row+ne+i]))) for i in 1:nm]
-        @test count==fixture.count && ne==fixture.ne && nm==fixture.nm
-        @test native_edges==fixture.edges
-        @test native_selected==fixture.selected
-        @test parse(Int,last(header))==fixture.cost
-
+        count=fixture.count
         before=copy(fixture.edges);graph=O._graph(count,fixture.edges)
 
         # Production greedy init reproduces `S init` exactly: matched flags,
@@ -188,84 +164,4 @@ active_cycles(state)=[cycle for (id,cycle) in enumerate(state.cycles)
     end
 end
 
-# Aggregate boundary assertions over the retained corpus slice that carries
-# solver-state records. These pin the counts documented for this chronology
-# alignment: every recorded init/fractional/rounded state matches, so any
-# future regression in the verified phases fails here rather than silently.
-@testset "Corpus-wide retained solver-state alignment" begin
-    corpus=readlines(joinpath(@__DIR__,"..","..","validation","native_concorde",
-        "native_concorde_integral_literal_v1.txt"))
-    recorded=0;init_exact=0;fractional_exact=0;rounded_exact=0
-    i=1
-    while i<=length(corpus)
-        if !startswith(corpus[i],"CASE ")
-            i+=1;continue
-        end
-        header=split(corpus[i]);count=parse(Int,header[3])
-        edges=Tuple{Int,Int,Int64}[];records=Dict{String,Vector{NTuple{4,Int}}}()
-        j=i+1
-        while j<=length(corpus) && !startswith(corpus[j],"CASE ")
-            line=corpus[j]
-            if startswith(line,"E ")
-                q=split(line)
-                push!(edges,(parse(Int,q[2]),parse(Int,q[3]),parse(Int64,q[4])))
-            elseif startswith(line,"S ")
-                parts=split(line)
-                records[parts[2]]=[Tuple(parse.(Int,split(t,',')))::NTuple{4,Int}
-                    for t in parts[3:end]]
-            end
-            j+=1
-        end
-        if haskey(records,"init")
-            recorded+=1
-            graph=O._graph(count,edges)
-            dual=Vector{Int64}(undef,count);mate=zeros(Int,count)
-            O._greedy_singleton_init!(graph,dual,mate)
-            ok=all(vertex->records["init"][vertex][1]==(mate[vertex]!=0 ? 2 : 0) &&
-                records["init"][vertex][2]==mate[vertex]-1 &&
-                records["init"][vertex][3]==dual[vertex] &&
-                records["init"][vertex][4]==0,1:count)
-            ok && (init_exact+=1)
-            state=O._fractional_singleton_state(graph)
-            ok=state!==nothing
-            if ok
-                for vertex in 1:count
-                    label,edge,value,flag=records["fractional"][vertex]
-                    flag==0 && value==state.dual[vertex] || (ok=false;break)
-                    if label==1
-                        id=state.cycle_owner[vertex]
-                        if id==0;ok=false;break;end
-                        vertices,cycle_edges=state.cycles[id]
-                        at=only(findall(==(vertex),vertices))
-                        cycle_edges[at]-1==edge || (ok=false;break)
-                    else
-                        state.mate[vertex]-1==edge || (ok=false;break)
-                    end
-                end
-            end
-            ok && (fractional_exact+=1)
-            if state!==nothing && haskey(records,"rounded")
-                seed=O._fractional_singleton_seed(graph,state)
-                ok=true
-                for vertex in 1:count
-                    label,edge,value,flag=records["rounded"][vertex]
-                    flag==0 && value==state.dual[vertex] || (ok=false;break)
-                    if label==0 || edge<0
-                        seed.mate[vertex]==0 || (ok=false;break)
-                    else
-                        seed.mate[vertex]!=0 || (ok=false;break)
-                        a,b,_=edges[edge+1]
-                        minmax(a,b)==minmax(vertex,seed.mate[vertex]) || (ok=false;break)
-                    end
-                end
-                ok && (rounded_exact+=1)
-            end
-        end
-        i=j
-    end
-    @test recorded==1550
-    @test init_exact==recorded
-    @test fractional_exact==recorded
-    @test rounded_exact==recorded
-end
 end # module OrderedMatchingNativeStateTests

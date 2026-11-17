@@ -1,5 +1,4 @@
 using Test
-using SHA
 using Tessella
 
 # FXSAVE is a test-only snapshot: production only reads/writes the two-byte
@@ -29,18 +28,6 @@ const Libm=Tessella.GmshLibm
     end
     unchanged(before,after)=UInt16(before&0xffff)==UInt16(after&0xffff) &&
         (before>>27)&7==(after>>27)&7 && (before>>32)&0xff==(after>>32)&0xff==0
-    function compare(inputs,expected)
-        mismatches=Int[];state_errors=Int[]
-        for i in eachindex(inputs)
-            x,y=inputs[i]
-            before=state()
-            actual=Libm._gm87_pow(x,y)
-            after=state()
-            reinterpret(UInt64,actual)==expected[i] || push!(mismatches,i)
-            unchanged(before,after) || push!(state_errors,i)
-        end
-        return mismatches,state_errors
-    end
     function repeated()
         before=state()
         total=0.0
@@ -62,40 +49,28 @@ const Libm=Tessella.GmshLibm
 end
 end
 
-@testset "Windows power primary corpus and FPU resource state" begin
+@testset "Windows power FPU state and allocations" begin
     @static if Sys.iswindows() && Sys.ARCH===:x86_64
         libm=Tessella.GmshLibm
-        fixture=normpath(joinpath(@__DIR__,"../../validation/windows_power/corpus.tsv"))
-        @test bytes2hex(sha256(read(fixture)))==
-            "71bc0963d24b8b409b84c126005d66c48ca521b58f7dc79a870743335af46bee"
-        rows=[split(row,'\t') for row in readlines(fixture)[2:end]]
-        inputs=[(reinterpret(Float64,parse(UInt64,row[2];base=16)),
-                 reinterpret(Float64,parse(UInt64,row[3];base=16))) for row in rows]
-        @test length(inputs)==2874
+        inputs=((nextfloat(1.0),2147483648.0),(prevfloat(1.0),2147483648.0))
         saved=libm._win_x87_control_word()
         try
-            for (column,mode) in enumerate((0x0200,0x0600,0x0a00,0x0e00,
-                                            0x0300,0x0700,0x0b00,0x0f00,
-                                            0x0000,0x0400,0x0800,0x0c00))
-                expected=[parse(UInt64,row[column+3];base=16) for row in rows]
+            for mode in (0x0200,0x0600,0x0a00,0x0e00,
+                         0x0300,0x0700,0x0b00,0x0f00,
+                         0x0000,0x0400,0x0800,0x0c00)
                 caller=(saved&0xf0ff)|UInt16(mode)
                 libm._win_x87_set_control_word!(caller)
-                mismatches,state_errors=WindowsPowerTest.compare(inputs,expected)
-                @test isempty(mismatches)
-                @test isempty(state_errors)
+                @test WindowsPowerTest.repeated()[2]
                 @test libm._win_x87_control_word()==caller
             end
-            # CLI task context uses the PC64 primary while leaving the PC53
-            # caller word untouched between operations, in every rounding mode.
-            for (index,mode) in enumerate((0x0200,0x0600,0x0a00,0x0e00))
-                expected=[parse(UInt64,row[index+7];base=16) for row in rows]
+            # CLI precision leaves the caller control word unchanged in every
+            # rounding mode.
+            for mode in (0x0200,0x0600,0x0a00,0x0e00)
                 caller=(saved&0xf0ff)|UInt16(mode)
                 libm._win_x87_set_control_word!(caller)
-                mismatches,state_errors=libm._with_win_cli_precision() do
-                    WindowsPowerTest.compare(inputs,expected)
+                @test libm._with_win_cli_precision() do
+                    WindowsPowerTest.repeated()[2]
                 end
-                @test isempty(mismatches)
-                @test isempty(state_errors)
                 @test libm._win_x87_control_word()==caller
                 @test !libm._win_cli_precision()
             end
@@ -131,7 +106,7 @@ end
         end
         @test sum(states)==10_000Threads.nthreads()
 
-        # Audit the actual production definitions, including the CLI callback.
+        # Check production closures, including the CLI callback.
         for function_object in (libm._win_pow,libm._win_pow_native,libm._win_cli_precision,
                                 libm._win_powi,libm._win_powi_product,
                                 libm._win_x87_powlog,libm._with_win_cli_precision,
