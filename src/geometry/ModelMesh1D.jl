@@ -600,6 +600,20 @@ function field_value(f::_ModelCurveEntityField,x,y,z,
     return field_value(f,x,y,z)
 end
 
+# Keep scalar integration from inferring the anisotropic vertex evaluator.
+struct _ModelScalarCurveEntityField <: AbstractSizeField
+    field::_ModelCurveEntityField
+end
+
+field_value(f::_ModelScalarCurveEntityField,x,y,z)=
+    field_value(f.field,x,y,z)
+field_value(f::_ModelScalarCurveEntityField,x,y,z,entity::Nothing)=
+    field_value(f.field,x,y,z,entity)
+field_value(f::_ModelScalarCurveEntityField,x,y,z,entity::Tuple{T,U}) where {T<:Integer,U<:Integer}=
+    field_value(f.field,x,y,z,entity)
+field_value(f::_ModelScalarCurveEntityField,x,y,z,entity)=
+    field_value(f.field,x,y,z,entity)
+
 # `metric_at` on the same adapter backs the `anisotropic_metric` path: dim-0
 # entities evaluate `BGM_MeshMetric(vertex)` for the upstream endpoint rule.
 # A curve-entity query carries no parameter — the `metric_function` channel
@@ -842,6 +856,33 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
         _native_producer,_point_store,_l1_bounds,_skip_filter))::Vector{Float64}
 end
 
+function _model_curve_metric_grade_params(γ::G,runfield,m::GeoModel,curve::Integer,
+        t0,t1,closed,endpoints,runopts,caller,vb0,vb1,precision,minimum,force_odd,
+        odd_nodes,count_primitive::C,_point_store,_skip_filter;_native_producer) where {G,C}
+    run_metric_function=(u,xyz,entity)->begin
+        dim,tag=entity===nothing ? (1,curve) :
+            (Int(entity[1]),Int(entity[2]))
+        dim==0 ? _model_vertex_bgm_metric(
+                     m,tag,xyz,runopts,caller;_native_producer) :
+                 _model_curve_bgm_metric(
+                     m,tag,u,xyz,vb0,vb1,runopts,caller;_native_producer)
+    end
+    _,parameters=mesh_curve(
+        γ,runfield;t0=t0,t1=t1,closed=closed,
+        entity=(1,curve),endpoint_entities=endpoints,
+        anisotropic_metric=true,
+        size_function=nothing,
+        metric_function=run_metric_function,
+        integration_precision=precision,
+        minimum_segments=minimum,force_odd=force_odd,
+        _recombine_odd_nodes=odd_nodes,
+        _recombination_primitive=count_primitive,
+        max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
+            _GMSH_CURVE_INTEGRATION_CAPACITY,
+        _point_store,_skip_filter)
+    return parameters
+end
+
 function _model_curve_grade_params_general(m::GeoModel,curve::Integer,t0::Float64,t1::Float64,
         options::_ModelMesh1DOptions,caller::AbstractString;
         _native_producer,_point_store,_l1_bounds,_skip_filter)
@@ -905,33 +946,28 @@ function _model_curve_grade_params_general(m::GeoModel,curve::Integer,t0::Float6
         # *original* bounds — even when the integration window was reduced
         # by `addBoundaryLayerPoints`; `_l1_bounds` carries them through.
         vb0,vb1=_l1_bounds===nothing ? (t0,t1) : _l1_bounds
-        run_size_function=u->_model_curve_bgm(m,curve,u,γ(u),vb0,vb1,runopts,
-            caller)
-        run_metric_function=if aniso
-            (u,xyz,entity)->begin
-                dim,tag=entity===nothing ? (1,curve) :
-                    (Int(entity[1]),Int(entity[2]))
-                dim==0 ? _model_vertex_bgm_metric(
-                             m,tag,xyz,runopts,caller;_native_producer) :
-                         _model_curve_bgm_metric(
-                             m,tag,u,xyz,vb0,vb1,runopts,caller;_native_producer)
-            end
+        parameters=if aniso
+            (Base.inferencebarrier(_model_curve_metric_grade_params)(γ,runfield,m,curve,
+                t0,t1,closed,endpoints,runopts,caller,vb0,vb1,precision,minimum,force_odd,
+                odd_nodes,count_primitive,_point_store,_skip_filter;_native_producer))::Vector{Float64}
         else
-            nothing
+            run_size_function=u->_model_curve_bgm(m,curve,u,γ(u),vb0,vb1,runopts,
+                caller)
+            _,result=mesh_curve(
+                γ,_ModelScalarCurveEntityField(runfield);t0=t0,t1=t1,closed=closed,
+                entity=(1,curve),endpoint_entities=endpoints,
+                anisotropic_metric=false,
+                size_function=run_size_function,
+                metric_function=nothing,
+                integration_precision=precision,
+                minimum_segments=minimum,force_odd=force_odd,
+                _recombine_odd_nodes=odd_nodes,
+                _recombination_primitive=count_primitive,
+                max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
+                    _GMSH_CURVE_INTEGRATION_CAPACITY,
+                _point_store,_skip_filter)
+            result
         end
-        _,parameters=mesh_curve(
-            γ,runfield;t0=t0,t1=t1,closed=closed,
-            entity=(1,curve),endpoint_entities=endpoints,
-            anisotropic_metric=aniso,
-            size_function=aniso ? nothing : run_size_function,
-            metric_function=run_metric_function,
-            integration_precision=precision,
-            minimum_segments=minimum,force_odd=force_odd,
-            _recombine_odd_nodes=odd_nodes,
-            _recombination_primitive=count_primitive,
-            max_integration_points=_point_store===nothing ? _DEFAULT_MAX_INTEGRATION_POINTS :
-                _GMSH_CURVE_INTEGRATION_CAPACITY,
-            _point_store,_skip_filter)
         # `mesh_curve(closed=true)` returns the nedge station list — the
         # closing `t1` stays implicit — while every `curve_params` consumer
         # holds the open-style `[t0,…,t1]` contract (`_dim01_emit_curve!`,

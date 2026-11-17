@@ -145,6 +145,47 @@ struct _ModelNativeCurveGrade
     count::Int
 end
 
+function _model_native_line_metric_integration(m::GeoModel,curve::Int,a,b,
+        first,last,tangent,gamma,runopts::_ModelMesh1DOptions,
+        options::_ModelMesh1DOptions,caller;_native_producer::Bool)
+    evaluate=let current_runopts=runopts
+        function(t,at_begin,at_end)
+            point=gamma(t)
+            speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
+            metric=if at_begin
+                _model_vertex_bgm_metric(m,a,point,current_runopts,caller;_native_producer)
+            elseif at_end
+                _model_vertex_bgm_metric(m,b,point,current_runopts,caller;_native_producer)
+            else
+                _model_curve_bgm_metric(m,curve,t,point,0.0,1.0,current_runopts,caller;
+                    _native_producer)
+            end
+            lc=_metric_displacement(metric,tangent[1],tangent[2],tangent[3],caller)
+            isfinite(lc) && lc>0 || throw(ArgumentError(
+                "$caller: native Line metric density is nonpositive or not representable"))
+            return _IntegrationPoint(t,lc,0.0,speed,1.0)
+        end
+    end
+    return _gmsh_curve_integration(evaluate,0.0,1.0,options.integration_precision,caller)
+end
+
+function _model_native_line_metric_undershoot!(m::GeoModel,curve::Int,
+        runopts::_ModelMesh1DOptions,caller,gamma::G,params,coordinates,mass,nedge;
+        _native_producer::Bool) where {G}
+    metric_of=let current_runopts=runopts
+        function(u,xyz,entity)
+            dim,tag=entity===nothing ? (1,curve) :
+                (Int(entity[1]),Int(entity[2]))
+            dim==0 ? _model_vertex_bgm_metric(
+                         m,tag,xyz,current_runopts,caller;_native_producer) :
+                     _model_curve_bgm_metric(
+                         m,tag,u,xyz,0.0,1.0,current_runopts,caller;_native_producer)
+        end
+    end
+    return _undershoot_metric_edges!(gamma,metric_of,params,coordinates,1.0,
+                              (1,curve),mass/nedge,false,caller)
+end
+
 function _model_native_line_grade_params(m::GeoModel,curve::Int,
                                          options::_ModelMesh1DOptions,caller;
                                          _native_producer::Bool=false,_birth_rows::Bool=false)
@@ -184,34 +225,26 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     local params,count,rows
     done=false
     for _attempt in 1:8
-        evaluate=let current_runopts=runopts
-            function(t,at_begin,at_end)
-                point=gamma(t)
-                speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
-                if aniso
-                    metric=if at_begin
-                        _model_vertex_bgm_metric(m,a,point,current_runopts,caller;_native_producer)
-                    elseif at_end
-                        _model_vertex_bgm_metric(m,b,point,current_runopts,caller;_native_producer)
-                    else
-                        _model_curve_bgm_metric(m,curve,t,point,0.0,1.0,current_runopts,caller;
-                            _native_producer)
-                    end
-                    lc=_metric_displacement(metric,tangent[1],tangent[2],tangent[3],caller)
+        points=if aniso
+            (Base.inferencebarrier(_model_native_line_metric_integration)(
+                m,curve,a,b,first,last,tangent,gamma,runopts,options,caller;
+                _native_producer))::_GmshCurveIntegrationPoints
+        else
+            evaluate=let current_runopts=runopts
+                function(t,at_begin,at_end)
+                    point=gamma(t)
+                    speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
+                    endpoint=at_begin ? _model_vertex_bgm(m,a,point,current_runopts,caller;_native_producer) :
+                             at_end ? _model_vertex_bgm(m,b,point,current_runopts,caller;_native_producer) : GMSH_MAX_SIZE
+                    h=min(endpoint,_model_curve_bgm(m,curve,t,point,0.0,1.0,current_runopts,caller;_native_producer))
+                    lc=speed/h
                     isfinite(lc) && lc>0 || throw(ArgumentError(
-                        "$caller: native Line metric density is nonpositive or not representable"))
-                    return _IntegrationPoint(t,lc,0.0,speed,1.0)
+                        "$caller: native Line density is nonpositive or not representable"))
+                    return _IntegrationPoint(t,lc,0.0,speed,h)
                 end
-                endpoint=at_begin ? _model_vertex_bgm(m,a,point,current_runopts,caller;_native_producer) :
-                         at_end ? _model_vertex_bgm(m,b,point,current_runopts,caller;_native_producer) : GMSH_MAX_SIZE
-                h=min(endpoint,_model_curve_bgm(m,curve,t,point,0.0,1.0,current_runopts,caller;_native_producer))
-                lc=speed/h
-                isfinite(lc) && lc>0 || throw(ArgumentError(
-                    "$caller: native Line density is nonpositive or not representable"))
-                return _IntegrationPoint(t,lc,0.0,speed,h)
             end
+            _gmsh_curve_integration(evaluate,0.0,1.0,options.integration_precision,caller)
         end
-        points=_gmsh_curve_integration(evaluate,0.0,1.0,options.integration_precision,caller)
         try
         # Upstream applies `smoothPrimitive` only away from BAMG (`algo2d !=
         # ALGO_2D_BAMG`); the aniso primitive is used as integrated.
@@ -233,18 +266,9 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
             # Equal-primitive marks invert a few ulps past the strict
             # `metric_edge_length` certificate — re-bisect interior nodes to the
             # conservative share (the endpoint stays at t1=1.0).
-            metric_of=let current_runopts=runopts
-                function(u,xyz,entity)
-                    dim,tag=entity===nothing ? (1,curve) :
-                        (Int(entity[1]),Int(entity[2]))
-                    dim==0 ? _model_vertex_bgm_metric(
-                                 m,tag,xyz,current_runopts,caller;_native_producer) :
-                             _model_curve_bgm_metric(
-                                 m,tag,u,xyz,0.0,1.0,current_runopts,caller;_native_producer)
-                end
-            end
-            _undershoot_metric_edges!(gamma,metric_of,params,coordinates,1.0,
-                                      (1,curve),mass/nedge,false,caller)
+            (Base.inferencebarrier(_model_native_line_metric_undershoot!)(
+                m,curve,runopts,caller,gamma,params,coordinates,mass,nedge;
+                _native_producer))::Nothing
         else
             _filter_close_points!(coordinates,params,gamma,field,(1,curve),
                                   minimum,false,force_odd,size_function,caller;row_map=rows)

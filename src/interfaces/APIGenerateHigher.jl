@@ -1385,7 +1385,9 @@ function _higher_subdivided_cell_triangles(corners::Vector{Int32},
     ch=Vector{Int32}[copy(chains[1]),copy(chains[2]),copy(chains[3])]
     triangles=NTuple{3,Int32}[]
     while count(!isempty,ch)>=2
-        i=findfirst(k->!isempty(ch[k]) && !isempty(ch[mod1(k+1,3)]),1:3)
+        i=let current_ch=ch
+            findfirst(k->!isempty(current_ch[k]) && !isempty(current_ch[mod1(k+1,3)]),1:3)
+        end
         apex=ch[mod1(i+1,3)][1]
         run=Int32[cs[i]];append!(run,ch[i]);push!(run,cs[mod1(i+1,3)])
         for k in 1:length(run)-1

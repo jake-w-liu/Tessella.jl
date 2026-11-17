@@ -6033,14 +6033,14 @@ function _model_periodic_surface_mesh(
                 flip(block.nodes) : Matrix{Int32}(block.nodes)
             ElementBlock(block.msh,nodes,copy(block.tags))
         end
-        output=MixedMesh(output_coordinates,blocks;
+        output=((Base.inferencebarrier(MixedMesh))(output_coordinates,blocks;
                          physical_names=master_mesh.physical_names,
                          entity_data=master_mesh.entity_data,
                          elementary_entities=master_mesh.elementary_entities,
                          periodic_links=master_mesh.periodic_links,
                          ancillary_sections=master_mesh.ancillary_sections,
                          data_sections=master_mesh.data_sections,
-                         partition_data=master_mesh.partition_data)
+                         partition_data=master_mesh.partition_data))::MixedMesh
     end
     diagnostic=validate(output)
     diagnostic.ok || throw(ArgumentError(
@@ -8701,7 +8701,7 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
                     _transfinite_ruled_tri_project(m,face.surf,caller) :
                     nothing)
             apex=(kernel.coords[1,1],kernel.coords[2,1],kernel.coords[3,1])
-            r=findfirst(j->m.points[j]==apex,face.junctions)
+            r=findfirst(j->m.points[j]==apex,face.junctions::Vector{Int})
             r===nothing && throw(ErrorException(
                 "$caller: transfinite Surface[$(face.surf)] collapsed " *
                 "apex is not a boundary junction"))
@@ -10768,8 +10768,16 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                                _working_model=_extrude_working_model,_mesh_input)
     swept===nothing || return swept
     if haskey(m.meshing.transfinite_volumes,t)
-        fill=_transfinite_volume_mesh(m,t,caller;_mesh_input,
-            _return_bindings=_mesh_input!==nothing)
+        fill=((Base.inferencebarrier(_transfinite_volume_mesh))(
+            m,t,caller;_mesh_input,
+            _return_bindings=_mesh_input!==nothing))::Union{
+                Mesh,MixedMesh,
+                Tuple{Union{Mesh,MixedMesh},
+                    Tuple{Vector{UInt64},BitVector,
+                        Union{
+                            _ModelTransfiniteVolumeLayout{_ModelTransfiniteCubeIndex},
+                            _ModelTransfiniteVolumeLayout{_ModelTransfinitePrismIndex},
+                            _ModelTransfiniteVolumeLayout{_ModelTransfiniteCompactIndex}}}}}
         mesh,bindings=_mesh_input===nothing ? (fill,nothing) : fill
         mesh=_consume_volume_attributes(m,t,mesh,caller)
         # model_to_mixed expects an untagged pure volume complex — boundary
