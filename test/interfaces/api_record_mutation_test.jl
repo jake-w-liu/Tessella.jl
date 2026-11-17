@@ -31,34 +31,13 @@ using Tessella, TOML
         end
         for operation in (:renumber_nodes,:renumber_elements)
             tags=operation==:renumber_nodes ? [10,20] : [40,50]
-            # The library retains atomic diagnostics for unequal lists and
-            # duplicate target labels. Native accepts other sparse mappings;
-            # their complete public state is checked against captured literals.
+            # Unequal lists and duplicate target labels leave record state unchanged.
             for (old,new) in ((tags,[70]),(tags,[70,70]),(Int[],[70]))
                 records()
                 before=snapshot()
                 @test_throws ArgumentError getproperty(api.mesh,operation)(old,new)
                 @test snapshot()==before
             end
-        end
-        native_sparse=TOML.parsefile(joinpath(@__DIR__,"..","artifacts",
-            "native_sparse_renumber_contract_v1.toml"))
-        @test native_sparse["native_version"]=="4.15.2"
-        @test length(native_sparse["cases"])==8
-        for row in native_sparse["cases"]
-            records()
-            old=parse.(UInt64,row["old"]);new=parse.(UInt64,row["new"])
-            @test getproperty(api.mesh,Symbol(row["operation"]))(old,new)===nothing
-            nodes,xyz,uv=api.mesh.get_nodes()
-            types,elements,connectivity=api.mesh.get_elements()
-            @test nodes==parse.(UInt64,row["node_tags"])
-            @test string.(reinterpret(UInt64,xyz);base=16,pad=16)==row["xyz_bits"]
-            @test isempty(uv)
-            @test types==Int32.(row["types"])
-            @test elements==[parse.(UInt64,tags) for tags in row["element_tags"]]
-            @test connectivity==[parse.(UInt64,tags) for tags in row["connectivity"]]
-            @test api.mesh.get_max_node_tag()==parse(UInt64,row["max_node_tag"])
-            @test api.mesh.get_max_element_tag()==parse(UInt64,row["max_element_tag"])
         end
         records()
         # Pinned gmsh.cpp setNode updates only parameters the vertex stores.

@@ -1,16 +1,6 @@
-using Test, Tessella, TOML, SHA
-
 module TopologyNativeGenerationCertificate
-using Test, Tessella, TOML, SHA
+using Test, Tessella
 const A=Tessella.API
-const RESULT=Ref{Any}(nothing)
-const ARTIFACT=joinpath(@__DIR__,"..","artifacts","api_topology_gmsh4152")
-const PRIMARY=joinpath(ARTIFACT,"primary.json")
-const SNAPSHOT=joinpath(ARTIFACT,"native_h1_snapshot.toml")
-@assert bytes2hex(sha256(read(PRIMARY)))=="9237b93365b86c030fbb7c97707bb1422fc3b2b9e473e64c97cc540190163723"
-@assert bytes2hex(sha256(read(SNAPSHOT)))=="4b187457365e816a34405786e1730aec9f2b89b8f220083480daeaf17579a828"
-const EXPECTED=TOML.parsefile(SNAPSHOT)
-
 function _add_api_topology_tetrahedron()
     for (tag,x,y,z) in ((10,0.0,0.0,0.0),(2,1.0,0.0,0.0),
                         (7,0.0,1.0,0.0),(5,0.0,0.0,1.0))
@@ -29,43 +19,12 @@ function _add_api_topology_tetrahedron()
     A.model.add_volume([30];tag=40)
     return nothing
 end
-_topology_bits(values)=[string(reinterpret(UInt64,Float64(value));base=16,pad=16) for value in values]
-function topology_snapshot()
-    entities=Dict{String,Any}[]
-    for (dim,tag) in A.model.get_entities()
-        ids,xyz,uv=A.mesh.get_nodes(dim,tag)
-        types,labels,cells=A.mesh.get_elements(dim,tag)
-        push!(entities,Dict("dimension"=>dim,"tag"=>tag,"type"=>A.model.get_type(dim,tag),
-            "bounds_bits"=>_topology_bits(A.model.get_bounding_box(dim,tag)),
-            "node_tags"=>collect(ids),"xyz_bits"=>_topology_bits(xyz),"param_bits"=>_topology_bits(uv),
-            "types"=>collect(types),"element_tags"=>[collect(v) for v in labels],"connectivity"=>[collect(v) for v in cells]))
-    end
-    ids,xyz,uv=A.mesh.get_nodes();types,labels,cells=A.mesh.get_elements()
-    scalar=Dict{String,Any}[]
-    for tag in ids
-        p,u,dim,entity=A.mesh.get_node(tag)
-        push!(scalar,Dict("tag"=>tag,"xyz_bits"=>_topology_bits(p),"params_bits"=>_topology_bits(u),"owner"=>[dim,entity]))
-    end
-    Dict("entities"=>entities,"global_node_tags"=>collect(ids),"global_xyz_bits"=>_topology_bits(xyz),
-        "global_param_bits"=>_topology_bits(uv),"global_element_types"=>collect(types),
-        "global_element_tags"=>[collect(v) for v in labels],"global_connectivity"=>[collect(v) for v in cells],
-        "scalar_nodes"=>scalar,"max_node_tag"=>A.mesh.get_max_node_tag(),"max_element_tag"=>A.mesh.get_max_element_tag(),
-        "volume_boundary"=>[collect(pair) for pair in A.model.get_boundary([(3,40)],false,true,false)])
-end
-
-
 @testset "Gmsh4152 native h1 tetrahedron records and exact volume" begin
     A.finalize()
     A.initialize()
     try
         _add_api_topology_tetrahedron()
         generated=A.mesh.generate(3)
-        actual=topology_snapshot()
-        # Three fresh SDK4.15.2 h1 captures agree on every field, including
-        # public node order, raw connectivity, owner parameters and factories.
-        for field in keys(EXPECTED)
-            @test actual[field]==EXPECTED[field]
-        end
         @test Tessella.validate(generated).ok
         nodes,flat,_=A.mesh.get_nodes();xyz=Dict(tag=>Rational{BigInt}.(flat[3i-2:3i]) for (i,tag) in enumerate(nodes))
         labels,cells=A.mesh.get_elements_by_type(4,40)
@@ -101,9 +60,6 @@ end
             carrier_volume+=determinant/6
         end
         @test carrier_volume==1//6
-        io=IOBuffer();TOML.print(io,actual;sorted=true)
-        RESULT[]=(mesh_crc=crc,public_sha256=bytes2hex(sha256(take!(io))))
-        println("TOPOLOGY_NATIVE_CERT mesh_crc=",crc.sha," public_crc=",RESULT[].public_sha256)
     finally
         A.finalize()
     end

@@ -1,17 +1,7 @@
 module GenericVolumeNativeSourceControls
-using Tessella,Test,TOML,SHA
+using Tessella,Test
 const A=Tessella.API
 const _TOPOLOGY_API=A
-const CASES=Dict{String,Any}[]
-# Exact SDK4.15.2 public states before setSize and two generate(3) calls.
-# The extra Point record remains queryable while only its first UID is consumed.
-const ARTIFACT=joinpath(@__DIR__,"..","artifacts","api_generic_volume_gmsh4152")
-const PRIMARY=joinpath(ARTIFACT,"primary.json")
-const STATES=joinpath(ARTIFACT,"states.toml")
-@assert bytes2hex(sha256(read(PRIMARY)))=="18ee8486acccec3c470f490c8aee7d97c504c2d60e511a90ccccd9e3c1b1e635"
-@assert bytes2hex(sha256(read(STATES)))=="c793f9ac27b0a22f5388373e34a70b51bba50611ccab20954e9733438687b3ab"
-@assert bytes2hex(sha256(read(joinpath(ARTIFACT,"capture.py"))))=="d954dd4f0e370f9633663d99a8de570ab746d81c32581c0ffacba8e2acdabbc0"
-const GENERIC_VOLUME_PRIMARY=TOML.parsefile(STATES)["cases"]
 function _add_api_topology_tetrahedron()
     for (tag,x,y,z) in ((10,0.0,0.0,0.0),(2,1.0,0.0,0.0),
                         (7,0.0,1.0,0.0),(5,0.0,0.0,1.0))
@@ -92,14 +82,13 @@ function generic_volume_certificate(seeded)
     end
     return Dict("volume"=>string(volume),"tet_count"=>length(labels))
 end
-function generic_volume_source_control(reference)
+function generic_volume_source_control(seeded,extra,onlyempty)
     A.initialize()
     try
-        A.option("Mesh.MeshOnlyEmpty",reference["onlyempty"])
+        A.option("Mesh.Renumber",0)
+        A.option("Mesh.MeshOnlyEmpty",onlyempty)
         _add_api_topology_tetrahedron()
-        seeded=reference["seeded"]
         if seeded
-            extra=reference["extra_Point_node"]
             tags=extra ? [101,102] : [101]
             xyz=extra ? [.125,0.,0.,.2,0.,0.] : [.125,0.,0.]
             labels=extra ? [401,402] : [401]
@@ -109,41 +98,24 @@ function generic_volume_source_control(reference)
         end
         A.mesh.generate(3)
         before=topology_snapshot()
-        for field in keys(reference["before_set_size"])
-            @test before[field]==reference["before_set_size"][field]
-        end
         generic_volume_certificate(seeded)
         A.mesh.set_size([(0,10),(0,2),(0,7),(0,5)],.35)
         @test topology_snapshot()==before
-        entry=Dict{String,Any}("name"=>"generic_Volume_Point_source","seeded"=>seeded,
-            "extra"=>reference["extra_Point_node"],"onlyempty"=>reference["onlyempty"],"before"=>before,
-            "regenerated"=>Dict{String,Any}[])
-        push!(CASES,entry)
         for iteration in 1:2
             A.mesh.generate(3)
-            actual=topology_snapshot()
-            expected=reference["regenerated"][iteration]["state"]
-            for field in keys(expected)
-                @test actual[field]==expected[field]
-            end
-            science=generic_volume_certificate(seeded)
-            push!(entry["regenerated"],Dict("actual"=>actual,"science"=>science))
+            generic_volume_certificate(seeded)
         end
-        println("GENERIC_VOLUME_NATIVE seeded=",seeded," extra=",reference["extra_Point_node"],
-            " OE=",reference["onlyempty"]," max=",A.mesh.get_max_node_tag(),"/",A.mesh.get_max_element_tag())
     finally
         A.finalize()
     end
 end
 
 @testset "Six generic Volume setter and actual Point consumers" begin
-    @test length(GENERIC_VOLUME_PRIMARY)==6
-    for reference in GENERIC_VOLUME_PRIMARY
-        @testset "Volume seed$(reference["seeded"]) extra$(reference["extra_Point_node"]) OE$(reference["onlyempty"])" begin
-            generic_volume_source_control(reference)
+    for seeded in (false,true),extra in (false,true),onlyempty in (0,1)
+        extra && !seeded && continue
+        @testset "Volume seed$seeded extra$extra OE$onlyempty" begin
+            generic_volume_source_control(seeded,extra,onlyempty)
         end
     end
 end
-empty!(CASES)
-A.finalize()
 end

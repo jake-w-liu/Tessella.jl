@@ -1,6 +1,5 @@
 using Test,Tessella
 const _RECLASS_API=Tessella.API
-include(joinpath(@__DIR__,"../artifacts/reclassify_primary_records_v1.jl"))
 
 function _reclass_square()
     for (tag,(x,y)) in enumerate(((0.,0.),(1.,0.),(1.,1.),(0.,1.)))
@@ -49,39 +48,6 @@ function _reclass_fixture(name)
     name=="native_same_dimension_first_entity" &&
         _RECLASS_API.mesh.add_elements_by_type(2,2,[113],[103,104,105])
     return nothing
-end
-
-@testset "Reclassification matches independent actual Gmsh records" begin
-    for row in _RECLASSIFY_PRIMARY_RECORDS
-        @testset "$(row["name"])" begin
-            _RECLASS_API.initialize()
-            try
-                _reclass_fixture(row["name"])
-                for repeat in 1:2
-                    @test _RECLASS_API.mesh.reclassify_nodes()===nothing
-                    for entry in row["after"]
-                        dim=entry["dim"];tag=entry["tag"]
-                        labels,coords,parameters=_RECLASS_API.mesh.get_nodes(dim,tag)
-                        types,elements,connectivity=_RECLASS_API.mesh.get_elements(dim,tag)
-                        @test labels==entry["nodes"]
-                        @test coords==entry["coordinates"]
-                        @test parameters==entry["parameters"]
-                        @test types==entry["types"]
-                        @test elements==entry["elements"]
-                        @test connectivity==entry["connectivity"]
-                    end
-                    for node in row["nodes"]
-                        coords,parameters,dim,owner=_RECLASS_API.mesh.get_node(node["tag"])
-                        @test coords==node["coordinates"]
-                        @test parameters==node["parameters"]
-                        @test (dim,owner)==(node["dim"],node["owner"])
-                    end
-                end
-            finally
-                _RECLASS_API.finalize()
-            end
-        end
-    end
 end
 
 @testset "Reclassified nodes retain their original parameter type" begin

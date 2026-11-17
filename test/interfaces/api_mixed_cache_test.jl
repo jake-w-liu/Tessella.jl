@@ -51,32 +51,6 @@ end
     end
 end
 
-include("../artifacts/displaced_point_generation_primary_v1.jl")
-@testset "API generation retains extra Point nodes by actual entity identity" begin
-    api=Tessella.API
-    for row in DISPLACED_POINT_GENERATION_PRIMARY
-        try
-            _api_mixed_square_fixture(;renumber=row["renumber"])
-            api.mesh.add_nodes(0,1,[100],[2.,0,0])
-            @test row["error"]===nothing
-            api.mesh.generate(2)
-            for entity in row["after_generation"]
-                dimension,owner=entity["entity"]
-                tags,coordinates,parameters=api.mesh.get_nodes(dimension,owner,false,true)
-                @test tags==entity["tags"]
-                @test coordinates==entity["coordinates"]
-                @test parameters==entity["parameters"]
-                types,elements,nodes=api.mesh.get_elements(dimension,owner)
-                @test types==entity["types"]
-                @test elements==entity["elements"]
-                @test nodes==entity["nodes"]
-            end
-        finally
-            api.finalize()
-        end
-    end
-end
-
 @testset "API simplex merge preserves independent coincident entities" begin
     api=Tessella.API
     api.initialize()

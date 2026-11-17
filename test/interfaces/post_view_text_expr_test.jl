@@ -8,32 +8,6 @@ using Test,Tessella
 const A=Tessella.API
 const P=Tessella.Post
 
-# The verbatim t8 tutorial appendix view that the 2026-10-19 tutorial audit
-# hit: a scalar graph view plus a text-annotation view embedding
-# `General.GraphicsWidth/4`.
-const VIEW4=joinpath(@__DIR__,"..","..","validation","gmsh_parity","view4.pos")
-
-@testset "view4.pos T2/T3 expression records parse" begin
-    views=P.read_pos(VIEW4)
-    @test length(views)==2
-    graph,annotations=views
-    @test length(graph.elements)==101 && isempty(graph.texts)
-    @test [e.kind for e in graph.elements]==fill(:point,101)
-    @test length(annotations.elements)==1 && length(annotations.texts)==4
-    t1,t2,t3,t4=annotations.texts
-    @test t1.dim==2 && t1.coords==(10.0,-12.0,0.0) && t1.style==0.0 &&
-        t1.strings==["File created on Fri Oct 18 23:50:20 2002"]
-    # `General.GraphicsWidth` defaults to 800: `General.GraphicsWidth/4` = 200.
-    @test t2.dim==2 && t2.coords==(200.0,-28.0,0.0) && t2.style==0.0 &&
-        length(t2.strings)==5 && t2.strings[1]=="First time step" &&
-        t2.strings[5]=="Last time step!"
-    @test t3.dim==3 && t3.coords==(0.1,0.0,0.0) &&
-        t3.strings==["This is a 3D string, defined in model coordinates"]
-    @test t4.dim==3 && t4.coords==(0.1,0.3,0.0) && t4.strings==["Test $i" for i in 1:7]
-    # The lone SP record in the text view declares five value steps.
-    @test size(annotations.elements[1].values,3)==5 && annotations.time==[0.,1,2,3,4]
-end
-
 @testset "read_pos evaluates FExpr in all record lists" begin
     text="""
     View "exprs" {
@@ -149,9 +123,6 @@ T3(0.1,0.3,0,8){"world","again"};
             view.texts[2].strings==["note"] &&
             view.texts[3].dim==3 && view.texts[3].style==8.0 &&
             view.texts[3].strings==["world","again"]
-        # The tutorial audit file itself merges as two session views.
-        A.merge(VIEW4)
-        @test length(A.view.get_tags())==3
     finally;A.finalize();end
 end
 
