@@ -220,7 +220,6 @@ end
 
     @test _API.finalize()===nothing
     @test _API.finalize()===nothing
-    @test isempty(Docs.undocumented_names(Tessella.API;private=false))
 end
 
 @testset "owned Physical-group lifecycle through API" begin

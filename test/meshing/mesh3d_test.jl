@@ -198,7 +198,6 @@ Base.getindex(::_UnreadableExactPoints,::Int)=
         @test mesh_crc(sized_box).sha==
               "e314a5a023c44b1e3ae996ee7d2fe66cd99d2779b92cf4dbcf723469beea9eb6"
         @test_throws ArgumentError mesh_sized_conforming(box_surface(0,1,0,1,0,1);hmax=1.,inset=-1.)
-        @test isempty(Docs.undocumented_names(Tessella;private=false))
     end
 
     @testset "seed-independence (deterministic perturbation ⇒ same mesh)" begin

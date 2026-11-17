@@ -480,5 +480,4 @@ end
         @test validate(disjoint).ok
     end
 
-    @test isempty(Docs.undocumented_names(Tessella.MeshTypes;private=false))
 end

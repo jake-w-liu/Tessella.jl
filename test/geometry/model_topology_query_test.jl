@@ -242,8 +242,6 @@ end
     @test_throws ArgumentError Tessella.Model.model_adjacencies(
         model,1,big(2)^100)
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end
 
 # Every materialized Boolean face must store pcurves whose parameter-range

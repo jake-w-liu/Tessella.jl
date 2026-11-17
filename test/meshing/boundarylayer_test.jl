@@ -482,7 +482,3 @@ end
                                                           nlayers=1,
                                                           cavities=(big(typemax(Int))+1,))
 end
-
-@testset "boundary-layer public documentation" begin
-    @test isempty(Docs.undocumented_names(Tessella.BoundaryLayer;private=false))
-end

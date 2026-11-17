@@ -214,10 +214,6 @@ end
         @test_throws ArgumentError invalid()
     end
 
-    @test isempty(Docs.undocumented_names(
-        Tessella.MeshFunctionSpaces;private=false))
-    @test isempty(Test.detect_ambiguities(
-        Tessella.MeshFunctionSpaces;recursive=true))
 end
 
 @testset "order-one H1 on non-simplex reference families" begin

@@ -165,6 +165,4 @@ end
     @test model_value(wide,1,1,[0.5])==[0.0,0.0,0.0]
     @test_throws ArgumentError model_derivative(wide,1,1,[0.5])
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end

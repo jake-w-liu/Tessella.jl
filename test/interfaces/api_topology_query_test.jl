@@ -103,7 +103,6 @@ end
         metadata=Docs.meta(Tessella.API.model)
         @test all(name->haskey(
             metadata,Docs.Binding(Tessella.API.model,name)),names)
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _TOPOLOGY_API.finalize()
     end
@@ -155,7 +154,6 @@ end
         metadata=Docs.meta(Tessella.API.model)
         @test haskey(
             metadata,Docs.Binding(Tessella.API.model,:is_entity_orphan))
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _TOPOLOGY_API.finalize()
     end

@@ -348,8 +348,4 @@ end
 
     @test _reference_geometry_digest(fixture)==
           "10188d3068aeabe3ac38e858d24673aea7fe1f9a6d001b5ed4030e601322d58f"
-    @test isempty(Docs.undocumented_names(
-        Tessella.MeshReferenceGeometry;private=false))
-    @test isempty(Test.detect_ambiguities(
-        Tessella.MeshReferenceGeometry;recursive=true))
 end

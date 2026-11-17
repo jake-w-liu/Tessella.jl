@@ -78,8 +78,6 @@ end
         @test mesh_crc(_REMOVAL_API.mesh.generate(2))==surface_crc
 
         @test (@doc _REMOVAL_API.model.remove_entities)!==nothing
-        @test isempty(Docs.undocumented_names(Tessella.API;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _REMOVAL_API.finalize()
     end

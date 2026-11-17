@@ -585,8 +585,6 @@ end
     @test_throws ArgumentError set_periodic!(
         degenerate,1,[2],[1],identity)
     @test isempty(model_periodic_constraints(degenerate))
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end
 
 @testset "entity model and .geo execution" begin

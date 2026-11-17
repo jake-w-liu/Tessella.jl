@@ -352,7 +352,7 @@ end
         @test isapprox(sum(gaps)/length(gaps), 0.2; atol=0.02)
     end
 
-    @testset "public documentation and deterministic CRC" begin
+    @testset "deterministic CRC" begin
         points,_=mesh_segment((0,0,0),(1,0,0),
             FunctionSize((x,y,z)->0.05+0.8x))
         coords=Matrix{Float64}(undef,3,length(points))
@@ -365,7 +365,5 @@ end
         end
         @test mesh_crc(Mesh(coords;segs=segments)).sha==
             "c88590e849684b244044860b05a509139b97e422d6a2d65074b19fd73b3f9048"
-        @test isempty(Base.Docs.undocumented_names(Tessella.Mesh1D;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.Mesh1D;recursive=true))
     end
 end

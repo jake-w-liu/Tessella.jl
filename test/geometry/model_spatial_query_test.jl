@@ -227,8 +227,6 @@ end
     @test isempty(model_entities_in_bounding_box(
         explicit_and_primitive,1,1,1,0,0,0))
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end
 
 function _spatial_unit_square!(model,z,tbase)

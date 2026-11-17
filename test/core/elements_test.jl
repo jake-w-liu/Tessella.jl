@@ -4792,8 +4792,3 @@ end
         @test read(output,String)=="preserve existing file"
     end
 end
-
-@testset "Elements public documentation" begin
-    @test isempty(Base.Docs.undocumented_names(Tessella.Elements;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Elements;recursive=true))
-end

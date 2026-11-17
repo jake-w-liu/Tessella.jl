@@ -120,6 +120,4 @@ end
         @test_throws ArgumentError call()
     end
     @test model_number_of_partitions(GeoModel())==0
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end

@@ -406,8 +406,4 @@ end
         "Boundary expands beyond 65536 entities",
         sprint(showerror,boundary_expansion_error))
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
-    @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end

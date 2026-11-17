@@ -288,10 +288,6 @@ end
 
     @test _point_location_digest(fixture,locator)==
           "5c15e992466524cdc496c5f00d9e497bd7375eb88d7438a0573c5dc767f82d07"
-    @test isempty(Docs.undocumented_names(
-        Tessella.MeshPointLocation;private=false))
-    @test isempty(Test.detect_ambiguities(
-        Tessella.MeshPointLocation;recursive=true))
 end
 
 @testset "fixed-seed affine-coordinate oracle" begin

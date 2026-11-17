@@ -243,8 +243,4 @@ end
     @test allocation_small<=210_000
     @test allocation_large<=2allocation_small+4_096
 
-    @test isempty(Docs.undocumented_names(
-        Tessella.MeshElementQuality;private=false))
-    @test isempty(Test.detect_ambiguities(
-        Tessella.MeshElementQuality;recursive=true))
 end

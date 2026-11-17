@@ -352,6 +352,4 @@ end
     @test occursin("inconsistent snapshot ownership",sprint(showerror,err))
     @test _identity_state(corrupt_boolean)==before
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end

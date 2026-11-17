@@ -535,8 +535,6 @@ end
         transfinite_curve_parameters(100_000; max_nodes=100_000)
         rejected = _rejected_allocated()
         @test rejected < 64_000
-        @test isempty(Test.detect_ambiguities(
-            Tessella.TransfiniteCurve; recursive=true))
     end
 
     @testset "HWall validation, resource, and representability blockers" begin

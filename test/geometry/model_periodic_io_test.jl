@@ -222,8 +222,6 @@ end
     @test mixed_crc(double_projection).sha==
           "83e6502e987b83a84e0953c68754bf183dafa95e8b34130844011960a0b13f7f"
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end
 
 @testset "embedded native surface projection" begin

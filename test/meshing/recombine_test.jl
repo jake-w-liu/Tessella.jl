@@ -652,10 +652,6 @@ end
         @test size(split.blocks[1].nodes,2)==2
     end
 
-    @testset "public documentation" begin
-        @test isempty(Base.Docs.undocumented_names(Tessella.Recombine;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.Recombine;recursive=true))
-    end
 end
 
 module RecombineNativePriorityRegressionTests

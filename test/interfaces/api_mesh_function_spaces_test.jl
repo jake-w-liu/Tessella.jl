@@ -305,10 +305,6 @@ end
         @test _MESH_FUNCTION_API.mesh.get_basis_functions(
             4,[0.2,0.3,0.1],"HcurlLegendre0",Int32[20])[2][1]!=99
 
-        @test isempty(Docs.undocumented_names(
-            Tessella.API.mesh;private=false))
-        @test isempty(Test.detect_ambiguities(
-            Tessella.API.mesh;recursive=true))
     finally
         _MESH_FUNCTION_API.finalize()
     end

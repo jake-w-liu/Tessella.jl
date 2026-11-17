@@ -69,8 +69,6 @@ const _ENTITY_STATE_API=Tessella.API
             :get_attribute_names,:remove_attribute)
             @test (@doc getproperty(_ENTITY_STATE_API.model,function_name))!==nothing
         end
-        @test isempty(Docs.undocumented_names(Tessella.API;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _ENTITY_STATE_API.finalize()
     end

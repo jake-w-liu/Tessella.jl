@@ -194,8 +194,6 @@ end
     @test sz[2]===-0.0
     @test sz[3]===0.0 && !signbit(sz[3])
 
-    @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
 
 @testset "bounded .geo Mesh.TransfiniteTri option" begin

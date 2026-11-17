@@ -743,8 +743,6 @@ end
         "Pi = 3; Periodic Curve {2} = {4} Translate {1,0,0};"))
     # `Pi` is `tPi` upstream — an affectation head rejects it at parse time.
     @test any(err->occursin("syntax error (Pi)",err),pi_error.errors)
-    @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
 
 function _periodic_geo_cube(offset::Int,shift::Float64)

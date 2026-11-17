@@ -63,8 +63,6 @@ const _IDENTITY_API=Tessella.API
                         :remove_entity_name,:set_tag)
             @test (@doc getfield(_IDENTITY_API.model,binding))!==nothing
         end
-        @test isempty(Docs.undocumented_names(Tessella.API;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _IDENTITY_API.finalize()
     end

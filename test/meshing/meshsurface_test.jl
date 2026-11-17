@@ -196,13 +196,11 @@ end
         @test surf_area(mf) ≈ analytic rtol=0.01
     end
 
-    @testset "public documentation and deterministic CRC" begin
+    @testset "deterministic CRC" begin
         square=mesh_planar_face([[(0.0,0.0,0.0),(1.0,0.0,0.0),
                                   (1.0,1.0,0.0),(0.0,1.0,0.0)]],
                                 ConstantSize(2.0);min_angle_deg=0.0)
         @test mesh_crc(square).sha==
             "a0cfb73fe65d6814802e2df6d534a985c0bbb8d7e69a35eb860029f9d14a48ee"
-        @test isempty(Base.Docs.undocumented_names(Tessella.MeshSurface;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.MeshSurface;recursive=true))
     end
 end

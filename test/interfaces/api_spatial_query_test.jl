@@ -60,8 +60,6 @@ const _SPATIAL_API=Tessella.API
 
         @test (@doc _SPATIAL_API.model.get_bounding_box)!==nothing
         @test (@doc _SPATIAL_API.model.get_entities_in_bounding_box)!==nothing
-        @test isempty(Docs.undocumented_names(Tessella.API;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _SPATIAL_API.finalize()
     end

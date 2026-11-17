@@ -315,8 +315,4 @@ end
         @test large <= 2.35small + 262_144
     end
 
-    @testset "public documentation" begin
-        @test isempty(Base.Docs.undocumented_names(Tessella.Refine; private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.Refine; recursive=true))
-    end
 end

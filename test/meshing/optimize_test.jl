@@ -390,11 +390,9 @@ end
         @test mo.coords == m.coords                       # every node on the boundary ⇒ nothing moves
     end
 
-    @testset "public documentation and deterministic CRC" begin
+    @testset "deterministic CRC" begin
         C=Float64[0 1 0 0;0 0 1 0;0 0 0 1]
         m=Mesh(C;tets=reshape(Int32[1,2,3,4],4,1),tet_tag=Int32[7])
         @test mesh_crc(smooth_odt(m;iters=0)).sha==mesh_crc(m).sha
-        @test isempty(Base.Docs.undocumented_names(Tessella.Optimize;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.Optimize;recursive=true))
     end
 end

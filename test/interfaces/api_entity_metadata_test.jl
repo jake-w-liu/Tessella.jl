@@ -65,8 +65,6 @@ const _METADATA_API=Tessella.API
         @test (@doc _METADATA_API.model.get_parent)!==nothing
         @test (@doc _METADATA_API.model.get_number_of_partitions)!==nothing
         @test (@doc _METADATA_API.model.get_partitions)!==nothing
-        @test isempty(Docs.undocumented_names(Tessella.API;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _METADATA_API.finalize()
     end

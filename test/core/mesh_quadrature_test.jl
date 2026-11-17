@@ -423,8 +423,6 @@ end
         sprint(showerror,err)
     end
     @test occursin("no integration rules in Gmsh 4.15.2",trihedron_message)
-    @test isempty(Test.detect_ambiguities(
-        Tessella.MeshQuadrature;recursive=true))
 end
 
 # Mutant analysis:

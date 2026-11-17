@@ -484,7 +484,6 @@ Physical Volume("domain", 72) = {1};
         @test read(unused_output,String)=="unchanged"
     end
 
-    @test isempty(Docs.undocumented_names(Tessella.CLI;private=false))
 end
 
 @testset "CLI square topology and explicit public carrier bindings" begin

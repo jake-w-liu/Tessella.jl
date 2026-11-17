@@ -98,6 +98,4 @@ end
     @test !remove_model_attribute!(model,"a")
     @test model_attribute_names(model)==["","b"]
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end

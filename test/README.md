@@ -66,6 +66,12 @@ and boundary-preservation checks. Run the numerical kernel cases separately with
 julia --project=. --startup-file=no --check-bounds=yes -O2 test/meshing/highorder_elastic_kernel_test.jl
 ```
 
+Public docstrings and method ambiguities are checked once with normal compilation:
+
+```sh
+julia --project=. --startup-file=no --check-bounds=yes -O2 test/core/public_contract_test.jl
+```
+
 The extended suite adds larger geometry and meshing regressions and optional
 Gmsh comparisons:
 

@@ -513,6 +513,4 @@ end
     @test wrapped.model.entity_physicals==Dict(
         (0,1)=>[2147483647,-2147483648])
 
-    @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end

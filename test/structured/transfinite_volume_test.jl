@@ -325,10 +325,6 @@ end
         @test measure_error isa ArgumentError
         @test occursin("must remain finite Float64 values",
                        sprint(showerror, measure_error))
-        @test isempty(Test.detect_ambiguities(
-            Tessella.TransfiniteVolume; recursive=true))
-        @test isempty(Docs.undocumented_names(
-            Tessella.TransfiniteVolume; private=false))
     end
 
     @testset "allocation growth remains linear in output size" begin

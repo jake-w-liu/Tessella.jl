@@ -211,10 +211,6 @@ end
         large_bytes=_mesh_location_query_allocation(allocation_large)
         @test small_bytes>0
         @test large_bytes<=small_bytes+4_096
-        @test isempty(Docs.undocumented_names(
-            Tessella.API.mesh;private=false))
-        @test isempty(Test.detect_ambiguities(
-            Tessella.API.mesh;recursive=true))
     finally
         _MESH_LOCATION_API.finalize()
     end

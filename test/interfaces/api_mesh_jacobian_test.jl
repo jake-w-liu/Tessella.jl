@@ -150,10 +150,6 @@ end
         @test_throws ArgumentError _MESH_JACOBIAN_API.mesh.get_jacobian(
             1,[0,0,0])
 
-        @test isempty(Docs.undocumented_names(
-            Tessella.API.mesh;private=false))
-        @test isempty(Test.detect_ambiguities(
-            Tessella.API.mesh;recursive=true))
     finally
         _MESH_JACOBIAN_API.finalize()
     end

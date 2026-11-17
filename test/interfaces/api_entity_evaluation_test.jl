@@ -81,8 +81,6 @@ const _EVALUATION_API=Tessella.API
         @test (@doc _EVALUATION_API.model.is_inside)!==nothing
         @test (@doc _EVALUATION_API.model.get_closest_point)!==nothing
         @test (@doc _EVALUATION_API.model.reparametrize_on_surface)!==nothing
-        @test isempty(Docs.undocumented_names(Tessella.API;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.API;recursive=true))
     finally
         _EVALUATION_API.finalize()
     end

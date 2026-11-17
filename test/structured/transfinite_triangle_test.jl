@@ -602,8 +602,6 @@ end
                        [(-maximum, 0.0, 0.0), (-maximum, 1.0, 0.0)],
                        [(-maximum, 1.0, 0.0), (maximum, 0.0, 0.0)])
         @test_throws ArgumentError mesh_transfinite_triangle(overflowing...)
-        @test isempty(Test.detect_ambiguities(
-            Tessella.TransfiniteTriangle; recursive=true))
     end
 
     @testset "allocation growth remains linear in output size" begin

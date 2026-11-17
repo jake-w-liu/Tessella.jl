@@ -567,10 +567,6 @@ end
         exact_measure_mesh = mesh_transfinite_prism(exact_measure)
         @test validate(exact_measure_mesh).ok
         @test ntets(exact_measure_mesh) == 3
-        @test isempty(Test.detect_ambiguities(
-            Tessella.TransfinitePrism; recursive=true))
-        @test isempty(Docs.undocumented_names(
-            Tessella.TransfinitePrism; private=false))
     end
 
     @testset "face-grid boundary input (degenerate-hexahedron slots)" begin

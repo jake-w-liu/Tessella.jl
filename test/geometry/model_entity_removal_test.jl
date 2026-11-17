@@ -318,6 +318,4 @@ end
     @test occursin("references missing Loop",sprint(showerror,err))
     @test _removal_state(corrupt)==before
 
-    @test isempty(Docs.undocumented_names(Tessella.Model;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.Model;recursive=true))
 end

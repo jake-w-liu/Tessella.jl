@@ -56,5 +56,4 @@ end
     @test_throws ArgumentError view_value(view,0)
     @test_throws ArgumentError view_value(view,3)
     @test_throws ArgumentError view_value(view,big(typemax(Int))+1)
-    @test isempty(Docs.undocumented_names(Tessella.Post;private=false))
 end

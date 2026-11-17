@@ -206,8 +206,6 @@ end
         @test occursin(message,sprint(showerror,err))
     end
 
-    @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
 
 function _read_geo_params_source(source::AbstractString)

@@ -505,8 +505,6 @@ end
             max_boundary_quadrangles=16)
         @test (size(bounded.coords, 2), size(bounded.blocks[1].nodes, 2),
                size(bounded.blocks[2].nodes, 2)) == (18, 16, 4)
-        @test isempty(Test.detect_ambiguities(
-            Tessella.TransfiniteHex; recursive=true))
     end
 
     @testset "allocation growth remains linear in output size" begin

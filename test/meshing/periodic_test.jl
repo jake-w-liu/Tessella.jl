@@ -183,7 +183,5 @@ end
         @test_throws ErrorException periodic_identify_affine(
             collapsing,identity,[1],[2];atol=0.01)
 
-        @test isempty(Docs.undocumented_names(Tessella.Periodic;private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.Periodic;recursive=true))
     end
 end

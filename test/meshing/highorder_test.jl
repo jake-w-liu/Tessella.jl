@@ -835,8 +835,4 @@ end
         @test curve_to_surface!(p, (x,y,z)->(x,y,z), (x,y,z)->true) == 0
     end
 
-    @testset "public documentation" begin
-        @test isempty(Base.Docs.undocumented_names(Tessella.HighOrder; private=false))
-        @test isempty(Test.detect_ambiguities(Tessella.HighOrder; recursive=true))
-    end
 end

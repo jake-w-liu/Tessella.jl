@@ -89,10 +89,6 @@ const _MESH_LIFECYCLE_API=Tessella.API
         _MESH_LIFECYCLE_API.finalize()
     end
 
-    @test isempty(Docs.undocumented_names(
-        Tessella.API.mesh;private=false))
-    @test isempty(Test.detect_ambiguities(
-        Tessella.API.mesh;recursive=true))
 end
 
 @testset "periodic maps follow cached refinement" begin

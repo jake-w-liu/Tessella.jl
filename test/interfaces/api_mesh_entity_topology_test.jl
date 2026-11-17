@@ -347,10 +347,6 @@ end
             @test_throws ArgumentError call()
         end
 
-        @test isempty(Docs.undocumented_names(
-            Tessella.API.mesh;private=false))
-        @test isempty(Test.detect_ambiguities(
-            Tessella.API.mesh;recursive=true))
     finally
         _MESH_ENTITY_API.finalize()
     end

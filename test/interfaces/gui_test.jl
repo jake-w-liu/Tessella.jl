@@ -80,7 +80,6 @@ using Tessella.GUI: GuiState, camera_reset!, gui_command!, gui_new!
         Tessella.API.finalize()
     end
 
-    @test isempty(Docs.undocumented_names(Tessella.GUI;private=false))
 end
 
 import Serialization

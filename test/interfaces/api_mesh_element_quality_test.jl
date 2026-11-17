@@ -93,10 +93,6 @@ end
         @test_throws ArgumentError _MESH_QUALITY_API.mesh.get_element_qualities(
             UInt64[1])
 
-        @test isempty(Docs.undocumented_names(
-            Tessella.API.mesh;private=false))
-        @test isempty(Test.detect_ambiguities(
-            Tessella.API.mesh;recursive=true))
     finally
         _MESH_QUALITY_API.finalize()
     end

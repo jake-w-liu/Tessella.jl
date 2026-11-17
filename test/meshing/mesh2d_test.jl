@@ -607,8 +607,7 @@ end
     @test ntriangles_live(T)>100
 end
 
-@testset "Mesh2D public documentation and deterministic CRC" begin
+@testset "Mesh2D deterministic CRC" begin
     square=triangulate(Float64[0,1,1,0],Float64[0,0,1,1];rng_seed=9)
     @test mesh_crc(square).sha=="850fe31fb8b9c7946d716633cfabdfaf13850456a1b53474d21edfcfa9f194f4"
-    @test isempty(Base.Docs.undocumented_names(Tessella.Mesh2D;private=false))
 end

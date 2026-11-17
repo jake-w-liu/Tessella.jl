@@ -114,8 +114,6 @@ end
         "y() = {3, 1, 3, 2}; x() = Unique(y());")
     @test parsed.lists["x"]==[1.0,2.0,3.0]
 
-    @test isempty(Docs.undocumented_names(Tessella.GeoExec;private=false))
-    @test isempty(Test.detect_ambiguities(Tessella.GeoExec;recursive=true))
 end
 
 @testset "Gmsh 4.15.2 ++/-- postfix increments" begin

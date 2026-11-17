@@ -301,10 +301,6 @@ end
 
     @test _topology_digest(fixture)==
           "cf3ece3db81a0e6820c166ece9ab2a4fc08947dacd515039969a3b69b260a964"
-    @test isempty(Docs.undocumented_names(
-        Tessella.MeshEntityTopology;private=false))
-    @test isempty(Test.detect_ambiguities(
-        Tessella.MeshEntityTopology;recursive=true))
 end
 
 @testset "atomic manual edge and face topology" begin
