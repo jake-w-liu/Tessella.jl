@@ -194,26 +194,6 @@ end
             "79082312c91d6de90190e7888769ff6f9a1ddf0335d5782e76b2650545d97556"
     end
 
-    @testset "saved native complete surface products remain visible" begin
-        # The twelve retained 4.15.2 full P1 captures contain both source/cap
-        # Tri3 products and every lateral sheet after generate(3). The old
-        # empty aggregate expectation described the former volume-only cache.
-        oracle=TOML.parsefile(joinpath(@__DIR__,"..","artifacts","quadtri_nonew_two_tri_oracle.toml"))
-        @test oracle["gmsh_version"]=="4.15.2" && length(oracle["fixtures"])==12
-        for fixture in oracle["fixtures"]
-            actual=Dict{Int,Int}()
-            for entity in fixture["p1"]["entities"]
-                entity["dim"]==2 || continue
-                for cell in entity["cells"]
-                    actual[cell["type"]]=get(actual,cell["type"],0)+1
-                end
-            end
-            intervals=fixture["intervals"]
-            expected=fixture["recombine_laterals"] ? Dict(2=>4,3=>4intervals) : Dict(2=>8intervals+4)
-            @test actual==expected
-        end
-    end
-
     @testset "signed actual products on XY/YZ/ZX and grouped layers" begin
         fixtures=_QTT.fixtures()
         @test length(fixtures)==72

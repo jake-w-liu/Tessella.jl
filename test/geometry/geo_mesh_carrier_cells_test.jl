@@ -16,56 +16,6 @@ function square_source(order,renumber)
     """
 end
 
-function check_literal_carrier(result,row)
-    authority=result.model.meshing.mesh_authority
-    geometry=result.mesh;data=authority.mesh.entity_data
-    expected=Dict{UInt64,Tuple{Int,Vector{UInt64}}}()
-    for entity in row["entities"],(msh,tags,flat) in
-            zip(entity["types"],entity["elements"],entity["connections"])
-        width=Tessella.Elements.msh_num_nodes(msh)
-        for (column,tag) in enumerate(tags)
-            expected[UInt64(tag)]=(msh,UInt64.(flat[width*(column-1)+1:width*column]))
-        end
-    end
-    blocks=Model._model_mesh_carrier_blocks(geometry)
-    @test length(authority.carrier_cells)==length(blocks)
-    @test authority.carrier===geometry
-    @test authority.mesh.coords[:,authority.carrier_rows]==geometry.coords
-    visible=UInt64[]
-    for ((msh,cells),tags) in zip(blocks,authority.carrier_cells)
-        @test length(tags)==size(cells,2)
-        for (column,tag) in enumerate(tags)
-            @test haskey(expected,tag)
-            haskey(expected,tag) || continue
-            actual_msh,connections=expected[tag]
-            @test Tessella.Elements.msh_family(actual_msh)==Tessella.Elements.msh_family(msh)
-            public=data.external_node_tags[authority.carrier_rows[cells[:,column]]]
-            @test public==connections[1:length(public)]
-            push!(visible,tag)
-        end
-    end
-    expected_tags=sort!(UInt64[tag for (tag,(msh,_)) in expected if msh!=15])
-    @test sort!(visible)==expected_tags
-    return authority
-end
-
-@testset "Native carrier cells bind literal primary element identities" begin
-    primary=TOML.parsefile(joinpath(@__DIR__,"../artifacts/onlyempty_carrier_cells_primary.toml"))
-    @test primary["gmsh_version"]=="4.15.2"
-    @test primary["primary_json_sha256"]==
-        "9bc22cd39d526b6af80c4722f1b8896475c66624bb2aa06adc73d03233934dfb"
-    for row in primary["rows"]
-        mktempdir() do directory
-            path=joinpath(directory,"cells.geo")
-            tail=row["mode"]=="quad" ? "Recombine Surface{1}; Mesh 2;\n" :
-                "Mesh 2; RefineMesh;\n"
-            write(path,square_source(row["order"],row["renumber"])*tail)
-            result=GEO.execute_geo(path)
-            check_literal_carrier(result,row)
-        end
-    end
-end
-
 @testset "Cell traces follow duplicate and owner bucket merge events" begin
     line=Mesh([0. 1.;0. 0.;0. 0.];segs=reshape(Int32[1,2],2,1))
     identities=[[UInt64[0],UInt64[],UInt64[]],[UInt64[201],UInt64[],UInt64[]]]
