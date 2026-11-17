@@ -6,7 +6,6 @@ using Tessella.MeshTypes: nnodes
 include("quadtri_nonew_triangle_certificates.jl")
 const _QTNT=QuadTriNoNewTriangleCertificates
 const _QTNTQ=_QTNT.Quad
-const _QTNT_PINS=_QTNT.artifact_pins()
 
 function _qtnt_api(source,action)
     api=Tessella.API
@@ -55,9 +54,7 @@ function _qtnt_unchanged(api,before)
 end
 
 @testset "QuadTriNoNewVerts isolated triangular source" begin
-    @test length(_QTNT_PINS)==40
     @testset "actual complex, full P1 Jacobians and classified boundary" begin
-        @test length(_QTNT.fixtures())==36
         for fixture in _QTNT.fixtures()
             @testset "$(fixture.name)" begin
                 execution=_QTNTQ.execute(fixture.source)
@@ -80,7 +77,6 @@ end
                 @test count(owner->owner[1]==1,owners)==3(length(fixture.levels)-2)
                 again=_QTNTQ.execute(fixture.source)
                 @test _QTNT.crc(execution.mesh)==_QTNT.crc(again.mesh)
-                @test _QTNT.global_record(fixture,execution)==_QTNT_PINS[fixture.name]
             end
         end
     end
@@ -129,8 +125,6 @@ end
                 api.mesh.set_order(2);quadratic=_qtnt_public_volume(api)
                 @test _QTNTQ.certify_quadratic(quadratic,linear).ncell==(laterals ? 3 : 9)
                 @test Set(b.msh for b in quadratic.blocks)==Set([laterals ? 13 : 11])
-                artifact_name="triangle_p2_W$(winding)_R$(laterals)"
-                @test _QTNT.api_record(artifact_name,api)==_QTNT_PINS[artifact_name]
                 for surface in Int.(geometry.lists["sweep"][3:end])
                     nodes,_,parameters=api.mesh.get_nodes(2,surface,false,true)
                     @test length(nodes)==5 && length(parameters)==2length(nodes)

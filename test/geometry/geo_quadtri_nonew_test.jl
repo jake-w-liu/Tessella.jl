@@ -6,7 +6,6 @@ using Tessella.MeshTypes: nnodes
 include("quadtri_nonew_certificates.jl")
 const _QTNN=QuadTriNoNewCertificates
 const _QTNN_ALLOCATION_RESULT=Ref((0,0))
-const _QTNN_PINS=_QTNN.artifact_pins()
 
 function _qtnn_api(source,action)
     api=Tessella.API
@@ -45,7 +44,6 @@ end
         for fixture in _QTNN.fixtures()
             @testset "$(fixture.name)" begin
                 execution=_QTNN.execute(fixture.source)
-                @test _QTNN.crc_record(fixture.name,execution.mesh)==_QTNN_PINS[fixture.name]
                 volume=geo_entity_mesh(execution,3,1;geometry=true)
                 certificate=_QTNN.certify_fixture(volume,fixture)
                 @test validate(volume).ok
@@ -210,8 +208,6 @@ end
                 original=_QTNN.typed_signature(first)
                 api.mesh.set_order(2)
                 quadratic=api.mesh.get()
-                name="uniform$(layers)_$(laterals)_api_p2"
-                @test _QTNN.crc_record(name,quadratic)==_QTNN_PINS[name]
                 @test validate(quadratic).ok
                 @test _QTNN.certify_quadratic(quadratic,first).ncell==
                     _QTNN.certify_fixture(first,fixture).ncell

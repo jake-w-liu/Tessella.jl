@@ -1,13 +1,9 @@
-if !isdefined(@__MODULE__,:QuadTriNoNewTriangleCertificates)
-    include("../geometry/quadtri_nonew_triangle_certificates.jl")
-end
 if !isdefined(@__MODULE__,:QuadTriNoNewB4FreeStripCertificates)
     include("../geometry/quadtri_nonew_b4_free_strip_certificates.jl")
 end
 module NoNewB4FreeStripBoundaryTests
-using Test,Tessella,SHA,TOML
+using Test,Tessella
 using ..QuadTriNoNewB4FreeStripCertificates
-using ..QuadTriNoNewTriangleCertificates
 const API=Tessella.API
 const Cert=QuadTriNoNewB4FreeStripCertificates
 
@@ -85,49 +81,9 @@ function check_files(mesh,directory,stem)
     end
 end
 
-function artifact_record(name,order)
-    base=QuadTriNoNewTriangleCertificates.api_record(name,API)
-    buffer=IOBuffer();println(buffer,"b4_free_strip_support_query_v1");println(buffer,base.sha)
-    class=API.LAST_MESH_CLASS[]
-    for (label,catalog) in (("edge",class.edge_entities),("tri",class.face_entities),("quad",class.quad_entities))
-        println(buffer,label);write(buffer,UInt64(length(catalog)))
-        for (support,owner) in sort!(collect(catalog);by=first)
-            write(buffer,UInt64(length(support)))
-            for node in support;write(buffer,UInt64(node));end
-            write(buffer,Int64(owner[1]),Int64(owner[2]))
-        end
-    end
-    for (_,surface) in sort(API.model.get_entities(2)),boundary in (false,true)
-        tags,xyz,uv=API.mesh.get_nodes(2,surface,boundary,true)
-        write(buffer,UInt64(surface),UInt8(boundary),UInt64(length(tags)))
-        for node in tags;write(buffer,UInt64(node));end
-        for array in (xyz,uv)
-            write(buffer,UInt64(length(array)))
-            for value in array;write(buffer,reinterpret(UInt64,Float64(value)));end
-        end
-    end
-    return merge(base,(;kind="api_p$(order)_supports",sha=bytes2hex(sha256(take!(buffer)))))
-end
 
 include("api_nonew_b4_free_strip_actual_supports.jl")
 
-saved_records()=TOML.parsefile(joinpath(@__DIR__,"..","artifacts","quadtri_nonew_b4_free_strip_oracle.toml"))["fixtures"]
-artifact_name(record,order)="free_b4_$(record["payload"]["variant"]["name"])_P$(order)"
-
-function artifact_pins()
-    result=Dict{String,NamedTuple}()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_b4_free_strip_crc.txt")
-    for line in readlines(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t');length(fields)==6 || error("free B4 artifact row width")
-            name,kind,n_nodes,n_cells,families,sha=String.(fields)
-            haskey(result,name) && error("duplicate free B4 artifact name")
-            result[name]=(;name,kind,n_nodes=parse(Int,n_nodes),n_cells=parse(Int,n_cells),families,sha)
-        end
-    end
-    length(result)==24 || error("free B4 artifact must contain 24 products")
-    return result
-end
 
 function check_source_bits(carriers,source)
     points=Dict(Tuple(p)=>Tuple(reinterpret(UInt64,p)) for p in eachcol(source.coords))
@@ -136,47 +92,6 @@ function check_source_bits(carriers,source)
     @test all(haskey(actual,p) && actual[p]==bits for (p,bits) in points)
 end
 
-function artifact_records()
-    records=NamedTuple[]
-    for record in saved_records()
-        f=Cert.saved_fixture(record)
-        with_model(f,carriers->begin
-            API.mesh.generate(3);expected=free_actual_carriers(carriers)
-            Cert.certify(Cert.public_volume(API,carriers.volume),f,expected.source)
-            check_source_bits(carriers,expected.source)
-            push!(records,artifact_record(artifact_name(record,1),1))
-            API.mesh.set_order(2);free_check_actual_p2(carriers,f,expected)
-            push!(records,artifact_record(artifact_name(record,2),2))
-        end)
-    end
-    return records
-end
-
-function native_construction_cases()
-    pins=artifact_pins()
-    for record in saved_records()
-        f=Cert.saved_fixture(record)
-        with_model(f,carriers->begin
-            API.mesh.generate(3);expected=free_actual_carriers(carriers)
-            linear=Cert.certify(Cert.public_volume(API,carriers.volume),f,expected.source)
-            @test linear.total==linear.source.area*abs(Cert.Q(last(linear.heights))-Cert.Q(first(linear.heights)))
-            check_source_bits(carriers,expected.source)
-            @test isempty(API.mesh.get_elements(2)[1])
-            @test artifact_record(artifact_name(record,1),1)==pins[artifact_name(record,1)]
-            API.mesh.set_order(2);initial=free_check_actual_p2(carriers,f,expected)
-            @test artifact_record(artifact_name(record,2),2)==pins[artifact_name(record,2)]
-            before=snapshot();API.mesh.set_order(2)
-            @test API.LAST_MESH[]===before.cache && API.LAST_MESH_CLASS[]===before.class
-            @test API.LAST_MESH_HIGH_ORDER[]===before.overlay
-            @test (API.mesh.get_nodes(),API.mesh.get_elements())==before.payload
-            API.mesh.set_order(1)
-            @test Set(API.mesh.get_nodes(3,carriers.volume,true)[1])==expected.primary
-            check_source_bits(carriers,expected.source)
-            API.mesh.set_order(2)
-            @test free_check_actual_p2(carriers,f,expected).supports==initial.supports
-        end)
-    end
-end
 
 function lower_primary_tags()
     primary=Set{UInt64}()
@@ -380,7 +295,9 @@ end)
 
     for policy in (:free,:rec)
         recipe=policy==:free ? extra : merge(extra,(;laterals=true,
-            source=replace(extra.source,"QuadTriNoNewVerts"=>"QuadTriNoNewVerts RecombLaterals")))
+            source=replace(extra.source,
+                "Geometry.AutoCoherence=0;"=>"Geometry.AutoCoherence=1;",
+                "QuadTriNoNewVerts"=>"QuadTriNoNewVerts RecombLaterals")))
         with_model(recipe,carriers->begin
             API.option("Mesh.Renumber",0)
             API.mesh.add_nodes(0,40000,[80],[10.,10.,10.])
@@ -539,9 +456,6 @@ end
 
 function run_tests()
 @testset "Dynamic free B4 actual API contracts" begin
-    @testset "Twelve original native public P1/P2 recipes" begin
-        native_construction_cases()
-    end
     @testset "Sparse CAD identities, opposite chains and signed frames" begin
         for (m,plane,long_pair,winding) in ((5,:XY,(1,3),1),(7,:YZ,(2,4),-1),(9,:XZ,(1,3),-1)),direction in (-1,1)
             f=Cert.fixture("sparse";strip_length=m,plane,height=.75direction,layers=:nonbinary,

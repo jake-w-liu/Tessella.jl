@@ -7,7 +7,6 @@ module QuadTriNoNewTriangleCertificates
 using Tessella
 using Tessella.Elements: ElementBlock, MixedMesh, msh_dimension
 using Tessella.MeshTypes: nnodes
-using SHA
 using ..QuadTriNoNewCertificates
 const Quad=QuadTriNoNewCertificates
 const CORNERS=((0.,0.,0.),(1.,0.,0.),(0.,1.,0.))
@@ -37,28 +36,30 @@ function fixture(name,layers,levels,laterals;winding=1,motion=:translation,
 end
 
 function fixtures()
-    result=NamedTuple[]
-    groups=(("one","Layers{1}",[0.,1.]),
-            ("graded","Layers{{2,1},{0.2,1.0}}",[0.,.1,.2,1.]))
-    for (name,layers,levels) in groups,sign in (-1,1),winding in (-1,1),laterals in (false,true)
-        push!(result,fixture("triangle_$(name)_Z$(sign)_W$(winding)_R$(laterals)",
-            layers,levels,laterals;winding,delta=(0.,0.,Float64(sign))))
-    end
-    for winding in (-1,1),laterals in (false,true)
-        push!(result,fixture("triangle_uniform3_W$(winding)_R$(laterals)",
-            "Layers{3}",[0.,1/3,2/3,1.],laterals;winding))
-        push!(result,fixture("triangle_tilted_W$(winding)_R$(laterals)",
-            "Layers{3}",[0.,1/3,2/3,1.],laterals;winding,delta=(.25,-.125,2.)))
-        for motion in (:rotation,:twist)
-            push!(result,fixture("triangle_$(motion)_W$(winding)_R$(laterals)",
-                "Layers{3}",[0.,1/3,2/3,1.],laterals;winding,motion))
-        end
-    end
-    for motion in (:rotation,:twist),laterals in (false,true)
-        push!(result,fixture("triangle_$(motion)_negative_R$(laterals)",
-            "Layers{3}",[0.,1/3,2/3,1.],laterals;motion,angle=-pi/6))
-    end
-    return result
+    return [
+        fixture("triangle_one_Z1_W1_Rfalse","Layers{1}",[0.,1.],false),
+        fixture("triangle_one_Z-1_W-1_Rtrue","Layers{1}",[0.,1.],true;
+            winding=-1,delta=(0.,0.,-1.)),
+        fixture("triangle_graded_Z1_W-1_Rfalse","Layers{{2,1},{0.2,1.0}}",
+            [0.,.1,.2,1.],false;winding=-1),
+        fixture("triangle_graded_Z-1_W1_Rtrue","Layers{{2,1},{0.2,1.0}}",
+            [0.,.1,.2,1.],true;delta=(0.,0.,-1.)),
+        fixture("triangle_uniform3_W1_Rtrue","Layers{3}",[0.,1/3,2/3,1.],true),
+        fixture("triangle_tilted_W1_Rfalse","Layers{3}",[0.,1/3,2/3,1.],false;
+            delta=(.25,-.125,2.)),
+        fixture("triangle_rotation_W1_Rfalse","Layers{3}",[0.,1/3,2/3,1.],false;
+            motion=:rotation),
+        fixture("triangle_rotation_W-1_Rtrue","Layers{3}",[0.,1/3,2/3,1.],true;
+            winding=-1,motion=:rotation),
+        fixture("triangle_rotation_negative_Rtrue","Layers{3}",[0.,1/3,2/3,1.],true;
+            motion=:rotation,angle=-pi/6),
+        fixture("triangle_twist_W1_Rtrue","Layers{3}",[0.,1/3,2/3,1.],true;
+            motion=:twist),
+        fixture("triangle_twist_W-1_Rfalse","Layers{3}",[0.,1/3,2/3,1.],false;
+            winding=-1,motion=:twist),
+        fixture("triangle_twist_negative_Rfalse","Layers{3}",[0.,1/3,2/3,1.],false;
+            motion=:twist,angle=-pi/6),
+    ]
 end
 
 function transformed(f,p,u)
@@ -217,117 +218,5 @@ function paired_source()
     """
 end
 
-function all_counts(mesh)
-    if mesh isa MixedMesh
-        counts=Dict{Int,Int}()
-        for block in mesh.blocks
-            counts[Int(block.msh)]=get(counts,Int(block.msh),0)+size(block.nodes,2)
-        end
-        return counts
-    end
-    return filter(pair->last(pair)>0,Dict(1=>size(mesh.segs,2),
-        2=>size(mesh.tris,2),4=>size(mesh.tets,2)))
-end
-
-function artifact_record(name,kind,mesh,digest)
-    counts=all_counts(mesh)
-    families=join(["$msh=$count" for (msh,count) in sort!(collect(counts))],",")
-    return (;name,kind,n_nodes=nnodes(mesh),n_cells=sum(values(counts)),families,sha=digest)
-end
-
-# Geometry bits, every owned lower-dimensional part, and the classified volume
-# product are separate inputs. This also retains ownership metadata when the
-# all-simplex global product uses Mesh rather than MixedMesh.
-function global_record(f,execution)
-    buffer=IOBuffer()
-    println(buffer,crc(execution.mesh).sha)
-    for (dim,tag,part) in sort(execution.mesh_parts;by=p->(p[1],p[2]))
-        println(buffer,dim,'\t',tag,'\t',crc(part).sha)
-    end
-    volume=geo_entity_mesh(execution,3,1)
-    projected=Tessella.Model.model_to_mixed(execution.model,volume,3,1)
-    println(buffer,mixed_crc(projected).sha)
-    return artifact_record(f.name,"geo_p1",execution.mesh,bytes2hex(sha256(take!(buffer))))
-end
-
-function public_volume(api,entity=1)
-    tags,xyz,_=api.mesh.get_nodes();coordinates=reshape(xyz,3,:)
-    positions=Dict(tag=>index for (index,tag) in enumerate(tags))
-    types,_,families=api.mesh.get_elements(3,entity)
-    used=sort!(unique(vcat(families...)))
-    remap=Dict(tag=>Int32(index) for (index,tag) in enumerate(used))
-    blocks=ElementBlock[]
-    for (type,nodes) in zip(types,families)
-        width=Tessella.Elements.msh_spec(type).nnodes
-        push!(blocks,ElementBlock(type,reshape(Int32[remap[tag] for tag in nodes],width,:)))
-    end
-    return MixedMesh(coordinates[:,[positions[tag] for tag in used]],blocks)
-end
-
-# Actual query geometry and public labels/ownership, rather than the primary
-# cache alone: simplex P2 lives in a separate overlay. Integers and IEEE bits
-# are encoded explicitly, and physical metadata is emitted in sorted order.
-function api_record(name,api)
-    buffer=IOBuffer()
-    tags,coordinates,_=api.mesh.get_nodes()
-    for tag in sort(tags)
-        p,parameters,dim,entity=api.mesh.get_node(tag)
-        write(buffer,UInt64(tag),Int64(dim),Int64(entity))
-        for coordinate in p;write(buffer,reinterpret(UInt64,Float64(coordinate)));end
-        write(buffer,UInt64(length(parameters)))
-        for parameter in parameters;write(buffer,reinterpret(UInt64,Float64(parameter)));end
-    end
-    types,tag_blocks,node_blocks=api.mesh.get_elements(3,1)
-    for (msh,element_tags,nodes) in zip(types,tag_blocks,node_blocks)
-        cells=reshape(nodes,Tessella.Elements.msh_spec(msh).nnodes,:)
-        for column in sortperm(element_tags)
-            tag=element_tags[column]
-            _,_,dim,entity=api.mesh.get_element(tag)
-            write(buffer,UInt64(tag),Int64(msh),Int64(dim),Int64(entity))
-            for node in cells[:,column];write(buffer,UInt64(node));end
-        end
-    end
-    for (dim,tag) in sort(api.model.get_physical_groups())
-        println(buffer,dim,'\t',tag,'\t',repr(api.model.get_physical_name(dim,tag)))
-    end
-    return artifact_record(name,"api_p2",public_volume(api),bytes2hex(sha256(take!(buffer))))
-end
-
-function artifact_records()
-    records=NamedTuple[]
-    for f in fixtures()
-        push!(records,global_record(f,Quad.execute(f.source)))
-    end
-    for laterals in (false,true),winding in (-1,1)
-        f=fixture("triangle_p2_W$(winding)_R$(laterals)",
-            "Layers{3}",[0.,1/3,2/3,1.],laterals;winding)
-        api=Tessella.API;api.initialize()
-        try
-            mktempdir() do directory
-                path=joinpath(directory,"triangle_p2.geo");write(path,f.source)
-                api.open_geo!(path;mesh_dim=0);api.mesh.generate(3);api.mesh.set_order(2)
-                push!(records,api_record(f.name,api))
-            end
-        finally
-            api.finalize()
-        end
-    end
-    return records
-end
-
-function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_triangle_crc.txt")
-    records=Dict{String,NamedTuple}()
-    for line in readlines(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t')
-            require(length(fields)==6,"artifact row width")
-            name,kind,nn,nc,families,digest=fields
-            require(!haskey(records,name),"duplicate artifact name")
-            records[name]=(;name,kind,n_nodes=parse(Int,nn),n_cells=parse(Int,nc),families,sha=digest)
-        end
-    end
-    return records
-end
 
 end

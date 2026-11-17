@@ -3,7 +3,7 @@ if !isdefined(@__MODULE__, :QuadTriNoNewB4RecStripCertificates)
     include("quadtri_nonew_b4_rec_strip_certificates.jl")
 end
 module QuadTriNoNewB4FreeStripCertificates
-using Tessella, SHA
+using Tessella
 using Tessella.Elements: MixedMesh, ElementBlock, msh_dimension
 using Tessella.MeshTypes: nnodes
 using ..QuadTriNoNewB4RecStripCertificates
@@ -38,29 +38,6 @@ function fixture(name;laterals=false,kwargs...)
     return Rec.fixture(name;laterals,kwargs...)
 end
 
-function saved_fixture(record)
-    raw=record["payload"];controls=record["derived_actual_curve_controls"]
-    variant=raw["variant"];grid=Tuple(Int.(controls["grid"]));m=prod(grid)
-    axes=Tuple(Int.(variant["axes"]).+1)
-    long=only(row for row in controls["statements"] if row["curves"]==controls["long_pair"])
-    require(long["declared_count"]==m+1 && controls["long_pair"]==[1,3],"saved actual long controls differ")
-    require(bytes2hex(sha256(raw["input_geo"]))==record["input_literal_sha256"],"saved literal input SHA differs")
-    require(long["law"]==variant["law"] && long["coefficient"]==variant["coefficient"],"literal law differs from display metadata")
-    f=fixture(raw["name"];strip_length=m,height=Float64(variant["height"]),layers=:one)
-    corners=Tuple(ntuple(k->k==axes[1] ? Float64(p[1]) : k==axes[2] ? Float64(p[2]) : 0.,3) for p in variant["corners"])
-    levels=Float64[0.];previous=0.
-    for (count,height) in zip(variant["groups"],variant["heights"])
-        count=Int(count);height=Float64(height)
-        for step in 1:count;push!(levels,previous+(height-previous)*step/count);end
-        previous=height
-    end
-    require(length(levels)==Int(raw["intervals"])+1,"saved layer groups differ")
-    # Use the original literal, including its CRLF bytes and actual sampling
-    # controls. The fixture builder supplies descriptor defaults only.
-    return merge(f,(;source=raw["input_geo"],axes,corners,grid,levels,
-        intervals=length(levels)-1,law=long["law"],coefficient=Float64(long["coefficient"]),
-        actual_controls=controls))
-end
 
 function certify(mesh,f,source;oracle=false,native_top=!oracle,check_separation=true)
     src=source_complex(source,f);n=length(f.levels)-1;m=prod(f.grid);v=2(m+1)

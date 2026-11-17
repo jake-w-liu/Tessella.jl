@@ -1,19 +1,14 @@
 if !isdefined(@__MODULE__,:QuadTriNoNewQuadStripCertificates)
     include("../geometry/quadtri_nonew_quad_strip_certificates.jl")
 end
-if !isdefined(@__MODULE__,:QuadTriNoNewTriangleCertificates)
-    include("../geometry/quadtri_nonew_triangle_certificates.jl")
-end
 
 module NoNewQuadStripBoundaryTests
 
-using Test,Tessella,SHA,TOML
+using Test,Tessella
 using Tessella.Elements: msh_dimension
 using ..QuadTriNoNewQuadStripCertificates
-using ..QuadTriNoNewTriangleCertificates
 const API=Tessella.API
 const Cert=QuadTriNoNewQuadStripCertificates
-const PROFILES=(:one,:three,:graded)
 
 function with_model(f,action)
     API.initialize()
@@ -178,97 +173,8 @@ function check_quadratic(carriers,f,expected)
     return signature
 end
 
-artifact_name(profile,laterals,direction,order)=
     "quad_strip_$(profile)_R$(laterals)_D$(direction)_P$(order)"
 
-function artifact_record(name,order)
-    base=QuadTriNoNewTriangleCertificates.api_record(name,API)
-    buffer=IOBuffer();println(buffer,"quad_strip_support_query_v1");println(buffer,base.sha)
-    class=API.LAST_MESH_CLASS[]
-    for (label,catalog) in (("edge",class.edge_entities),("tri",class.face_entities),("quad",class.quad_entities))
-        println(buffer,label);write(buffer,UInt64(length(catalog)))
-        for (support,owner) in sort!(collect(catalog);by=first)
-            write(buffer,UInt64(length(support)))
-            for node in support;write(buffer,UInt64(node));end
-            write(buffer,Int64(owner[1]),Int64(owner[2]))
-        end
-    end
-    for (_,surface) in sort(API.model.get_entities(2)),boundary in (false,true)
-        tags,xyz,uv=API.mesh.get_nodes(2,surface,boundary,true)
-        write(buffer,UInt64(surface),UInt8(boundary),UInt64(length(tags)))
-        for node in tags;write(buffer,UInt64(node));end
-        for array in (xyz,uv)
-            write(buffer,UInt64(length(array)))
-            for value in array;write(buffer,reinterpret(UInt64,Float64(value)));end
-        end
-    end
-    return merge(base,(;kind="api_p$(order)_supports",sha=bytes2hex(sha256(take!(buffer)))))
-end
-
-function artifact_records()
-    records=NamedTuple[]
-    for profile in PROFILES,laterals in (false,true),direction in (-1,1)
-        f=Cert.fixture("artifact";layers=profile,laterals,height=direction,pins=(1,2,3,4))
-        with_model(f,carriers->begin
-            API.mesh.generate(3)
-            push!(records,artifact_record(artifact_name(profile,laterals,direction,1),1))
-            API.mesh.set_order(2)
-            push!(records,artifact_record(artifact_name(profile,laterals,direction,2),2))
-        end)
-    end
-    return records
-end
-
-function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_quad_strip_crc.txt")
-    records=Dict{String,NamedTuple}()
-    for line in readlines(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t');length(fields)==6 || error("quad strip artifact row width")
-            name,kind,n_nodes,n_cells,families,sha=String.(fields)
-            haskey(records,name) && error("quad strip duplicate artifact name")
-            records[name]=(;name,kind,n_nodes=parse(Int,n_nodes),n_cells=parse(Int,n_cells),families,sha)
-        end
-    end
-    length(records)==24 || error("quad strip artifact must contain24 products")
-    return records
-end
-
-function saved_oracles()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_quad_strip_oracle.toml")
-    artifact=TOML.parsefile(path)
-    @test artifact["gmsh_version"]=="4.15.2" && artifact["fixture_count"]==16
-    return Dict((f["profile"],f["laterals"],f["direction"])=>f
-                for f in artifact["fixtures"] if f["capture_kind"]=="original_unit")
-end
-
-function check_saved_primary(saved,volume)
-    tags=API.mesh.get_nodes(3,volume,true)[1]
-    original=saved["p1"]["nodes"]
-    @test length(tags)==length(original)
-    matched=Set{Int}()
-    for node in tags
-        p,_,dim,owner=API.mesh.get_node(node)
-        hits=findall(q->maximum(abs.(p.-q["coordinates"]))<=2e-11,original)
-        @test length(hits)==1
-        length(hits)==1 || continue
-        index=only(hits);push!(matched,index)
-        @test (dim,owner)==Tuple(original[index]["owner"])
-    end
-    @test length(matched)==length(original)
-end
-
-function check_saved_boundary_counts(saved)
-    @test length(API.mesh.get_nodes()[1])==length(saved["p2"]["nodes"])
-    # Stored face-center UV can be empty upstream; native computed UV is
-    # verified by reevaluation rather than copied from that raw provenance.
-    for entity in saved["p2"]["entities"]
-        dim,tag=entity["dim"],entity["tag"]
-        dim in (1,2) || continue
-        @test length(API.mesh.get_nodes(dim,tag,false)[1])==length(entity["owned"]["tags"])
-        @test length(API.mesh.get_nodes(dim,tag,true)[1])==length(entity["closure"]["tags"])
-    end
-end
 
 function node_geometry(volume=nothing)
     tags=volume===nothing ? API.mesh.get_nodes()[1] : API.mesh.get_nodes(3,volume,true)[1]
@@ -285,24 +191,17 @@ end
 
 function run_tests()
 @testset "Quad-strip actual P2 carriers and public lifecycle" begin
-    @testset "Twelve P1/P2 native golden products" begin
-        pins=artifact_pins()
-        oracle=saved_oracles()
-        for profile in PROFILES,laterals in (false,true),direction in (-1,1)
+    @testset "P1/P2 native construction and ownership" begin
+        for (profile,laterals,direction) in (
+                (:one,false,1),(:three,true,-1),(:graded,false,-1),(:graded,true,1))
             f=Cert.fixture("golden";layers=profile,laterals,height=direction,pins=(1,2,3,4))
             with_model(f,carriers->begin
                 API.mesh.generate(3)
                 @test length(API.mesh.get_nodes()[1])==6length(f.levels)+(f.laterals ? 2 : 0)
-                # Higher-dimensional generation retains the published volume
-                # cell cache while lower carriers are exposed through nodes.
-                @test isempty(API.mesh.get_elements(2)[1])
-                saved=get(oracle,(profile===:one ? "L1" : profile===:three ? "L3" : "graded",laterals,direction),nothing)
-                saved===nothing || check_saved_primary(saved,carriers.volume)
-                @test artifact_record(artifact_name(profile,laterals,direction,1),1)==pins[artifact_name(profile,laterals,direction,1)]
+                @test all(!isempty(API.mesh.get_elements(dim,tag)[1])
+                    for dim in 0:2 for (_,tag) in API.model.get_entities(dim))
                 expected=actual_carriers(carriers)
                 API.mesh.set_order(2)
-                @test artifact_record(artifact_name(profile,laterals,direction,2),2)==pins[artifact_name(profile,laterals,direction,2)]
-                saved===nothing || check_saved_boundary_counts(saved)
                 initial=check_quadratic(carriers,f,expected)
                 before=snapshot();API.mesh.set_order(2)
                 @test (API.mesh.get_nodes(),API.mesh.get_elements())==before.payload

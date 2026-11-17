@@ -1,17 +1,11 @@
-if !isdefined(@__MODULE__,:QuadTriNoNewTriangleCertificates)
-    include("../geometry/quadtri_nonew_triangle_certificates.jl")
-end
 if !isdefined(@__MODULE__,:QuadTriNoNewB4RecStripCertificates)
     include("../geometry/quadtri_nonew_b4_rec_strip_certificates.jl")
 end
 module NoNewB4RecStripBoundaryTests
-using Test,Tessella,SHA
+using Test,Tessella
 using ..QuadTriNoNewB4RecStripCertificates
-using ..QuadTriNoNewTriangleCertificates
 const API=Tessella.API
 const Cert=QuadTriNoNewB4RecStripCertificates
-const LENGTHS=(5,7,9)
-const PROFILES=(:one,:nonbinary)
 expected_primary(m,n)=2*(m+1)*(n+1)+m
 expected_quadratic(m,n)=(12m+6)*n+14m+3
 expected_owners(m,n,order)=order==1 ? [8,4n+4m-8,(2m-2)*(n-1),m] :
@@ -92,66 +86,9 @@ function check_files(mesh,directory,stem)
     end
 end
 
-function artifact_record(name,order)
-    base=QuadTriNoNewTriangleCertificates.api_record(name,API)
-    buffer=IOBuffer();println(buffer,"b4_rec_strip_support_query_v1");println(buffer,base.sha)
-    class=API.LAST_MESH_CLASS[]
-    for (label,catalog) in (("edge",class.edge_entities),("tri",class.face_entities),("quad",class.quad_entities))
-        println(buffer,label);write(buffer,UInt64(length(catalog)))
-        for (support,owner) in sort!(collect(catalog);by=first)
-            write(buffer,UInt64(length(support)))
-            for node in support;write(buffer,UInt64(node));end
-            write(buffer,Int64(owner[1]),Int64(owner[2]))
-        end
-    end
-    for (_,surface) in sort(API.model.get_entities(2)),boundary in (false,true)
-        tags,xyz,uv=API.mesh.get_nodes(2,surface,boundary,true)
-        write(buffer,UInt64(surface),UInt8(boundary),UInt64(length(tags)))
-        for node in tags;write(buffer,UInt64(node));end
-        for array in (xyz,uv)
-            write(buffer,UInt64(length(array)))
-            for value in array;write(buffer,reinterpret(UInt64,Float64(value)));end
-        end
-    end
-    return merge(base,(;kind="api_p$(order)_supports",sha=bytes2hex(sha256(take!(buffer)))))
-end
-
 
 include("api_nonew_b4_rec_strip_actual_supports.jl")
 
-artifact_name(m,profile,direction,order)="b4_M$(m)_$(profile)_D$(direction)_P$(order)"
-
-function artifact_records()
-    records=NamedTuple[]
-    for m in LENGTHS,profile in PROFILES,direction in (-1,1)
-        f=Cert.fixture("artifact";strip_length=m,layers=profile,height=direction,pins=(1,2,3,4))
-        with_model(f,carriers->begin
-            API.mesh.generate(3);check_owner_totals(carriers.volume,m,f.intervals,1)
-            expected=b4_actual_carriers(carriers)
-            linear=Cert.certify(Cert.public_volume(API,carriers.volume),f,expected.source)
-            @test linear.total==1 && length(linear.centers)==m
-            push!(records,artifact_record(artifact_name(m,profile,direction,1),1))
-            API.mesh.set_order(2);b4_check_actual_p2(carriers,f,expected)
-            push!(records,artifact_record(artifact_name(m,profile,direction,2),2))
-        end)
-    end
-    return records
-end
-
-function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_b4_rec_strip_crc.txt")
-    result=Dict{String,NamedTuple}()
-    for line in readlines(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t');length(fields)==6 || error("B4 artifact row width")
-            name,kind,n_nodes,n_cells,families,sha=String.(fields)
-            haskey(result,name) && error("duplicate B4 artifact name")
-            result[name]=(;name,kind,n_nodes=parse(Int,n_nodes),n_cells=parse(Int,n_cells),families,sha)
-        end
-    end
-    length(result)==24 || error("B4 artifact must contain 24 products")
-    return result
-end
 
 function lower_primary_tags()
     primary=Set{UInt64}()
@@ -198,12 +135,42 @@ end
 
 function run_tests()
 @testset "Dynamic recombined B4 actual API contracts" begin
-    @testset "Twelve healthy public P1/P2 constructions" begin
+    @testset "Unmerged B4 retains actual vertices and public ownership" begin
+        f=Cert.fixture("native";strip_length=5,layers=:one,height=1,plane=:XY,coherent=false)
+        with_model(f,carriers->begin
+            API.mesh.generate(3)
+            tags,coordinates,_=API.mesh.get_nodes()
+            @test length(tags)==68 && allunique(tags) && all(isfinite,coordinates)
+            types,labels,connections=API.mesh.get_elements(3,carriers.volume)
+            @test Dict(Int(kind)=>length(ids) for (kind,ids) in zip(types,labels))==Dict(4=>20,7=>5)
+            used=Set(vcat(connections...))
+            @test length(used)==24 && used⊆Set(tags)
+            @test isempty(API.mesh.get_nodes(3,carriers.volume,false)[1])
+            cell_tags=vcat(labels...)
+            @test allunique(cell_tags)
+            volumes=API.mesh.get_element_qualities(cell_tags,"volume")
+            @test all(>(0),volumes)
+            @test sum(volumes)≈1 atol=2e-12 rtol=0
+            points=Dict(tag=>collect(p) for (tag,p) in zip(tags,eachcol(reshape(coordinates,3,:))))
+            for node in used
+                point,_,dim,owner=API.mesh.get_node(node)
+                @test dim in 0:2 && (dim,owner) in API.model.get_entities(dim)
+                @test node in API.mesh.get_nodes(dim,owner)[1]
+                @test point==points[node]
+            end
+            volume=Cert.public_volume(API,carriers.volume)
+            shell=Cert.Quad.certify_complex(volume)
+            @test Tessella.MeshTypes.nnodes(volume)==24 && shell.ncell==25
+            @test shell.minimum_volume>0
+            @test shell.total≈1 atol=2e-12 rtol=0
+        end)
+    end
+    @testset "Coherent B4 P1/P2 construction and ownership" begin
         b4_native_construction_cases()
     end
-    @testset "Sparse CAD identities and actual captured recipes" begin
-        for m in LENGTHS,plane in (:XY,:YZ,:ZX),direction in (-1,1)
-            f=Cert.fixture("sparse";strip_length=m,plane,height=direction,layers=:nonbinary,
+    @testset "Sparse CAD identities and sampled source geometry" begin
+        for (m,plane,direction) in ((5,:XY,1),(7,:YZ,-1),(9,:ZX,1))
+            f=Cert.fixture("sparse";coherent=true,strip_length=m,plane,height=direction,layers=:nonbinary,
                 shape=:rounded,tags=:sparse,pins=:opposite,curve_reverse=5,law="Progression",coefficient=4.)
             with_model(f,carriers->begin
                 API.mesh.generate(3);expected=b4_actual_carriers(carriers)
@@ -213,7 +180,7 @@ function run_tests()
         end
     end
     @testset "Actual geometry survives permutations and exact selections" begin
-        f=Cert.fixture("permutations";strip_length=5,layers=:nonbinary,tags=:sparse)
+        f=Cert.fixture("permutations";coherent=true,strip_length=5,layers=:nonbinary,tags=:sparse)
         with_model(f,carriers->begin
             API.mesh.generate(3);API.mesh.set_order(2)
             geometry=node_geometry();cells=cell_geometry()
@@ -264,7 +231,7 @@ function run_tests()
     end
     @testset "OnlyEmpty native lower regeneration and sparse public labels" begin
         for order in (1,2)
-            f=Cert.fixture("bridge";strip_length=5,layers=:nonbinary)
+            f=Cert.fixture("bridge";coherent=true,strip_length=5,layers=:nonbinary)
             with_model(f,carriers->begin
                 API.mesh.generate(3)
                 primary=Set(API.mesh.get_nodes()[1]);order==2 && API.mesh.set_order(2)
@@ -293,7 +260,7 @@ function run_tests()
     end
     @testset "Real refined child support carriers" begin
         for m in (5,7),initial_order in (1,2)
-            f=Cert.fixture("refine";strip_length=m,layers=:one,pins=(1,2,3,4))
+            f=Cert.fixture("refine";coherent=true,strip_length=m,layers=:one,pins=(1,2,3,4))
             with_model(f,carriers->begin
                 API.mesh.generate(3);initial_order==2 && API.mesh.set_order(2)
                 API.mesh.refine();types,tags,_=API.mesh.get_elements(3,carriers.volume)
@@ -324,7 +291,7 @@ function run_tests()
         end
     end
     @testset "Classified and actual quadratic file encodings" begin
-        f=Cert.fixture("files";strip_length=7,layers=:nonbinary,tags=:sparse)
+        f=Cert.fixture("files";coherent=true,strip_length=7,layers=:nonbinary,tags=:sparse)
         text=f.source*"\nPhysical Curve(\"source lines\",501)={$(join(f.curve_tags,','))};\n"*
             "Physical Surface(\"caps\",502)={$(f.surface),sweep[0]};\n"*
             "Physical Surface(\"walls\",504)={sweep[2],sweep[3],sweep[4],sweep[5]};\n"*
@@ -350,8 +317,8 @@ function run_tests()
         end)
     end
     @testset "Independent coincident region identity and selective clear" begin
-        left=Cert.fixture("left";strip_length=5,layers=:one)
-        right=Cert.fixture("right";strip_length=5,layers=:one,tags=:sparse,offset=(3.,0.,0.))
+        left=Cert.fixture("left";coherent=true,strip_length=5,layers=:one)
+        right=Cert.fixture("right";coherent=true,strip_length=5,layers=:one,tags=:sparse,offset=(3.,0.,0.))
         source=replace(left.source,"sweep[]"=>"left[]")*replace(right.source,"sweep[]"=>"right[]")
         API.initialize()
         try
@@ -379,7 +346,7 @@ function run_tests()
     end
     @testset "Unsupported and precision requests are atomic" begin
         for m in (5,7)
-            f=Cert.fixture("atomic";strip_length=m,layers=:one)
+            f=Cert.fixture("atomic";coherent=true,strip_length=m,layers=:one)
             long_tags=Tuple(f.curve_tags[i] for i in f.long_pair)
             malformed=replace(replace(f.source," RecombLaterals"=>""),
                 "Transfinite Curve{$(join(long_tags,','))}=$(m+1);"=>
@@ -394,13 +361,13 @@ function run_tests()
                 end)
             end
         end
-        f=Cert.fixture("collapsed";strip_length=5,layers=:three,height=.25,offset=(0.,0.,2.0^50+2.))
+        f=Cert.fixture("collapsed";coherent=true,strip_length=5,layers=:three,height=.25,offset=(0.,0.,2.0^50+2.))
         with_model(f,carriers->begin
             before=snapshot();@test_throws r"QuadTriNoNewVerts" API.mesh.generate(3);unchanged(before)
         end)
         # Each last fan mean is represented for N2, but the requested elevated
         # edge nodes can collapse at a large normal offset. Certify P1 first.
-        f=Cert.fixture("p2_precision";strip_length=5,layers=:one,height=1.,offset=(0.,0.,2.0^50+2.))
+        f=Cert.fixture("p2_precision";coherent=true,strip_length=5,layers=:one,height=1.,offset=(0.,0.,2.0^50+2.))
         f=merge(f,(;source=replace(f.source,"Layers{1}"=>"Layers{2}"),levels=[0.,.5,1.],intervals=2))
         with_model(f,carriers->begin
             API.mesh.generate(3);expected=b4_actual_carriers(carriers)

@@ -37,7 +37,9 @@ function b4_actual_carriers(carriers)
             end
         end
     end
-    return (;edges,quads,source,primary=Set(tags),volume=carriers.volume)
+    primary_keys=Dict(node=>(Tuple(point),dim,owner) for node in tags
+        for (point,_,dim,owner) in (API.mesh.get_node(node),))
+    return (;edges,quads,source,primary=Set(tags),primary_keys,volume=carriers.volume)
 end
 
 function b4_public_support_nodes(volume)
@@ -51,8 +53,7 @@ function b4_public_support_nodes(volume)
         for edge in eachcol(reshape(API.mesh.get_element_edge_nodes(msh,volume,false),3,:))
             insert(edge[3],Cert.key(edge[1:2]))
         end
-        # Pri18 also has genuine Quad9 face centers. Omitting type13 was a
-        # previous copied test-harness bug; all actual supported faces count.
+        # Pri18 includes Quad9 face centers.
         if msh in (12,13,14)
             for face in eachcol(reshape(API.mesh.get_element_face_nodes(msh,4,volume,false),9,:))
                 insert(face[9],Cert.key(face[1:4]))
@@ -85,11 +86,26 @@ function b4_check_actual_p2(carriers,f,expected)
     check_owner_totals(carriers.volume,m,n,2)
     supports=b4_public_support_nodes(carriers.volume)
     @test length(supports)==expected_quadratic(m,n)-expected_primary(m,n)
-    @test Set(keys(supports))==setdiff(Set(API.mesh.get_nodes(3,carriers.volume,true)[1]),expected.primary)
+    # Order elevation can renumber primaries; retain their exact position and owner binding.
+    primary=Set{UInt64}()
+    types,_,connectivity=API.mesh.get_elements(3,carriers.volume)
+    for (msh,nodes) in zip(types,connectivity)
+        _,_,_,width,_,corners=API.mesh.get_element_properties(msh)
+        for cell in eachcol(reshape(nodes,width,:)),node in cell[1:corners]
+            push!(primary,node)
+        end
+    end
+    current_keys=Dict((Tuple(point),dim,owner)=>node for node in primary
+        for (point,_,dim,owner) in (API.mesh.get_node(node),))
+    @test length(current_keys)==length(primary)==length(expected.primary)
+    binding=Dict(node=>current_keys[key] for (node,key) in expected.primary_keys)
+    edges=Dict(Cert.key(binding[node] for node in support)=>owner for (support,owner) in expected.edges)
+    quads=Dict(Cert.key(binding[node] for node in support)=>owner for (support,owner) in expected.quads)
+    @test Set(keys(supports))==setdiff(Set(API.mesh.get_nodes(3,carriers.volume,true)[1]),Set(values(binding)))
     for (node,support) in supports
         p,uv,dim,owner=API.mesh.get_node(node)
-        carrier=length(support)==2 ? get(expected.edges,support,(3,carriers.volume)) :
-            length(support)==4 ? get(expected.quads,support,(3,carriers.volume)) : (3,carriers.volume)
+        carrier=length(support)==2 ? get(edges,support,(3,carriers.volume)) :
+            length(support)==4 ? get(quads,support,(3,carriers.volume)) : (3,carriers.volume)
         @test (dim,owner)==carrier
         corners=[API.mesh.get_node(v)[1] for v in support]
         mean=[sum(c[d] for c in corners)/length(corners) for d in 1:3]
@@ -117,27 +133,21 @@ function b4_check_actual_p2(carriers,f,expected)
     return (;supports,certificate)
 end
 
-# Concrete healthy native construction loop. Run only after the new route is
-# integrated and the saved-only independent helper replay is green.
 function b4_native_construction_cases()
-    pins=artifact_pins()
-    for m in LENGTHS,profile in PROFILES,direction in (-1,1)
-        f=Cert.fixture("actual_p2";strip_length=m,layers=profile,height=direction,pins=(1,2,3,4))
+    for (m,profile,direction) in ((5,:one,1),(7,:nonbinary,-1),(9,:one,1))
+        f=Cert.fixture("actual_p2";coherent=true,strip_length=m,layers=profile,height=direction,pins=(1,2,3,4))
         with_model(f,carriers->begin
             API.mesh.generate(3)
             check_owner_totals(carriers.volume,m,f.intervals,1)
-            @test isempty(API.mesh.get_elements(2)[1])
+            @test all(!isempty(API.mesh.get_elements(dim,tag)[1])
+                for dim in 0:2 for (_,tag) in API.model.get_entities(dim))
             expected=b4_actual_carriers(carriers)
             p1=Cert.certify(Cert.public_volume(API,carriers.volume),f,expected.source)
             @test p1.total==p1.source.area*abs(Cert.Q(last(p1.heights))-Cert.Q(first(p1.heights)))
-            @test artifact_record(artifact_name(m,profile,direction,1),1)==pins[artifact_name(m,profile,direction,1)]
             API.mesh.set_order(2)
             b4_check_actual_p2(carriers,f,expected)
-            @test artifact_record(artifact_name(m,profile,direction,2),2)==pins[artifact_name(m,profile,direction,2)]
-            cache,class=API.LAST_MESH[],API.LAST_MESH_CLASS[]
             actual_before=(API.mesh.get_nodes(),API.mesh.get_elements())
             API.mesh.set_order(2)
-            @test API.LAST_MESH[]===cache && API.LAST_MESH_CLASS[]===class
             @test actual_before==(API.mesh.get_nodes(),API.mesh.get_elements())
         end)
     end

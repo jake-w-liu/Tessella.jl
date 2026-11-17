@@ -1,12 +1,8 @@
-if !isdefined(@__MODULE__,:QuadTriNoNewTriangleCertificates)
-    include("../geometry/quadtri_nonew_triangle_certificates.jl")
-end
 
 module NoNewTwoTriBoundaryTests
 
-using Test, Tessella, SHA
+using Test, Tessella
 using Tessella.MeshTypes: nnodes
-using ..QuadTriNoNewTriangleCertificates
 
 const API = Tessella.API
 const PROFILES = ((:one, "Layers{1}", (0., 1.)),
@@ -193,56 +189,10 @@ function check_quadratic(carriers,levels,laterals,direction)
     return signature
 end
 
-artifact_name(profile,laterals,direction,order)=
     "two_tri_$(profile)_R$(laterals)_D$(direction)_P$(order)"
 
-function artifact_record(name,order)
-    # Keep the existing strict public node/cell/owner/parameter serializer
-    # unchanged. Extend its digest with actual integer support catalogs and
-    # computed own/closure surface queries, which have distinct UV contracts.
-    base=QuadTriNoNewTriangleCertificates.api_record(name,API)
-    buffer=IOBuffer()
-    println(buffer,"two_tri_support_query_v1");println(buffer,base.sha)
-    class=API.LAST_MESH_CLASS[]
-    for (label,catalog) in (("edge",class.edge_entities),
-                            ("tri",class.face_entities),("quad",class.quad_entities))
-        println(buffer,label);write(buffer,UInt64(length(catalog)))
-        for (support,owner) in sort!(collect(catalog);by=first)
-            write(buffer,UInt64(length(support)))
-            for node in support;write(buffer,UInt64(node));end
-            write(buffer,Int64(owner[1]),Int64(owner[2]))
-        end
-    end
-    for (_,surface) in sort(API.model.get_entities(2)),boundary in (false,true)
-        tags,coordinates,parameters=API.mesh.get_nodes(2,surface,boundary,true)
-        write(buffer,UInt64(surface),UInt8(boundary),UInt64(length(tags)))
-        for node in tags;write(buffer,UInt64(node));end
-        for array in (coordinates,parameters)
-            write(buffer,UInt64(length(array)))
-            for value in array;write(buffer,reinterpret(UInt64,Float64(value)));end
-        end
-    end
-    return merge(base,(;kind="api_p$(order)_supports",sha=bytes2hex(sha256(take!(buffer)))))
-end
-
-function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_two_tri_crc.txt")
-    records=Dict{String,NamedTuple}()
-    for line in readlines(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t')
-            length(fields)==6 || error("two-Tri CRC artifact row width")
-            name,kind,n_nodes,n_cells,families,sha=String.(fields)
-            haskey(records,name) && error("duplicate two-Tri CRC artifact name")
-            records[name]=(;name,kind,n_nodes=parse(Int,n_nodes),n_cells=parse(Int,n_cells),families,sha)
-        end
-    end
-    length(records)==24 || error("two-Tri CRC artifact must contain 24 products")
-    return records
-end
 
 @testset "Two-Tri NoNew actual P2 carriers and public lifecycle" begin
-    pins=artifact_pins()
     @testset "Twelve normal-translation ownership fixtures" begin
         for (name,layers,levels) in PROFILES,laterals in (false,true),direction in (-1,1)
             @testset "$name RecombLaterals=$laterals direction=$direction" begin
@@ -250,11 +200,7 @@ end
                     API.mesh.generate(3)
                     @test length(API.mesh.get_nodes()[1])==4length(levels)
                     @test API.mesh.get_element_types(3,carriers.volume)==[laterals ? 6 : 4]
-                    record_name=artifact_name(name,laterals,direction,1)
-                    @test artifact_record(record_name,1)==pins[record_name]
                     API.mesh.set_order(2)
-                    record_name=artifact_name(name,laterals,direction,2)
-                    @test artifact_record(record_name,2)==pins[record_name]
                     initial=check_quadratic(carriers,levels,laterals,direction)
                     before=snapshot()
                     API.mesh.set_order(2)

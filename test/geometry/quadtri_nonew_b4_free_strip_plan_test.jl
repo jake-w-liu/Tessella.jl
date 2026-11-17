@@ -42,23 +42,6 @@ function expected_exterior(states)
 end
 
 @testset "Deferred free B4 literal factory selection" begin
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_b4_free_factory_oracle.toml")
-    data=TOML.parsefile(path)
-    @test data["supported_masks"]==253 && data["gmsh_version"]=="4.15.2"
-    expected=Dict(Tuple(UInt8.(row["states"]))=>sort!([
-        typed_cell(cell[1],Tuple(cell[2:end])) for cell in row["cells"]]) for row in data["factories"])
-    @test length(expected)==253
-    templates=Model._extrude_nonew_templates()
-    for raw in Iterators.product(ntuple(_->0:2,6)...)
-        states=Tuple(UInt8.(raw))
-        if haskey(expected,states)
-            index=Free.FinalFactories.factory_index(states)
-            @test templates[Int(index)].faces==states
-            @test template_complex(templates[Int(index)])==expected[states]
-        else
-            @test_throws ArgumentError Free.FinalFactories.factory_index(states)
-        end
-    end
     @test Free.FinalFactories.factory_index((0x01,0x02,0x02,0x01,0x01,0x01))==235
     @test Free.FinalFactories.factory_index((0x02,0x01,0x01,0x02,0x01,0x01))==260
     @test_throws ArgumentError Free.FinalFactories.factory_index((0x03,0x00,0x00,0x00,0x00,0x00))

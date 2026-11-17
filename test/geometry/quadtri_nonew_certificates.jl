@@ -207,50 +207,6 @@ function trilinear_parameters(vertices,p)
     error("trilinear witness inversion did not converge")
 end
 
-function crc_record(name,mesh)
-    digest=mixed_crc(mesh)
-    return (;name,n_nodes=digest.n_nodes,n_blocks=digest.n_blocks,
-            n_cells=digest.n_cells,sha=digest.sha)
-end
-
-# Reproducible native artifacts; Gmsh's pointer-selected cells are certified
-# independently and never used as a golden connectivity digest.
-function artifact_records()
-    records=NamedTuple[]
-    for f in fixtures()
-        push!(records,crc_record(f.name,execute(f.source).mesh))
-    end
-    for f in filter(f->startswith(f.name,"uniform"),fixtures())
-        api=Tessella.API
-        api.initialize()
-        try
-            mktempdir() do directory
-                path=joinpath(directory,"quadratic.geo");write(path,f.source)
-                api.open_geo!(path;mesh_dim=0)
-                api.mesh.generate(3);api.mesh.set_order(2)
-                push!(records,crc_record(f.name*"_api_p2",api.mesh.get()))
-            end
-        finally
-            api.finalize()
-        end
-    end
-    return records
-end
-
-function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_crc.txt")
-    records=Dict{String,NamedTuple}()
-    for line in eachline(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t')
-            require(length(fields)==5,"artifact row width")
-            name=String(fields[1])
-            records[name]=(;name,n_nodes=parse(Int,fields[2]),n_blocks=parse(Int,fields[3]),
-                            n_cells=parse(Int,fields[4]),sha=String(fields[5]))
-        end
-    end
-    return records
-end
 
 function transformed(f,p,u)
     f.motion===:translation && return ntuple(k->p[k]+u*f.delta[k],3)

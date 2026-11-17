@@ -273,8 +273,9 @@ end
                 include("../geometry/quadtri_nonew_$(name)_certificates.jl")
             end
             certificate_module=getfield(@__MODULE__,symbol)
-            fixture=certificate_module.fixture("actual-cap-$name";
-                layers=:one,laterals=name=="b4_rec_strip")
+            fixture=name=="b4_rec_strip" ?
+                certificate_module.fixture("actual-cap-$name";layers=:one,laterals=true,coherent=true) :
+                certificate_module.fixture("actual-cap-$name";layers=:one,laterals=false)
             try
                 _HC.initialize()
                 mktempdir() do directory

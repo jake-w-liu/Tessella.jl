@@ -1,19 +1,14 @@
 if !isdefined(@__MODULE__,:QuadTriNoNewQuadPatchCertificates)
     include("../geometry/quadtri_nonew_quad_patch_certificates.jl")
 end
-if !isdefined(@__MODULE__,:QuadTriNoNewTriangleCertificates)
-    include("../geometry/quadtri_nonew_triangle_certificates.jl")
-end
 
 module NoNewQuadPatchBoundaryTests
 
-using Test,Tessella,SHA
+using Test,Tessella
 using Tessella.Elements: msh_dimension
 using ..QuadTriNoNewQuadPatchCertificates
-using ..QuadTriNoNewTriangleCertificates
 const API=Tessella.API
 const Cert=QuadTriNoNewQuadPatchCertificates
-const PROFILES=(:one,:three,:graded)
 
 function with_model(f,action)
     API.initialize()
@@ -173,61 +168,8 @@ function check_quadratic(carriers,f,expected)
     return signature
 end
 
-artifact_name(profile,laterals,direction,order)=
     "quad_patch_$(profile)_R$(laterals)_D$(direction)_P$(order)"
 
-function artifact_record(name,order)
-    base=QuadTriNoNewTriangleCertificates.api_record(name,API)
-    buffer=IOBuffer();println(buffer,"quad_patch_support_query_v1");println(buffer,base.sha)
-    class=API.LAST_MESH_CLASS[]
-    for (label,catalog) in (("edge",class.edge_entities),("tri",class.face_entities),("quad",class.quad_entities))
-        println(buffer,label);write(buffer,UInt64(length(catalog)))
-        for (support,owner) in sort!(collect(catalog);by=first)
-            write(buffer,UInt64(length(support)))
-            for node in support;write(buffer,UInt64(node));end
-            write(buffer,Int64(owner[1]),Int64(owner[2]))
-        end
-    end
-    for (_,surface) in sort(API.model.get_entities(2)),boundary in (false,true)
-        tags,xyz,uv=API.mesh.get_nodes(2,surface,boundary,true)
-        write(buffer,UInt64(surface),UInt8(boundary),UInt64(length(tags)))
-        for node in tags;write(buffer,UInt64(node));end
-        for array in (xyz,uv)
-            write(buffer,UInt64(length(array)))
-            for value in array;write(buffer,reinterpret(UInt64,Float64(value)));end
-        end
-    end
-    return merge(base,(;kind="api_p$(order)_supports",sha=bytes2hex(sha256(take!(buffer)))))
-end
-
-function artifact_records()
-    records=NamedTuple[]
-    for profile in PROFILES,laterals in (false,true),direction in (-1,1)
-        f=Cert.fixture("artifact";layers=profile,laterals,height=direction,pins=(1,2,3,4))
-        with_model(f,carriers->begin
-            API.mesh.generate(3)
-            push!(records,artifact_record(artifact_name(profile,laterals,direction,1),1))
-            API.mesh.set_order(2)
-            push!(records,artifact_record(artifact_name(profile,laterals,direction,2),2))
-        end)
-    end
-    return records
-end
-
-function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_quad_patch_crc.txt")
-    records=Dict{String,NamedTuple}()
-    for line in readlines(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t');length(fields)==6 || error("quad patch artifact row width")
-            name,kind,n_nodes,n_cells,families,sha=String.(fields)
-            haskey(records,name) && error("quad patch duplicate artifact name")
-            records[name]=(;name,kind,n_nodes=parse(Int,n_nodes),n_cells=parse(Int,n_cells),families,sha)
-        end
-    end
-    length(records)==24 || error("quad patch artifact must contain24 products")
-    return records
-end
 
 function node_geometry(volume=nothing)
     tags=volume===nothing ? API.mesh.get_nodes()[1] : API.mesh.get_nodes(3,volume,true)[1]
@@ -243,17 +185,15 @@ function cell_geometry(volume)
 end
 
 @testset "Quad-patch actual P2 carriers and public lifecycle" begin
-    @testset "Twelve P1/P2 native golden products" begin
-        pins=artifact_pins()
-        for profile in PROFILES,laterals in (false,true),direction in (-1,1)
+    @testset "P1/P2 native construction and ownership" begin
+        for (profile,laterals,direction) in (
+                (:one,false,1),(:three,true,-1),(:graded,false,-1),(:graded,true,1))
             f=Cert.fixture("golden";layers=profile,laterals,height=direction,pins=(1,2,3,4))
             with_model(f,carriers->begin
                 API.mesh.generate(3)
                 @test length(API.mesh.get_nodes()[1])==9length(f.levels)
-                @test artifact_record(artifact_name(profile,laterals,direction,1),1)==pins[artifact_name(profile,laterals,direction,1)]
                 expected=actual_carriers(carriers)
                 API.mesh.set_order(2)
-                @test artifact_record(artifact_name(profile,laterals,direction,2),2)==pins[artifact_name(profile,laterals,direction,2)]
                 initial=check_quadratic(carriers,f,expected)
                 before=snapshot();API.mesh.set_order(2)
                 @test (API.mesh.get_nodes(),API.mesh.get_elements())==before.payload

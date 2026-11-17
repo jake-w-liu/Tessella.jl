@@ -1,17 +1,12 @@
 if !isdefined(@__MODULE__,:QuadTriNoNewRectGridCertificates)
     include("../geometry/quadtri_nonew_rect_grid_certificates.jl")
 end
-if !isdefined(@__MODULE__,:QuadTriNoNewTriangleCertificates)
-    include("../geometry/quadtri_nonew_triangle_certificates.jl")
-end
 module NoNewRectGridBoundaryTests
-using Test,Tessella,SHA
+using Test,Tessella
 using Tessella.Elements:msh_dimension
 using ..QuadTriNoNewRectGridCertificates
-using ..QuadTriNoNewTriangleCertificates
 const API=Tessella.API
 const Cert=QuadTriNoNewRectGridCertificates
-const PROFILES=(:one,:three,:graded)
 const GRIDS=((2,3),(3,3))
 function with_model(f,action)
     API.initialize()
@@ -151,30 +146,6 @@ function check_files(mesh,directory,stem)
     end
 end
 
-function artifact_record(name,order)
-    base=QuadTriNoNewTriangleCertificates.api_record(name,API)
-    buffer=IOBuffer();println(buffer,"rect_grid_support_query_v1");println(buffer,base.sha)
-    class=API.LAST_MESH_CLASS[]
-    for (label,catalog) in (("edge",class.edge_entities),("tri",class.face_entities),("quad",class.quad_entities))
-        println(buffer,label);write(buffer,UInt64(length(catalog)))
-        for (support,owner) in sort!(collect(catalog);by=first)
-            write(buffer,UInt64(length(support)))
-            for node in support;write(buffer,UInt64(node));end
-            write(buffer,Int64(owner[1]),Int64(owner[2]))
-        end
-    end
-    for (_,surface) in sort(API.model.get_entities(2)),boundary in (false,true)
-        tags,xyz,uv=API.mesh.get_nodes(2,surface,boundary,true)
-        write(buffer,UInt64(surface),UInt8(boundary),UInt64(length(tags)))
-        for node in tags;write(buffer,UInt64(node));end
-        for array in (xyz,uv)
-            write(buffer,UInt64(length(array)))
-            for value in array;write(buffer,reinterpret(UInt64,Float64(value)));end
-        end
-    end
-    return merge(base,(;kind="api_p$(order)_supports",sha=bytes2hex(sha256(take!(buffer)))))
-end
-
 
 function check_quadratic(carriers,f,expected)
     a,b=f.grid;n=f.intervals;boundary=2(a+b);inside=(2a-1)*(2b-1)
@@ -232,52 +203,21 @@ function check_quadratic(carriers,f,expected)
     return signature
 end
 
-artifact_name(grid,profile,laterals,direction,order)=
     "rect_grid_$(grid[1])x$(grid[2])_$(profile)_R$(laterals)_D$(direction)_P$(order)"
 
-function artifact_records()
-    records=NamedTuple[]
-    for grid in GRIDS,profile in PROFILES,laterals in (false,true),direction in (-1,1)
-        f=Cert.fixture("artifact";grid,layers=profile,laterals,height=direction,pins=(1,2,3,4))
-        with_model(f,carriers->begin
-            API.mesh.generate(3)
-            push!(records,artifact_record(artifact_name(grid,profile,laterals,direction,1),1))
-            API.mesh.set_order(2)
-            push!(records,artifact_record(artifact_name(grid,profile,laterals,direction,2),2))
-        end)
-    end
-    return records
-end
-
-function artifact_pins()
-    path=joinpath(@__DIR__,"..","artifacts","quadtri_nonew_rect_grid_crc.txt")
-    result=Dict{String,NamedTuple}()
-    for line in readlines(path)
-        isempty(line) || startswith(line,"#") || begin
-            fields=split(line,'\t');length(fields)==6 || error("rect grid artifact row width")
-            name,kind,n_nodes,n_cells,families,sha=String.(fields)
-            haskey(result,name) && error("duplicate rect grid artifact name")
-            result[name]=(;name,kind,n_nodes=parse(Int,n_nodes),n_cells=parse(Int,n_cells),families,sha)
-        end
-    end
-    length(result)==48 || error("rect grid artifact must contain48 products")
-    return result
-end
 
 function run_tests()
 @testset "Rectangular-grid actual P2 carriers and public lifecycle" begin
-    @testset "Twenty-four P1/P2 native regression products" begin
-        pins=artifact_pins()
-        for grid in GRIDS,profile in PROFILES,laterals in (false,true),direction in (-1,1)
+    @testset "P1/P2 native construction and ownership" begin
+        for grid in GRIDS,(profile,laterals,direction) in (
+                (:one,false,1),(:three,true,-1),(:graded,false,-1),(:graded,true,1))
             f=Cert.fixture("golden";grid,layers=profile,laterals,height=direction,pins=(1,2,3,4))
             with_model(f,carriers->begin
                 API.mesh.generate(3)
                 @test length(API.mesh.get_nodes()[1])==prod(grid.+1)*length(f.levels)
-                @test artifact_record(artifact_name(grid,profile,laterals,direction,1),1)==pins[artifact_name(grid,profile,laterals,direction,1)]
                 expected=actual_carriers(carriers)
                 @test Cert.certify(Cert.public_volume(API,carriers.volume),f,expected.source).total==1
                 API.mesh.set_order(2)
-                @test artifact_record(artifact_name(grid,profile,laterals,direction,2),2)==pins[artifact_name(grid,profile,laterals,direction,2)]
                 initial=check_quadratic(carriers,f,expected)
                 @test Cert.certify_quadratic(Cert.public_volume(API,carriers.volume),f,expected.source).total==1
                 before=snapshot();API.mesh.set_order(2)

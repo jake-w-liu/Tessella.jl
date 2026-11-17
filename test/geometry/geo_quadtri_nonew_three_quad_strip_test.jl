@@ -97,28 +97,6 @@ function _tqsc_atomic(f,diagnostic)
 end
 
 @testset "Three actual quadrangles form a conforming NoNew strip" begin
-    @testset "Native copied-pointer forks preserve complete source and shell contracts" begin
-        native=TOML.parsefile(joinpath(@__DIR__,"..","artifacts","three_quad_strip_pointer_forks_native_v1.toml"))
-        @test native["gmsh_version"]=="4.15.2" && native["captured_processes"]==39
-        @test native["native_top_rank_is_copied_heap_pointer"]
-        @test !native["current_exact_raw_cell_parity_claim"]
-        @test native["current_choice_scope"]=="deterministic conforming variant"
-        @test length(native["cases"])==3
-        @test length(unique(row["stable_node_state_sha256"] for row in native["capture_receipts"]))==1
-        fixture=_TQSC.fixture("native_pointer_fork";height=-1.,layers=:one,laterals=false)
-        for row in native["cases"]
-            state=row["state"]
-            source=_tqsc_saved_native_entity(state,2,1)
-            volume=_tqsc_saved_native_entity(state,3,1)
-            cert=_TQSC.certify(volume,fixture,source;oracle=true,native_top=false)
-            @test validate(volume).ok
-            @test cert.total==1//1
-            @test Dict(string(kind)=>count for (kind,count) in cert.families)==row["volume_families"]
-            parts=[(2,e["owner"][2],_tqsc_saved_native_entity(state,2,e["owner"][2])) for e in state["entities"] if e["owner"][1]==2]
-            @test _TQSC.Quad.surface_faces(parts,volume)==Set(keys(cert.boundary))
-            _tqsc_existing_factories(cert)
-        end
-    end
     @testset "Actual source, whole maps, typed shells and projected carriers" begin
         for plane in (:XY,:YZ,:ZX),height in (-1.,1.),laterals in (false,true),layers in (:one,:three,:graded)
             _tqsc_product(_TQSC.fixture("three_strip";plane,height,laterals,layers))

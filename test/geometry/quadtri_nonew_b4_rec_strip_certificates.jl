@@ -3,7 +3,7 @@ if !isdefined(@__MODULE__,:QuadTriNoNewRectGridCertificates)
     include("quadtri_nonew_rect_grid_certificates.jl")
 end
 module QuadTriNoNewB4RecStripCertificates
-using Tessella,SHA
+using Tessella
 using Tessella.Elements:MixedMesh,ElementBlock,msh_dimension
 using Tessella.MeshTypes:nnodes
 using ..QuadTriNoNewRectGridCertificates
@@ -34,7 +34,7 @@ require(ok,message)=ok || throw(ArgumentError("B4 recombined-strip certificate: 
 function fixture(name;strip_length=5,plane=:XY,shape=:unit,winding=1,height=1.,
         laterals=true,layers=:three,pins=:auto,curve_reverse=0,tags=:dense,
         offset=(0.,0.,0.),scale=1.,arrangement="Left",law="Progression",
-        coefficient=1.,long_pair=(1,3))
+        coefficient=1.,long_pair=(1,3),coherent::Bool=false)
     require(strip_length>=5 && long_pair in ((1,3),(2,4)),"fixture needs a valid long opposite pair")
     # Start from the independently used two-strip recipe builder; replace the
     # one explicit native grading declaration, not its sampled coordinates.
@@ -46,6 +46,7 @@ function fixture(name;strip_length=5,plane=:XY,shape=:unit,winding=1,height=1.,
     require(law in ("Progression","Bump","Beta"),"unrecognized native grading law")
     grading=law=="Progression" && coefficient==1. ? "" : " Using $law $coefficient"
     text=replace(f.source,before=>"Transfinite Curve{$curves}=$(strip_length+1)$grading;")
+    coherent && (text=replace(text,"Geometry.AutoCoherence=0;"=>"Geometry.AutoCoherence=1;"))
     levels=layers===:nonbinary ? [0.,.2,.2+(1.0-.2)/2,1.] : f.levels
     grid=long_pair==(1,3) ? (strip_length,1) : (1,strip_length)
     return merge(f,(;source=text,levels,grid,strip_length,law,coefficient,
@@ -330,24 +331,6 @@ function certify_quadratic(mesh,f,source;oracle=false,native_top=!oracle)
     total=sum(map.volume for map in maps)
     require(abs(total-underlying.total)<=Q(2e-11),"actual P2 integral differs from its certified P1 shell")
     return merge(underlying,(;total,p1_total=underlying.total,maps,nsupport=support.nsupport,linear))
-end
-function saved_fixture(record)
-    raw=record["payload"];controls=record["derived_actual_curve_controls"]
-    variant=raw["variant"];m=Int(controls["grid"][1]);axes=Tuple(Int.(variant["axes"]).+1)
-    long=only(row for row in controls["statements"] if row["curves"]==controls["long_pair"])
-    require(long["declared_count"]==m+1 && controls["long_pair"]==[1,3],"saved actual long controls differ")
-    require(bytes2hex(sha256(raw["input_geo"]))==record["input_literal_sha256"],"saved literal input SHA differs")
-    require(long["law"]==variant["law"] && long["coefficient"]==variant["coefficient"],"saved display metadata differs from literal controls")
-    f=fixture(raw["name"];strip_length=m,layers=raw["intervals"]==1 ? :one : :nonbinary,
-        height=Float64(variant["height"]))
-    corners=Tuple(ntuple(k->k==axes[1] ? Float64(p[1]) : k==axes[2] ? Float64(p[2]) : 0.,3)
-        for p in variant["corners"])
-    # The helper call above supplies structural descriptor defaults only.
-    # Exact captured input is ALWAYS substituted verbatim before execution;
-    # never reconstruct it from law/display metadata or ideal sample fractions.
-    return merge(f,(;source=raw["input_geo"],axes,corners,law=long["law"],
-        coefficient=Float64(long["coefficient"]),actual_controls=controls,
-        source_parity_provenance=record["future_source_parity_provenance"]))
 end
 
 end
