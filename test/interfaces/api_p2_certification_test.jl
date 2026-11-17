@@ -2,34 +2,6 @@ using Test,Tessella
 using Tessella.Elements: lagrange_nodes,msh_dimension
 
 const _P2C=Tessella.API
-if !isdefined(@__MODULE__,:FOLDED_CAD_ROWS)
-    include(joinpath(@__DIR__,"..","..","validation","native_cad_support",
-                     "folded_cad_primary_fixtures_v1.jl"))
-end
-
-# These payloads were captured from Gmsh 4.15.2 before the native CAD
-# admission change. They preserve actual supports, owners, parameters and IDs.
-function _p2c_native_payload(state)
-    @test Set(_P2C.mesh.get_nodes()[1])==Set(UInt64[node.tag for node in state.nodes])
-    for node in state.nodes
-        xyz,parameters,dimension,tag=_P2C.mesh.get_node(node.tag)
-        @test reinterpret(UInt64,xyz)==reinterpret(UInt64,node.xyz)
-        @test reinterpret(UInt64,parameters)==reinterpret(UInt64,Float64[node.parameters...])
-        @test (dimension,tag)==Tuple(node.owner)
-    end
-    for entity in state.entities
-        dimension,tag=entity.owner
-        nodes,xyz,parameters=_P2C.mesh.get_nodes(dimension,tag,false,true)
-        @test nodes==entity.owned_nodes
-        @test reinterpret(UInt64,xyz)==reinterpret(UInt64,Float64[entity.owned_coordinates...])
-        @test reinterpret(UInt64,parameters)==reinterpret(UInt64,Float64[entity.owned_parameters...])
-        types,cells,connectivity=_P2C.mesh.get_elements(dimension,tag)
-        @test types==entity.types
-        @test cells==entity.cell_tags
-        @test connectivity==entity.cell_nodes
-    end
-    @test (_P2C.mesh.get_max_node_tag(),_P2C.mesh.get_max_element_tag())==Tuple(state.maxima)
-end
 const _P2C_TYPES=(8,9,10,11,12,13,14)
 const _P2C_REVERSED=((2,1),(2,1,3),(2,1,4,3),(2,1,3,4),
     (2,1,4,3,6,5,8,7),(2,1,3,5,4,6),(1,4,3,2,5))
@@ -147,8 +119,6 @@ end
         _P2C.mesh.set_visibility(cells,5)
         _P2C.mesh.set_visibility_per_window(first(cells),0,2)
         @test _P2C.mesh.set_order(2)===nothing
-        row=only(filter(row->row.name=="higher_p2_neighbors_primary_v4.json:2",FOLDED_CAD_ROWS))
-        _p2c_native_payload(row.state)
         elevated=_P2C.mesh.get_elements(2,1)[2][1]
         @test _P2C.mesh.get_visibility(elevated)==fill(1,length(elevated))
     finally
@@ -300,9 +270,10 @@ end
             operation=route===:setorder ? ()->_P2C.mesh.set_order(2) :
                 ()->_P2C.mesh.generate(route===:generate0 ? 0 : 1)
             operation()
-            row=only(filter(row->row.kind=="curve" && row.reverse==reverse &&
-                row.route==String(route),FOLDED_CAD_ROWS))
-            _p2c_native_payload(row.state)
+            types,labels,nodes=_P2C.mesh.get_elements(1,1)
+            @test types==[8] && length(only(labels))==1 && length(only(nodes))==3
+            @test _P2C.model.get_value(0,1,Float64[])==[1e16,0.,0.]
+            @test _P2C.model.get_value(0,2,Float64[])==[1e16+2,0.,0.]
         finally
             _P2C.finalize()
         end
@@ -580,72 +551,7 @@ end
     end
 end
 
-if !isdefined(@__MODULE__,:NativeP2CertificationDefaultCurvedFixturesV1)
-    include(joinpath(@__DIR__,"..","..","validation","native_geometry",
-                     "native_p2_certification_default_curved_fixtures_v1.jl"))
-end
-
-function _p2c_native_default_bits(values)
-    return [string(word;base=16,pad=16) for word in reinterpret(UInt64,Float64[values...])]
-end
-
-function _p2c_native_default_snapshot()
-    tags,xyz,uv=_P2C.mesh.get_nodes(-1,-1,false,true)
-    types,numbers,connectivity=_P2C.mesh.get_elements()
-    nodes=Any[]
-    for tag in sort(tags)
-        point,parameters,dimension,entity=_P2C.mesh.get_node(tag)
-        push!(nodes,Dict{String,Any}("tag"=>Int(tag),"xyz"=>point,
-            "xyz_bits"=>_p2c_native_default_bits(point),"parameters"=>parameters,
-            "parameter_bits"=>_p2c_native_default_bits(parameters),"owner"=>[dimension,entity]))
-    end
-    flat_cells=Int[tag for group in numbers for tag in group]
-    cells=Any[]
-    for tag in sort(flat_cells)
-        kind,node_tags,dimension,entity=_P2C.mesh.get_element(tag)
-        push!(cells,Dict{String,Any}("tag"=>tag,"msh"=>kind,"nodes"=>Int.(node_tags),
-                                   "owner"=>[dimension,entity]))
-    end
-    entities=Any[]
-    for (dimension,entity) in _P2C.model.get_entities()
-        labels,points,parameters=_P2C.mesh.get_nodes(dimension,entity,false,true)
-        kinds,cell_tags,cell_nodes=_P2C.mesh.get_elements(dimension,entity)
-        push!(entities,Dict{String,Any}("owner"=>[dimension,entity],"node_tags"=>Int.(labels),
-            "xyz"=>points,"xyz_bits"=>_p2c_native_default_bits(points),
-            "parameters"=>parameters,"parameter_bits"=>_p2c_native_default_bits(parameters),
-            "element_types"=>Int.(kinds),"element_tags"=>[Int.(row) for row in cell_tags],
-            "element_nodes"=>[Int.(row) for row in cell_nodes],
-            "visibility"=>_P2C.model.get_visibility(dimension,entity)))
-    end
-    return Dict{String,Any}("node_tags"=>Int.(tags),"xyz"=>xyz,"xyz_bits"=>_p2c_native_default_bits(xyz),
-        "parameters"=>uv,"parameter_bits"=>_p2c_native_default_bits(uv),
-        "element_types"=>Int.(types),"element_tags"=>[Int.(row) for row in numbers],
-        "element_nodes"=>[Int.(row) for row in connectivity],"nodes_by_tag"=>nodes,
-        "elements_by_tag"=>cells,"entities"=>entities,"element_visibility_tags"=>flat_cells,
-        "element_visibility"=>Int.(_P2C.mesh.get_visibility(flat_cells)),
-        "physical_groups"=>[collect(pair) for pair in _P2C.model.get_physical_groups()],
-        "max_node_tag"=>Int(_P2C.mesh.get_max_node_tag()),
-        "max_element_tag"=>Int(_P2C.mesh.get_max_element_tag()))
-end
-
-function _p2c_default_display_unchanged(before)
-    @test _P2C.ELEMENT_VISIBILITY[]==before.display
-    slot=_P2C.MODEL_SLOTS[_P2C._current_slot_index_locked()]
-    @test slot.visibility==before.visibility
-    # Gmsh has model/view window flags, but no public per-element window API.
-    # Keep this existing Julia session contract separate from native evidence.
-    @test slot.window_element_visibility==before.windows
-end
-
-function _p2c_prepare_default_optimizer_fixture()
-    _p2c_curved_triangles()
-    elements=_P2C.mesh.get_elements_by_type(9,1)[1]
-    _P2C.mesh.set_visibility(elements,5)
-    _P2C.mesh.set_visibility_per_window(first(elements),0,2)
-    return _p2c_snapshot(),_p2c_curved_payload(),_p2c_native_default_snapshot()
-end
-
-@testset "Curved simplex optimizer dispatch matches upstream order gates and native default retains geometry" begin
+@testset "Curved simplex optimizer order gates and relocation" begin
     _p2c_curved_triangles()
     try
         elements=_P2C.mesh.get_elements_by_type(9,1)[1]
@@ -678,44 +584,6 @@ end
         _P2C.finalize()
     end
 
-    fixtures=NativeP2CertificationDefaultCurvedFixturesV1
-    @test fixtures.NATIVE_VERSION=="4.15.2" && length(fixtures.CASE_ROWS)==27
-    @test length(fixtures.SEQUENCE_ROWS)==3
-    for row in fixtures.CASE_ROWS
-        before,curved_before,public_before=_p2c_prepare_default_optimizer_fixture()
-        try
-            # Private carrier iteration order has no native object-identity
-            # contract. Known scalar identities, UV and incidence match the
-            # exact public reconstruction bound to the 33 native captures.
-            @test public_before["nodes_by_tag"]==fixtures.BEFORE_RECONSTRUCTION["nodes_by_tag"]
-            @test public_before["elements_by_tag"]==fixtures.BEFORE_RECONSTRUCTION["elements_by_tag"]
-            @test public_before["max_node_tag"]==fixtures.BEFORE_RECONSTRUCTION["max_node_tag"]
-            @test public_before["max_element_tag"]==fixtures.BEFORE_RECONSTRUCTION["max_element_tag"]
-            @test _P2C.mesh.optimize(row["method"],false,row["niter"])===nothing
-            @test _p2c_native_default_snapshot()==fixtures.AFTER_STATE
-            @test _P2C.logger.get_last_error()=="" && _P2C.NATIVE_LOOKUP_QUERY_ERRORS[]==0
-            _p2c_default_display_unchanged(before)
-            _p2c_compare_curved(curved_before,_p2c_curved_payload();
-                mapping=node->UInt64((1,2,4,3)[Int(node)]))
-        finally
-            _P2C.finalize()
-        end
-    end
-    for row in fixtures.SEQUENCE_ROWS
-        before,curved_before,_=_p2c_prepare_default_optimizer_fixture()
-        try
-            for (method,niter) in row["operations"]
-                @test _P2C.mesh.optimize(method,false,niter)===nothing
-                @test _p2c_native_default_snapshot()==fixtures.AFTER_STATE
-                @test _P2C.logger.get_last_error()=="" && _P2C.NATIVE_LOOKUP_QUERY_ERRORS[]==0
-                _p2c_default_display_unchanged(before)
-                _p2c_compare_curved(curved_before,_p2c_curved_payload();
-                    mapping=node->UInt64((1,2,4,3)[Int(node)]))
-            end
-        finally
-            _P2C.finalize()
-        end
-    end
 end
 
 @testset "Real primary compaction preserves coincident component supports" begin

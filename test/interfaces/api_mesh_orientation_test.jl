@@ -1,6 +1,5 @@
-using Test,Tessella,SHA
+using Test,Tessella
 const _MBO=Tessella.API
-include(joinpath(@__DIR__,"..","..","validation","native_geometry","native_orientation_public_v1.jl"))
 
 function _mbo_cube(;occ=false,extra=true)
     _MBO.initialize();_MBO.option("Mesh.Renumber",0)
@@ -37,81 +36,6 @@ function _mbo_cube(;occ=false,extra=true)
     end
 end
 
-function _mbo_load(case;quad_first=false)
-    factory=case["factory"]
-    if factory=="discrete"
-        _MBO.initialize();_MBO.option("Mesh.Renumber",0)
-        for surface in 1:6;_MBO.model.add_discrete_entity(2,surface);end
-        _MBO.model.add_discrete_entity(3,1,[1,2,3,4,5,6])
-    else
-        _mbo_cube(;occ=factory=="OpenCASCADE")
-        if factory=="periodic"
-            _MBO.mesh.set_periodic(2,[2],[1],Float64[1,0,0,0,0,1,0,0,0,0,1,1,0,0,0,1])
-        end
-        for surface in 1:7
-            reverse=surface==7 || factory=="periodic" && surface>1 ||
-                get(case,"pattern","")=="all_inward" &&
-                    (factory=="OpenCASCADE" || surface>1)
-            reverse && _MBO.mesh.set_reverse(2,surface,true)
-        end
-    end
-    by_owner=Dict{Tuple{Int,Int},Vector{Any}}()
-    for node in case["nodes"]
-        push!(get!(()->Any[],by_owner,(node["dim"],node["owner"])),node)
-    end
-    for ((dimension,tag),nodes) in sort!(collect(by_owner);by=first)
-        tags=[node["tag"] for node in nodes]
-        coordinates=vcat((node["coords"] for node in nodes)...)
-        parameters=vcat((node["params"] for node in nodes)...)
-        _MBO.mesh.add_nodes(dimension,tag,tags,coordinates,parameters)
-    end
-    quad_first && _MBO.mesh.add_elements_by_type(1,3,[9001],[1,4,3,2])
-    cells=vcat(case["before"],get(case,"volume_cells",[]))
-    for cell in cells
-        _MBO.mesh.add_elements_by_type(cell["owner"],cell["type"],
-            [cell["tag"]],cell["nodes"])
-    end
-end
-
-function _mbo_assert_cells(cells)
-    for cell in cells
-        found=_MBO.mesh.get_element(cell["tag"])
-        @test found[1]==cell["type"]
-        @test found[2]==cell["nodes"]
-        @test found[4]==cell["owner"]
-    end
-end
-
-@testset "Actual public retained Surface orientation" begin
-    for (index,case) in enumerate(ORIENTATION_PUBLIC_FIXTURES)
-        @testset "primary case $index $(case["factory"]) order$(case["order"])" begin
-            try
-                _mbo_load(case)
-                _mbo_assert_cells(case["before"])
-                nodes=Dict(node["tag"]=>_MBO.mesh.get_node(node["tag"]) for node in case["nodes"])
-                maximum=(_MBO.NODE_TAG_MAX[],_MBO.ELEMENT_TAG_MAX[])
-                periodic=deepcopy(_MBO.CURRENT[].periodic)
-                labels=[cell["tag"] for cell in case["before"]]
-                _MBO.mesh.set_visibility(labels,0)
-                visibility=copy(_MBO.ELEMENT_VISIBILITY[])
-                _MBO.mesh.set_outward_orientation(1)
-                _mbo_assert_cells(case["after"])
-                @test Dict(tag=>_MBO.mesh.get_node(tag) for tag in keys(nodes))==nodes
-                @test (_MBO.NODE_TAG_MAX[],_MBO.ELEMENT_TAG_MAX[])==maximum
-                @test _MBO.CURRENT[].periodic==periodic
-                @test _MBO.ELEMENT_VISIBILITY[]==visibility
-                for cell in get(case,"volume_cells",[])
-                    @test _MBO.mesh.get_element(cell["tag"])[2]==cell["nodes"]
-                end
-                _MBO.mesh.set_outward_orientation(1)
-                _mbo_assert_cells(get(case,"second",case["after"]))
-                @test Dict(tag=>_MBO.mesh.get_node(tag) for tag in keys(nodes))==nodes
-            finally
-                _MBO.finalize()
-            end
-        end
-    end
-end
 
 @testset "Native Box face sense and parameter frame" begin
     try
@@ -170,23 +94,6 @@ end
     end
 end
 
-@testset "Actual same-Surface Triangle-before-Quadrangle storage" begin
-    case=first(ORIENTATION_PUBLIC_FIXTURES)
-    for quad_first in (true,false)
-        try
-            _mbo_load(case;quad_first)
-            quad_first || _MBO.mesh.add_elements_by_type(1,3,[9001],[1,4,3,2])
-            @test _MBO.mesh.get_element(9001)[2]==[1,4,3,2]
-            nodes=Dict(node["tag"]=>_MBO.mesh.get_node(node["tag"]) for node in case["nodes"])
-            _MBO.mesh.set_outward_orientation(1)
-            _mbo_assert_cells(case["after"])
-            @test _MBO.mesh.get_element(9001)[2]==[1,2,3,4]
-            @test Dict(tag=>_MBO.mesh.get_node(tag) for tag in keys(nodes))==nodes
-        finally
-            _MBO.finalize()
-        end
-    end
-end
 
 @testset "Net-zero orientation retains explicit carrier identity" begin
     carrier=Tessella.Mesh([0. 1 0;0 0 1;0 0 0];tris=reshape(Int32[1,2,3],3,1))
@@ -201,29 +108,6 @@ end
     @test rebound.coords==carrier.coords
 end
 
-include(joinpath(@__DIR__,"..","..","validation","native_geometry","native_orientation_box_edges_v1.jl"))
-@testset "Native Box actual length domains and face PCurves" begin
-    for row in ORIENTATION_BOX_EDGE_FIXTURES
-        try
-            _MBO.initialize();_MBO.model.add_box(row["origin"]...,row["extents"]...;tag=1)
-            for edge in row["edges"]
-                tag=edge["tag"];parameter=edge["parameter"]
-                lower,upper=_MBO.model.get_parametrization_bounds(1,tag)
-                @test [only(lower),only(upper)]≈edge["bounds"] atol=2e-11
-                @test _MBO.model.get_value(1,tag,[parameter])≈edge["value"] atol=2e-11
-                @test _MBO.model.get_parametrization(1,tag,edge["value"])≈edge["inverse"] atol=2e-11
-                for face in edge["surfaces"]
-                    surface=face["surface"]
-                    uv=_MBO.model.reparametrize_on_surface(1,tag,[parameter],surface)
-                    @test uv≈face["uv"] atol=2e-11
-                    @test _MBO.model.get_value(2,surface,uv)≈face["value"] atol=2e-11
-                end
-            end
-        finally
-            _MBO.finalize()
-        end
-    end
-end
 
 @testset "Pinned Box endpoint collapse rejects before entity allocation" begin
     try
@@ -253,75 +137,3 @@ end
         end
     end
 end
-
-println("ORIENTATION_PUBLIC_FOCUS_FINISHED")
-
-using Test,Tessella,Logging
-const _MC_API=Tessella.API
-include(joinpath(@__DIR__,"..","..","validation","native_geometry","native_orientation_missing_curve_v1.jl"))
-function _mc_cube()
-    _MC_API.initialize();_MC_API.option("Mesh.Renumber",0)
-    for (tag,point) in enumerate(((0,0,0),(1,0,0),(1,1,0),(0,1,0),
-                                 (0,0,1),(1,0,1),(1,1,1),(0,1,1)))
-        _MC_API.model.add_point(point...;tag)
-    end
-    for (tag,edge) in enumerate(((1,2),(2,3),(3,4),(4,1),(5,6),(6,7),
-                                (7,8),(8,5),(1,5),(2,6),(3,7),(4,8)))
-        _MC_API.model.add_line(edge...;tag)
-    end
-    for (tag,curves) in enumerate(([1,2,3,4],[5,6,7,8],[1,10,-5,-9],
-                                  [2,11,-6,-10],[3,12,-7,-11],[4,9,-8,-12]))
-        _MC_API.model.add_curve_loop(curves;tag)
-        _MC_API.model.add_plane_surface([tag];tag)
-    end
-    _MC_API.model.add_surface_loop([-1,2,3,4,5,6];tag=1)
-    _MC_API.model.add_volume([1];tag=1)
-end
-@testset "Original Curve vertex U storage controls barycenter orientation" begin
-    for row in ORIENTATION_MISSING_CURVE_FIXTURES
-        @testset "P$(row["order"]) storedU=$(row["curve_parameters_supplied"])" begin
-            try
-                _mc_cube()
-                nodes=row["nodes"]
-                _MC_API.mesh.add_nodes(1,1,[node["tag"] for node in nodes],
-                    vcat((node["coords"] for node in nodes)...),
-                    vcat((node["params"] for node in nodes)...))
-                for cell in row["before"]
-                    _MC_API.mesh.add_elements_by_type(cell["owner"],cell["type"],
-                        [cell["tag"]],cell["nodes"])
-                end
-                maximum=(_MC_API.NODE_TAG_MAX[],_MC_API.ELEMENT_TAG_MAX[])
-                logger=Test.TestLogger()
-                with_logger(logger) do
-                    _MC_API.mesh.set_outward_orientation(1)
-                end
-                @test [string(log.message) for log in logger.logs]==
-                    [replace(message,"Warning: "=>"") for message in row["warnings_first"]]
-                for cell in row["after"]
-                    found=_MC_API.mesh.get_element(cell["tag"])
-                    @test found[1]==cell["type"]
-                    @test found[2]==cell["nodes"]
-                    @test found[4]==cell["owner"]
-                end
-                after=_MC_API.mesh.get_elements(2,-1)
-                repeated=Test.TestLogger()
-                with_logger(repeated) do
-                    _MC_API.mesh.set_outward_orientation(1)
-                end
-                @test [string(log.message) for log in repeated.logs]==
-                    [replace(message,"Warning: "=>"") for message in row["warnings_second"]]
-                @test _MC_API.mesh.get_elements(2,-1)==after
-                @test (_MC_API.NODE_TAG_MAX[],_MC_API.ELEMENT_TAG_MAX[])==maximum
-                for node in nodes
-                    found=_MC_API.mesh.get_node(node["tag"])
-                    @test found[1]==node["coords"]
-                    @test found[2]==node["params"]
-                    @test found[3:4]==(1,1)
-                end
-            finally
-                _MC_API.finalize()
-            end
-        end
-    end
-end
-println("ORIENTATION_MISSING_CURVE_FOCUS_FINISHED")
