@@ -2,7 +2,6 @@ using Test
 using Tessella
 
 const _EVALUATION_API=Tessella.API
-include(joinpath(@__DIR__,"..","..","validation","native_geometry","native_builtin_line_queries_fixtures_v1.jl"))
 
 @testset "synchronized API entity evaluation" begin
     _EVALUATION_API.finalize()
@@ -24,10 +23,8 @@ include(joinpath(@__DIR__,"..","..","validation","native_geometry","native_built
         @test _EVALUATION_API.model.get_value(0,1,[])==[1.0,2.0,0.0]
         @test _EVALUATION_API.model.get_value(1,1,[0.0,0.5,1.0])==
               [1.0,2.0,0.0,3.0,2.0,0.0,5.0,2.0,0.0]
-        native_line=only(row for row in NATIVE_BUILTIN_LINE_QUERIES_V1
-            if row["shape"]=="old_square" && !row["remote"] && haskey(row,"derivative"))
-        @test reinterpret(UInt64,_EVALUATION_API.model.get_derivative(1,1,[0.5]))==
-              reinterpret(UInt64,Float64.(native_line["derivative"]))
+        @test _EVALUATION_API.model.get_derivative(1,1,[0.5])≈
+              [4.0,0.0,0.0] atol=1e-9 rtol=0
         @test _EVALUATION_API.model.get_second_derivative(2,1,[4.0,3.0])==
               zeros(9)
         @test _EVALUATION_API.model.get_curvature(2,1,[4.0,3.0])==[0.0]

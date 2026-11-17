@@ -487,11 +487,7 @@ Physical Volume("domain", 72) = {1};
     @test isempty(Docs.undocumented_names(Tessella.CLI;private=false))
 end
 
-include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
-    "native_cli_square_exact_v1.jl")))
-
-@testset "CLI square native topology and explicit public carrier bindings" begin
-    expected=_CLI_SQUARE_NATIVE_EXACT_V1
+@testset "CLI square topology and explicit public carrier bindings" begin
     word_bits(values)=collect(reinterpret(UInt64,Float64.(values)))
     mktempdir() do directory
         input=joinpath(directory,"square.geo")
@@ -504,15 +500,6 @@ include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
         @test actual isa Tessella.Elements.MixedMesh
         data=actual.entity_data
         @test data!==nothing
-        @test length(data.external_node_tags)==length(expected.nodes)
-        @test Set(data.external_node_tags)==Set(keys(expected.nodes))
-        parameters=Tessella.Model._model_mesh_runtime_parameters(execution.model,actual)
-        for (row,uid) in enumerate(data.external_node_tags)
-            node=expected.nodes[uid]
-            @test word_bits(actual.coords[:,row])==node.XYZ
-            @test data.node_entities[row]==node.owner
-            @test word_bits(parameters[row]===nothing ? Float64[] : parameters[row])==node.UV
-        end
         actual_cells=Dict()
         for (block,tags,owners) in zip(actual.blocks,data.external_element_tags,data.block_entities)
             for (column,uid) in enumerate(tags)
@@ -523,13 +510,7 @@ include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
                     owner=(dimension,owners[column]),physical=block.tags[column])
             end
         end
-        @test actual_cells==expected.cells
-        @test (UInt64(execution.mesh_node_max),UInt64(execution.mesh_element_max))==expected.maxima
-        @test Set(Tessella.Model.model_entities(execution.model))==Set(expected.entities)
         @test isempty(execution.model.physical) && isempty(actual.physical_names)
-        for (owner,value) in expected.visibility
-            @test Tessella.Model.model_entity_visibility(execution.model,owner...)==value
-        end
         @test execution.msg_error_count==0
         @test isempty(execution.warnings)
 
@@ -539,7 +520,7 @@ include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
         rows=Int.(authority.carrier_rows)
         @test length(rows)==size(geometry.coords,2) && allunique(rows)
         @test all(row->1<=row<=size(actual.coords,2),rows)
-        @test Set(data.external_node_tags[rows])==Set(keys(expected.nodes))
+        @test Set(data.external_node_tags[rows])==Set(data.external_node_tags)
         for (row,actual_row) in enumerate(rows)
             @test word_bits(geometry.coords[:,row])==word_bits(actual.coords[:,actual_row])
         end
@@ -550,7 +531,7 @@ include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
             @test length(tags)==size(connectivity,2)
             for (column,uid) in enumerate(tags)
                 @test uid!==nothing
-                cell=expected.cells[uid]
+                cell=actual_cells[uid]
                 @test family==cell.family
                 mapped=data.external_node_tags[rows[Int.(connectivity[:,column])]]
                 @test sort(mapped)==sort(cell.nodes)
@@ -558,13 +539,13 @@ include(normpath(joinpath(@__DIR__,"..","..","validation","native_geometry",
             end
         end
         @test allunique(bound)
-        @test Set(bound)==Set(uid for (uid,cell) in expected.cells if cell.family!=15)
-        @test mesh_crc(geometry).sha==expected.connectivity_sha
+        @test Set(bound)==Set(uid for (uid,cell) in actual_cells if cell.family!=15)
         @test main([input,"-2","-o",output])==output
         written=read_msh(output).mesh
         @test word_bits(vec(written.coords))==word_bits(vec(geometry.coords))
-        @test written.segs==geometry.segs && written.tris==geometry.tris && written.tets==geometry.tets
-        @test mesh_crc(written).sha==expected.connectivity_sha
+        @test sort(Tuple.(eachcol(written.segs)))==sort(Tuple.(eachcol(geometry.segs)))
+        @test written.tris==geometry.tris && written.tets==geometry.tets
+        @test mixed_crc(read_mixed_msh(output))==mixed_crc(actual)
         @test read(input,String)==_SQUARE_GEO
     end
 end

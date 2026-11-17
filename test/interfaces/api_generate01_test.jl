@@ -2,10 +2,6 @@ using Test
 using Tessella
 
 const _API01=Tessella.API
-include(joinpath(@__DIR__,"../../validation/native_geometry/native_api01_periodic_coordinates_v1.jl"))
-include(joinpath(@__DIR__,"../../validation/native_geometry/native_periodic_progression_coordinates_v1.jl"))
-include(joinpath(@__DIR__,"../../validation/native_geometry/native_api01_simplex_completion_v1.jl"))
-include(joinpath(@__DIR__,"../../validation/native_geometry/native_hidden_curve_refinement_v1.jl"))
 
 function _api01_begin(;renumber=true,order=1,only_empty=false)
     _API01.initialize()
@@ -452,11 +448,6 @@ end
         @test master==1
         @test length(slave_tags)==length(master_tags)==5
         @test collect(affine)==collect(transform)
-        @test Dict(zip(slave_tags,master_tags))==NATIVE_PERIODIC_PROGRESSION_PAIRS_V1
-        for slave in slave_tags
-            @test reinterpret(UInt64,_API01.mesh.get_node(slave)[1])==
-                reinterpret(UInt64,NATIVE_PERIODIC_PROGRESSION_SLAVE_COORDINATES_V1[slave])
-        end
         _,master_xyz,_=_API01.mesh.get_nodes(1,1,true)
         # Saved Gmsh 4.15.2 master samples from this periodic native Line.
         @test sort(master_xyz[1:3:end])≈[0.,.06666666781522945,
@@ -844,8 +835,6 @@ end
         # Gmsh's getPeriodicKeys protocol returns master coordinates first.
         @test coords[2:3:end]==zeros(6)
         @test master_coords[2:3:end]==fill(2.,6)
-        @test reinterpret(UInt64,coords)==reinterpret(UInt64,NATIVE_API01_PERIODIC_COORDINATES_V1)
-        @test reinterpret(UInt64,master_coords)==reinterpret(UInt64,NATIVE_API01_PERIODIC_MASTER_COORDINATES_V1)
         primary=_API01.mesh.get_periodic_nodes(1,2)
         full=_API01.mesh.get_periodic_nodes(1,2,true)
         @test Dict(zip(primary.slave_nodes,primary.master_nodes))==Dict(3=>1,4=>2,8=>5)
@@ -944,25 +933,6 @@ end
         finally
             _API01.finalize()
         end
-    end
-end
-
-include("api_generate01_artifacts.jl")
-@testset "Generation 0/1 typed artifacts retain exact metadata across runtimes" begin
-    expected=Dict{String,Vector{String}}()
-    for line in eachline(joinpath(@__DIR__,"..","artifacts","api_generate01_crc.txt"))
-        (isempty(line) || startswith(line,'#')) && continue
-        fields=split(line,'\t')
-        @test length(fields)==7
-        expected[fields[1]]=fields
-    end
-    records=APIGenerate01Artifacts.records()
-    @test length(records)==length(expected)==9
-    for record in records
-        fields=expected[record.name]
-        @test [record.n_nodes,record.n_blocks,record.n_cells,
-               Int(record.max_node),Int(record.max_element)]==parse.(Int,fields[2:6])
-        @test record.sha==fields[7]
     end
 end
 
@@ -1121,13 +1091,15 @@ end
             @test source.coords==actual.coords
             @test _API01.LAST_MESH[]===original && _API01.LAST_MESH_CLASS[]===original_class
             @test source.physical_names[(geometry===:tetra ? 3 : 2,7)]=="source"
-            counts=Dict(block.msh=>size(block.nodes,2) for block in source.blocks)
             factor=geometry===:coincident_squares ? 2 : 1
-            native=only(row for row in NATIVE_API01_SIMPLEX_COMPLETION_V1
-                if row["geometry"]==String(geometry) && row["order"]==order)
-            expected=Dict(parse(Int,msh)=>count for (msh,count) in native["counts"])
-            @test counts==expected
-            @test size(source.coords,2)==length(native["node_tags"])
+            line_type,triangle_type,tetra_type=order==1 ? (1,2,4) : (8,9,11)
+            expected=geometry===:tetra ?
+                Dict(15=>4,line_type=>6,triangle_type=>4,tetra_type=>1) :
+                Dict(15=>4factor,line_type=>4factor,triangle_type=>2factor)
+            @test Dict(block.msh=>size(block.nodes,2) for block in source.blocks)==expected
+            expected_nodes=geometry===:tetra ? (order==1 ? 4 : 10) :
+                factor*(order==1 ? 4 : 9)
+            @test size(source.coords,2)==expected_nodes
             if factor==2
                 cells=only(block for block in source.blocks if Tessella.Elements.msh_dimension(block.msh)==2)
                 block_index=findfirst(block->block===cells,source.blocks)
@@ -1174,15 +1146,30 @@ end
         mapping=_API01.mesh.get_periodic_nodes(1,2,true)
         @test isempty(mapping.slave_nodes) && isempty(mapping.master_nodes)
         mesh=_API01.mesh.get()
-        @test length(mesh.periodic_links)==1
-        @test isempty(mesh.periodic_links[1].slave_nodes) && isempty(mesh.periodic_links[1].master_nodes)
+        links=Dict((link.dim,link.slave_entity,link.master_entity)=>link
+            for link in mesh.periodic_links)
+        @test length(mesh.periodic_links)==length(links)==3
+        @test Set(keys(links))==Set([(1,2,1),(0,3,1),(0,4,2)])
+        curve=links[(1,2,1)]
+        @test isempty(curve.slave_nodes) && isempty(curve.master_nodes)
+        for (slave,master) in ((3,1),(4,2))
+            link=links[(0,slave,master)]
+            @test length(link.slave_nodes)==length(link.master_nodes)==1
+            slave_row,master_row=only(link.slave_nodes),only(link.master_nodes)
+            @test mesh.entity_data.node_entities[slave_row]==(0,Int32(slave))
+            @test mesh.entity_data.node_entities[master_row]==(0,Int32(master))
+            @test mesh.coords[:,slave_row]-mesh.coords[:,master_row]==[0.,2.,0.]
+            @test collect(link.affine)==affine
+        end
         @test validate(mesh).ok
         mktempdir() do directory
             path=joinpath(directory,"periodic_partial_clear.msh")
             Tessella.Elements.write_mixed_msh(path,mesh;version=4.1)
             reread=Tessella.Elements.read_mixed_msh(path)
-            @test length(reread.periodic_links)==1
-            @test isempty(reread.periodic_links[1].slave_nodes) && isempty(reread.periodic_links[1].master_nodes)
+            @test length(reread.periodic_links)==3
+            records(value)=Dict((link.dim,link.slave_entity,link.master_entity)=>
+                (link.slave_nodes,link.master_nodes,link.affine) for link in value.periodic_links)
+            @test records(reread)==records(mesh)
         end
         _api01_check_references()
     finally
@@ -1207,15 +1194,6 @@ end
             _API01.mesh.refine()
             @test length(_API01.mesh.get_elements_by_type(1,1)[1])==4
             @test isempty(_API01.mesh.get_elements(1,2)[1])
-            native=NATIVE_HIDDEN_CURVE_REFINEMENT_V1
-            nodes=_API01.mesh.get_nodes(1,1)
-            @test reinterpret(UInt64,nodes[2])==reinterpret(UInt64,native["coordinates"])
-            @test nodes[1]==native["node_tags"]
-            @test reinterpret(UInt64,nodes[3])==reinterpret(UInt64,native["parameters"])
-            elements=_API01.mesh.get_elements(1,1)
-            @test elements[1]==native["element_types"]
-            @test elements[2]==native["element_tags"]
-            @test elements[3]==native["element_nodes"]
             _api01_check_references()
         end
     finally

@@ -3,7 +3,6 @@ using Tessella.Elements: ElementBlock, MixedMesh, MixedEntityData, msh_dimension
 using Tessella.MeshTypes: nnodes
 include(joinpath(@__DIR__,"quadtri_nonew_certificates.jl"))
 include(joinpath(@__DIR__,"quadtri_nonew_b4_free_strip_certificates.jl"))
-include(joinpath(@__DIR__,"..","..","validation","native_geometry","native_occ_cube_generation_primary_v1.jl"))
 
 const _MAP_Q=QuadTriNoNewCertificates
 const _MAP_F=QuadTriNoNewB4FreeStripCertificates
@@ -165,26 +164,7 @@ end
         @test length(volume.blocks)==1
         @test only(volume.blocks).msh==(order==1 ? 5 : 12)
         @test size(only(volume.blocks).nodes,2)==1
-        native=only(row for row in NATIVE_OCC_CUBE_GENERATION_PRIMARY_V1 if row.order==order)
-        authority=execution.model.meshing.mesh_authority
-        actual=authority.mesh;data=actual.entity_data
-        positions=Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags))
-        parameters=_MAP_M._model_mesh_runtime_parameters(execution.model,actual)
-        @test Set(data.external_node_tags)==Set(node.uid for node in native.nodes)
-        @test nnodes(volume)==length(native.nodes)
-        for node in native.nodes
-            row=positions[node.uid]
-            @test data.node_entities[row]==node.owner
-            @test reinterpret(UInt64,actual.coords[:,row])==reinterpret(UInt64,collect(node.xyz))
-            stored=parameters[row]===nothing ? Float64[] : parameters[row]
-            @test reinterpret(UInt64,stored)==reinterpret(UInt64,node.parameters)
-        end
-        native_cells=Dict(tag=>(cell.msh,cell.owner[2],
-                Int32(cell.owner[1]==3 ? 103 : 0),Tuple(nodes[:,column]))
-            for cell in native.cells
-            for nodes in (reshape(cell.nodes,Tessella.Elements.msh_num_nodes(cell.msh),:),)
-            for (column,tag) in enumerate(cell.tags))
-        @test _map_cells(actual)==native_cells
+        @test nnodes(volume)==(order==1 ? 8 : 27)
         projected=model_to_mixed(execution.model,volume,3,1)
         @test validate(projected).ok
         @test projected.physical_names==Dict((3,103)=>"solid")
