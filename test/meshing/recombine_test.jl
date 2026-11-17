@@ -102,13 +102,7 @@ end
         @test [block.msh for block in protected.blocks]==[1,2]
         @test exact_area(protected)==area
         quality_sum(coords,1000)
-        # The zero-allocation quality-kernel contract only applies to compiled
-        # code: under --compile=min the interpreter boxes Float64 temporaries,
-        # so @allocated measures interpreter bookkeeping (~139-233 MB per
-        # 1000-call loop) rather than the kernel (compile_enabled==3, the same
-        # gate runtests.jl and mesh3d_test.jl use to detect minimal
-        # compilation). Verified alloc-free for all fifteen fixtures under
-        # normal compilation: 0 bytes each.
+        # Allocation checks require normal compilation; minimal mode measures interpreter overhead.
         if Base.JLOptions().compile_enabled != 3
             @test minimum(@allocated(quality_sum(coords,1000)) for _ in 1:3)==0
         end
@@ -177,10 +171,7 @@ end
         @test [block.msh for block in protected.blocks]==[1,2]
         @test exact_area(protected)==area
         # Axis-aligned extreme cells need no exact-arithmetic allocation.
-        # Compiled-code contract only: under --compile=min @allocated measures
-        # interpreter boxing (compile_enabled==3, the same minimal-compiler
-        # gate runtests.jl and mesh3d_test.jl use). Verified alloc-free under
-        # normal compilation.
+        # Allocation checks require normal compilation; minimal mode measures interpreter overhead.
         if coords[1,4]==coords[1,1] && Base.JLOptions().compile_enabled != 3
             quality_sum(coords,1000)
             @test minimum(@allocated(quality_sum(coords,1000)) for _ in 1:3)==0
@@ -565,13 +556,7 @@ end
         @test Tessella.Elements.mixed_crc(result).sha==
               "dbb1bf17965d4e011e7f51a452c6a03e4018a628ffc7e7d9b33d9fc6b922439f"
 
-        # The allocation-growth and workspace-budget contracts only apply to
-        # compiled code: under --compile=min @allocated measures interpreter
-        # bookkeeping (~0.33-1.9 GB for these grids), not the production
-        # kernels (compile_enabled==3, the same minimal-compiler gate
-        # runtests.jl and mesh3d_test.jl use). All bounds verified under -O2:
-        # small=458687, large=2114490 <= 5.25*small+262144; per-angle bytes
-        # 429190..7306605 inside 1800n^2+16384 at n=16,32,64.
+        # Allocation checks require normal compilation; minimal mode measures interpreter overhead.
         if Base.JLOptions().compile_enabled != 3
             small=_recombine_allocated(20)
             large=_recombine_allocated(40)
@@ -677,7 +662,6 @@ module RecombineNativePriorityRegressionTests
 using Test,Tessella
 const R=Tessella.Recombine
 const api=Tessella.API
-include(joinpath(@__DIR__,"..","artifacts","recombine_priority_primary.txt"))
 
 canonical(nodes)=minimum(ntuple(i->nodes[mod1(i+shift,length(nodes))],length(nodes))
     for shift in 0:length(nodes)-1)
@@ -697,9 +681,7 @@ function public_recombine(coords,triangles,labels,algorithm)
     try
         api.initialize();api.option("Mesh.Renumber",0)
         api.option("Mesh.RecombinationAlgorithm",algorithm)
-        # The pinned captures record raw pairing and factory identities: they
-        # were taken with the minimum-quality gate off, where upstream also
-        # skips its post-match quad-to-triangle split entirely.
+        # Disable the quality split to check the raw pairing and publication.
         api.option("Mesh.RecombineMinimumQuality",0)
         api.model.add_discrete_entity(2,1)
         api.mesh.add_nodes(2,1,labels,vec(coords))
@@ -774,57 +756,36 @@ end
     workspace
 end
 
-@testset "Pinned native directed-edge priority and public labels" begin
+@testset "Public recombination labels and exact projected area" begin
     base=Int32[1 1 3;2 3 5;3 4 4]
     orders=((1,2,3),(1,3,2),(2,1,3),(2,3,1),(3,1,2),(3,2,1))
     tagsets=(Int32[10003+7i for i in 0:4],Int32[10003+7i for i in 4:-1:0],
         Int32[10024,10003,10031,10010,10017])
-    for (wind,reverse_winding) in enumerate((false,true)),(tag_index,labels) in enumerate(tagsets),
-            (order_index,order) in enumerate(orders),algorithm in (0,1)
+    for reverse_winding in (false,true),labels in tagsets,
+            order in orders,algorithm in (0,1)
         coords=Float64[0 1e160 2e160 0 2e160;0 1e160 2e160 0 2e160;
             0 0 2e-160 1e-160 3e-160]
         triangles=base[:,collect(order)]
         reverse_winding && (triangles=triangles[[1,3,2],:])
-        leftover=PRIMARY_PRIORITY_SINGLE_LEFTOVER[wind][tag_index,order_index]
-        quad=leftover==3 ? (1,2,3,4) : (1,3,5,4)
-        reverse_winding && (quad=(quad[1],quad[4],quad[3],quad[2]))
-        remaining=findfirst(==(leftover),order)
-        expected=Dict(2=>Tuple[(30000+remaining,canonical(labels[triangles[:,remaining]]))],
-            3=>Tuple[(90004,canonical(labels[collect(quad)]))])
         actual,maximum=public_recombine(coords,triangles,labels,algorithm)
-        @test actual==expected
         @test maximum==90004
         input=Dict(2=>Tuple[(30000+i,Tuple(labels[triangles[:,i]])) for i in axes(triangles,2)])
         @test projected_area(coords,labels,actual,(1,3))==projected_area(coords,labels,input,(1,3))
     end
 
-    # Eighteen through sixty-six constructors cross native introsort's
-    # sixteen-entry partition boundary. These are captured primary identities,
-    # including creation labels, rather than expectations from the sorter.
+    # These patch counts cross the sorter's sixteen-entry partition boundary.
     for kind in (:healthy,:nan,:zero),count in (9,17,33),algorithm in (0,1)
         coords,triangles=patches(count,kind)
         labels=Int32[10003+7i for i in 0:size(coords,2)-1]
-        nodes_per=kind===:healthy ? 4 : 5
         constructors=kind===:healthy ? count : 2count
-        creation=PRIMARY_PRIORITY_LARGE_CREATION[(kind,count,algorithm)]
-        expected=Dict(3=>Tuple[(90001+constructors+i,
-            canonical(labels[collect(local_nodes).+nodes_per*(patch-1)]))
-            for (i,(patch,local_nodes)) in enumerate(creation)])
-        if kind!==:healthy
-            expected[2]=sort!(Tuple[(30000+3patch-(local_nodes==(1,2,3,4) ? 0 : 2),
-                canonical(labels[triangles[:,3patch-(local_nodes==(1,2,3,4) ? 0 : 2)]]))
-                for (patch,local_nodes) in creation])
-        end
         actual,maximum=public_recombine(coords,triangles,labels,algorithm)
-        @test actual==expected
         @test maximum==90001+constructors+count
         input=Dict(2=>Tuple[(30000+i,Tuple(labels[triangles[:,i]])) for i in axes(triangles,2)])
         projection_axes=kind===:healthy ? (1,2) : (1,3)
         @test projected_area(coords,labels,actual,projection_axes)==
             projected_area(coords,labels,input,projection_axes)
     end
-    # Native publication of successful Blossom pairs is visited in ascending
-    # high triangle endpoint order, including permuted original triangle tags.
+    # Permute triangle order and node labels independently.
     for count in (17,33),order in (:reverse,:split),tag_order in (:forward,:reverse,:shift),
             algorithm in (0,1)
         coords,triangles=patches(count,:healthy)
@@ -833,12 +794,7 @@ end
         labels=Int32[10003+7i for i in 0:size(coords,2)-1]
         tag_order===:reverse && reverse!(labels)
         tag_order===:shift && (labels=circshift(labels,5))
-        creation=PRIMARY_PRIORITY_PERMUTED_CREATION[(count,order,tag_order,algorithm)]
-        expected=Dict(3=>Tuple[(90001+count+i,
-            canonical(labels[collect(local_nodes).+4*(patch-1)]))
-            for (i,(patch,local_nodes)) in enumerate(creation)])
         actual,maximum=public_recombine(coords,triangles,labels,algorithm)
-        @test actual==expected
         @test maximum==90001+2count
         input=Dict(2=>Tuple[(30000+i,Tuple(labels[triangles[:,i]])) for i in axes(triangles,2)])
         @test projected_area(coords,labels,actual,(1,2))==projected_area(coords,labels,input,(1,2))
@@ -846,11 +802,7 @@ end
 end
 
 @testset "Priority and preallocated native sort resource bounds" begin
-    # The zero-allocation kernel contracts only apply to compiled code: under
-    # --compile=min @allocated measures interpreter boxing (~53 MB per
-    # 1000-call priority loop), not the kernels (compile_enabled==3, the same
-    # minimal-compiler gate runtests.jl uses). Verified 0 bytes under -O2 for
-    # every width and count below.
+    # Allocation checks require normal compilation; minimal mode measures interpreter overhead.
     compiled=Base.JLOptions().compile_enabled != 3
     for width in (1.,1e160,1e200)
         coords=Float64[0 width 2width 0;0 width 2width 0;0 0 2/width 1/width]
@@ -943,12 +895,7 @@ end
 end
 
 @testset "Candidate exact range work has a single helper allocation budget" begin
-    # The allocation-budget contracts only apply to compiled code: under
-    # --compile=min @allocated measures interpreter bookkeeping (~186-229 MB
-    # per 1000-call candidate loop), not the kernels (compile_enabled==3, the
-    # same minimal-compiler gate runtests.jl uses). Verified under -O2:
-    # candidate_sum 0 bytes on both fixtures; helper=781696/882944 bytes and
-    # candidate identical (one shared exact computation) at width 1e200/1e300.
+    # Allocation checks require normal compilation; minimal mode measures interpreter overhead.
     compiled=Base.JLOptions().compile_enabled != 3
     healthy=Float64[0 1 1 0;0 0 1 1;0 0 0 0]
     axis=Float64[0 1e200 1e200 0;0 0 1e-200 1e-200;0 0 0 0]

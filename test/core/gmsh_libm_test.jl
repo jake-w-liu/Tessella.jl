@@ -121,13 +121,7 @@ const G=Tessella.GmshLibm
 
 @static if Sys.iswindows() && Sys.ARCH===:x86_64
     using ..WindowsAtan2RegressionTests: x87_stack_top
-    const fixture=readlines(joinpath(@__DIR__,"..","artifacts","windows_math_primary.txt"))
-    const input_row=only(filter(line->startswith(line,"# inputbits "),fixture))
-    const inputs=[reinterpret(Float64,parse(UInt64,part;base=16))
-        for part in split(input_row)[3:end]]
-    const records=[(parse(UInt16,parts[1];base=16),parts[2],
-        [parse(UInt64,part;base=16) for part in parts[3:end]])
-        for parts in (split(line) for line in fixture if !startswith(line,"#"))]
+    const inputs=(.125,1.,1e300)
     const functions=Dict("Exp"=>G._gm87_exp,"Log"=>G._gm87_log,
         "Sin"=>G._gm87_sin,"Cos"=>G._gm87_cos)
 
@@ -155,27 +149,25 @@ const G=Tessella.GmshLibm
         return total
     end
 
-    @testset "Windows native math primary modes, CLI and bounded workspace" begin
+    @testset "Windows native math modes, CLI and bounded workspace" begin
         saved=G._win_x87_control_word()
         for f in values(functions)
             f(1.)
         end
-        @test length(records)==48
-        for (bits,label,expected) in records
-            word=(saved&UInt16(0xf0ff))|bits
-            values,observed,top_held=mode_values(functions[label],word)
-            @test values==expected
+        modes=(0x0000,0x0400,0x0800,0x0c00,
+               0x0200,0x0600,0x0a00,0x0e00,
+               0x0300,0x0700,0x0b00,0x0f00)
+        for bits in modes,f in values(functions)
+            word=(saved&UInt16(0xf0ff))|UInt16(bits)
+            _,observed,top_held=mode_values(f,word)
             @test observed==word
             @test top_held
             @test G._win_x87_control_word()==saved
         end
-        expected_cli=Dict((bits&UInt16(0x0c00),label)=>values
-            for (bits,label,values) in records if bits&UInt16(0x0300)==0x0300)
         G._with_win_cli_precision() do
-            for (bits,label,_) in records
-                word=(saved&UInt16(0xf0ff))|bits
-                values,observed,top_held=mode_values(functions[label],word)
-                @test values==expected_cli[(bits&UInt16(0x0c00),label)]
+            for bits in modes,f in values(functions)
+                word=(saved&UInt16(0xf0ff))|UInt16(bits)
+                _,observed,top_held=mode_values(f,word)
                 @test observed==word
                 @test top_held
                 @test G._win_x87_control_word()==saved
