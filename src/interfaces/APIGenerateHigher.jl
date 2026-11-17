@@ -3175,9 +3175,21 @@ end
 
 # Fresh Surface cells are actual event objects. Their final labels may change
 # during finish! even though they have no retained source_tag mapping entry.
-function _higher_surface_constructor_rows(authority,constructors,node_map,caller)
+function _higher_surface_constructor_rows(authority,constructors,node_map,caller;
+                                           p2_pass::Bool=false)
     data=authority.mesh.entity_data
     positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
+    # The high-order finish pass reclassifies retained corners by their lowest
+    # incident entity. P1 constructor metadata precedes that association pass.
+    incident=p2_pass ? fill((4,Int32(0)),nnodes(authority.mesh)) : nothing
+    if p2_pass
+        for (block,owners) in zip(authority.mesh.blocks,data.block_entities)
+            dimension=msh_dimension(block.msh)
+            for column in axes(block.nodes,2),row in @view(block.nodes[:,column])
+                incident[row]=min(incident[row],(dimension,owners[column]))
+            end
+        end
+    end
     produced=copy(authority.producer_rows)
     for (owner,constructor) in constructors
         receipt=constructor.entity_data
@@ -3194,10 +3206,16 @@ function _higher_surface_constructor_rows(authority,constructors,node_map,caller
                 continue
             end
             row=get(positions,final,Int32(0))
-            row>0 && all(axis->isequal(constructor.coords[axis,source],
+            row>0 || throw(ArgumentError(
+                "$caller: Surface constructor row receipt loses actual node $uid"))
+            node_owner=data.node_entities[row]
+            expected_owner=p2_pass ? incident[row] : receipt.node_entities[source]
+            parameter=p2_pass ? Model._model_mesh_projected_parameter(
+                node_owner,receipt.node_parametric[source]) : receipt.node_parametric[source]
+            all(axis->isequal(constructor.coords[axis,source],
                 authority.mesh.coords[axis,row]),1:3) &&
-                receipt.node_entities[source]==data.node_entities[row] &&
-                isequal(receipt.node_parametric[source],data.node_parametric[row]) ||
+                expected_owner==node_owner &&
+                isequal(parameter,data.node_parametric[row]) ||
                 throw(ArgumentError("$caller: Surface constructor row receipt changes actual node $uid"))
             push!(rows,row)
         end
@@ -4328,7 +4346,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     # request the actual first-order Surface skeleton.
     if !isempty(surface_constructor_inputs)
         m.meshing.mesh_authority=_higher_surface_constructor_rows(
-            m.meshing.mesh_authority,surface_constructor_inputs,plan.node_tag_map,caller)
+            m.meshing.mesh_authority,surface_constructor_inputs,plan.node_tag_map,caller;p2_pass)
     end
     if element_order==1 && !isempty(surface_constructor_inputs)
         m.meshing.mesh_authority=_higher_surface_constructor_publication(

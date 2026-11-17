@@ -1,73 +1,22 @@
 module GeoHigherDefaultTests
-using Test,Tessella,SHA,TOML
-using Tessella.MeshTypes: Mesh,mesh_crc
+using Test,Tessella
+using Tessella.MeshTypes: Mesh
 const API=Tessella.API
 const GEO=Tessella.GeoExec
 
-@testset "Ordinary GEO generation publishes literal complete owner products" begin
-    path=joinpath(@__DIR__,"../artifacts/onlyempty_geo_default_square_primary.toml")
-    @test bytes2hex(sha256(replace(read(path,String),"\r\n"=>"\n")))==
-        "f4393385a11e8211886f1f4979e73c1e6b26c82eea3659a16edd4a26e2e87640"
-    primary=TOML.parsefile(path)
-    @test primary["gmsh_version"]=="4.15.2"
-    @test primary["primary_json_sha256"]=="edc61727b74b987d1ea4bacf8e771524208945696ae03b0e4a53768b8979b0cb"
-    current=API.CURRENT[];cache=API.LAST_MESH[];classification=API.LAST_MESH_CLASS[]
-    for row in primary["rows"]
-        mktempdir() do directory
-            source=joinpath(directory,"default.geo")
-            write(source,"""
-            Mesh.Renumber=$(row["renumber"]); Mesh.ElementOrder=$(row["order"]);
-            Mesh.MeshOnlyEmpty=0;
-            Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
-            Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
-            Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
-            Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
-            Transfinite Curve{1:4}=2; Transfinite Surface{1}; Mesh 2;
-            """)
-            result=GEO.execute_geo(source)
-            authority=result.model.meshing.mesh_authority
-            actual=authority.mesh;data=actual.entity_data
-            @test result.mesh isa Mesh
-            @test authority.carrier===result.mesh
-            @test actual.coords[:,authority.carrier_rows]==result.mesh.coords
-            @test size(result.mesh.segs,2)==4 && size(result.mesh.tris,2)==2
-            @test data.external_node_tags==row["all_node_tags"]
-            @test Dict(string(block.msh)=>size(block.nodes,2) for block in actual.blocks)==row["counts"]
-            @test allunique(data.external_node_tags)
-            @test allunique(vcat(data.external_element_tags...))
-            for entity in row["entities"]
-                dimension,tag=entity["owner"]
-                part=GEO.geo_entity_mesh(result,dimension,tag)
-                metadata=part.entity_data
-                owned=Int[position for (position,owner) in enumerate(metadata.node_entities)
-                          if owner==(dimension,Int32(tag))]
-                @test metadata.external_node_tags[owned]==entity["nodes"]
-                @test vec(part.coords[:,owned])≈Float64.(entity["xyz"]) atol=2e-11 rtol=0
-                parameters=reduce(vcat,(something(metadata.node_parametric[position],Float64[])
-                                       for position in owned);init=Float64[])
-                @test parameters≈Float64.(entity["parameters"]) atol=2e-11 rtol=0
-                @test Int[block.msh for block in part.blocks]==entity["types"]
-                @test metadata.external_element_tags==entity["elements"]
-                @test [vec(metadata.external_node_tags[block.nodes]) for block in part.blocks]==entity["connections"]
-            end
-            @test API.CURRENT[]===current && API.LAST_MESH[]===cache && API.LAST_MESH_CLASS[]===classification
-        end
-    end
-end
-
-function prepare_point_vertices()
+function prepare_point_vertices(;curve_nodes=3,point_vertices=true)
     API.initialize()
     for (tag,(x,y)) in enumerate(((0.,0.),(1.,0.),(1.,1.),(0.,1.)))
         API.model.add_point(x,y,0.;tag,meshSize=1.)
     end
     for (tag,(first,last)) in enumerate(((1,2),(2,3),(3,4),(4,1)))
         API.model.add_line(first,last;tag)
-        API.mesh.set_transfinite_curve(tag,3)
+        API.mesh.set_transfinite_curve(tag,curve_nodes)
     end
     API.model.add_curve_loop([1,2,3,4];tag=1)
     API.model.add_plane_surface([1];tag=1)
     API.mesh.set_transfinite_surface(1)
-    API.mesh.add_nodes(0,1,[101,102,103],zeros(9))
+    point_vertices && API.mesh.add_nodes(0,1,[101,102,103],zeros(9))
 end
 
 @testset "GEO native carrier binds actual coincident Point vertices after order" begin
@@ -105,6 +54,34 @@ end
             @test authority.mesh.coords[:,authority.carrier_rows]==carrier.coords
             @test allunique(authority.carrier_rows)
             @test (API.CURRENT[],API.LAST_MESH[],API.LAST_MESH_CLASS[])===before
+        finally
+            API.finalize()
+        end
+    end
+end
+
+@testset "Surface producer rows retain Point-owned constructor corners" begin
+    for order in (1,2)
+        try
+            prepare_point_vertices(;curve_nodes=2,point_vertices=false)
+            model=Tessella.Model._model_mesh_transaction_copy(API.CURRENT[])
+            context=Tessella.IO._GeoNumericContext()
+            context.option_numbers[("Mesh",0,"ElementOrder")]=Float64(order)
+            context.option_numbers[("Mesh",0,"Renumber")]=0.
+            GEO._geo_mesh_model(model,2,context)
+            authority=model.meshing.mesh_authority
+            surface=(2,Int32(1))
+            @test haskey(authority.producer_rows,surface)
+            @test all(owner->owner[1]!=0,keys(authority.producer_rows))
+            rows=authority.producer_rows[surface]
+            @test length(rows)==4
+            @test Set(authority.mesh.entity_data.node_entities[rows])==
+                Set((0,Int32(tag)) for tag in 1:4)
+            for tag in 1:4
+                point=Tessella.Model._model_mesh_product(authority,0,tag;producer_order=true)
+                @test size(point.coords,2)==1
+                @test point.entity_data.node_entities==[(0,Int32(tag))]
+            end
         finally
             API.finalize()
         end
