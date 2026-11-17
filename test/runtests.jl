@@ -45,6 +45,7 @@ include("functional/fixtures.jl")
         "meshing/highorder_scaled_jacobian_range_test.jl",
         "geometry/geo_mesh_higher_default_test.jl",
         "interfaces/api_mesh_higher_point_vertices_test.jl",
+        "interfaces/api_surface_constructor_receipt_test.jl",
         "interfaces/api_plugin_distance_pde_test.jl",
         "interfaces/api_plugin_distance_thin3d_test.jl",
         "interfaces/api_plugin_model_smooth_test.jl",

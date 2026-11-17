@@ -798,13 +798,15 @@ end
     return (one=status<1,two=dimension==2 || status<2,three=dimension==3)
 end
 
-function _model_mesh_curve_births(authority,model,curve::Int,caller;used_only=false)
+function _model_mesh_curve_births(authority,model,curve::Int,caller;used_only=false,
+                                  producer_order=true)
     authority===nothing && return nothing
     # A re-generated Curve leaves its superseded owned vertices in the actual
     # mesh until `_dim01_finish!` drops them. The bound producer rows name the
     # emitted chain, so read the emitted product view — owned orphans must not
-    # join the open-chain check. An unbound product keeps its full row list.
-    mesh=_model_mesh_product(authority,1,curve;caller,producer_order=true)
+    # join the open-chain check. Sweep consumers request the full product and
+    # validate its unused owned rows separately.
+    mesh=_model_mesh_product(authority,1,curve;caller,producer_order)
     mesh===nothing && return nothing
     all(block->isempty(block.nodes),mesh.blocks) && return nothing
     all(block->block.msh==1,mesh.blocks) || throw(ArgumentError(
@@ -979,13 +981,22 @@ function _model_mesh_first_order_surface_constructor_inputs(previous,current,ele
         all(value->value isa UInt64,values(element_mapping)) &&
         allunique(values(element_mapping)) || throw(ArgumentError(
             "$caller: constructor transition has missing, foreign or duplicate cell events"))
+    positions=Dict(uid=>Int32(row) for (row,uid) in
+        enumerate(current.mesh.entity_data.external_node_tags))
     rebound=Dict{Tuple{Int,Int32},MixedMesh}()
     for (owner,constructor) in previous.surface_constructor_inputs
-        before=_model_mesh_product(previous,2,Int(owner[2]);caller)
-        after=_model_mesh_product(current,2,Int(owner[2]);caller)
-        before!==nothing && after!==nothing || throw(ArgumentError(
+        before=_model_mesh_product(previous,2,Int(owner[2]);caller,
+            producer_order=true,first_order=true)
+        before!==nothing || throw(ArgumentError(
             "$caller: constructor transition loses actual Surface $owner"))
         _model_surface_constructor_binding(before,constructor,caller)
+        rows=Int32[get(positions,uid,Int32(0)) for uid in
+            before.entity_data.external_node_tags]
+        bound=_model_mesh_with_producer_rows(current,Dict(owner=>rows);caller)
+        after=_model_mesh_product(bound,2,Int(owner[2]);caller,
+            producer_order=true,first_order=true)
+        after!==nothing || throw(ArgumentError(
+            "$caller: constructor transition loses actual Surface $owner"))
         copy_constructor=deepcopy(constructor)
         for labels in copy_constructor.entity_data.external_element_tags
             labels.=[element_mapping[uid] for uid in labels]

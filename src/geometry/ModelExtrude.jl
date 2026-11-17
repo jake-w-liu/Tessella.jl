@@ -203,7 +203,7 @@ function _extrude_curve_source(m,curve,input,caller;_mesh1d_options=nothing)
         _extrude_curve_nodes(m,curve,caller;_mesh1d_options=_mesh1d_options),
         UInt64[],NTuple{3,Float64}[],UInt64[])
     rows,mesh=if m.curves[curve][1]!=m.curves[curve][2]
-        source=_model_mesh_curve_births(input,m,curve,caller;used_only=true)
+        source=_model_mesh_curve_births(input,m,curve,caller;used_only=true,producer_order=false)
         source!==nothing || throw(ArgumentError("$caller: extrusion lacks actual Curve[$curve] cells"))
         source.rows,source.mesh
     else
