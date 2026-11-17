@@ -106,20 +106,6 @@ end
         end
         @test sum(states)==10_000Threads.nthreads()
 
-        # Check production closures, including the CLI callback.
-        for function_object in (libm._win_pow,libm._win_pow_native,libm._win_cli_precision,
-                                libm._win_powi,libm._win_powi_product,
-                                libm._win_x87_powlog,libm._with_win_cli_precision,
-                                Tessella.CLI.main,Tessella.CLI._main)
-            for method in methods(function_object)
-                code=Base.uncompressed_ast(method)
-                @test !any(code.code) do statement
-                    statement isa Expr && statement.head==:(=) || return false
-                    rhs=statement.args[2]
-                    return rhs isa Expr && rhs.head==:call && rhs.args[1]==GlobalRef(Core,:Box)
-                end
-            end
-        end
     else
         # Inline x87 is deliberately unavailable off Windows x86_64.
         @test !Tessella.GmshLibm._WIN_X87_NATIVE

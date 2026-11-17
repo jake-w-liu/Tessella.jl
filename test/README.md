@@ -58,8 +58,8 @@ Kernel allocation checks require normal compilation. Run them separately with:
 julia --project=. --startup-file=no --check-bounds=yes -O2 test/core/allocation_audit_test.jl
 ```
 
-CI runs elastic FEM kernel regressions with normal optimization on every tested
-platform and Julia version. The default suite retains the public Poisson-control
+CI runs elastic FEM and platform math regressions with normal optimization on
+every tested platform and Julia version. The default suite retains the public Poisson-control
 and boundary-preservation checks. Run the numerical kernel cases separately with:
 
 ```sh
