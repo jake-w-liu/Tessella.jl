@@ -540,7 +540,7 @@ function _replace_mesh_cache_locked!(mesh::Union{Nothing,Mesh,MixedMesh},
             !isempty(class.public_tags.authority)
         m=CURRENT[]
         if m!==nothing
-            uncovered=_cache_uncovered_records(m,_mesh_public_tags(LAST_MESH[]))
+            uncovered=_cache_uncovered_records(m,_mesh_public_tags(LAST_MESH[]),class.public_tags)
             identity=Dict(tag=>tag for tag in class.public_tags.node_tags)
             _dim01_reconcile_records!(m,collect(class.public_tags.authority),mesh,identity;
                 runtime_parameters=class.node_parametric)
@@ -4082,14 +4082,19 @@ end
 # A record on an authority-covered entity holds both cache-mirrored entries
 # (rebuilt from generated cells) and caller-owned entries. Reads must see only
 # the caller-owned ones: any tag published by the cache is answered there.
-function _record_uncovered_view(public::_CachePublicTags,record::DiscreteEntity)
+function _record_uncovered_view(public::_CachePublicTags,record::DiscreteEntity,
+                                also::Union{Nothing,_CachePublicTags}=nothing)
     node_positions=Int[]
     for (index,tag) in enumerate(record.node_tags)
-        haskey(public.node_indices,UInt64(tag)) || push!(node_positions,index)
+        haskey(public.node_indices,UInt64(tag)) && continue
+        also!==nothing && haskey(also.node_indices,UInt64(tag)) && continue
+        push!(node_positions,index)
     end
     element_positions=Int[]
     for (index,tag) in enumerate(record.element_tags)
-        haskey(public.element_indices,UInt64(tag)) || push!(element_positions,index)
+        haskey(public.element_indices,UInt64(tag)) && continue
+        also!==nothing && haskey(also.element_indices,UInt64(tag)) && continue
+        push!(element_positions,index)
     end
     (isempty(node_positions) && isempty(element_positions)) && return nothing
     kept=Set{UInt64}(record.node_tags[node_positions])
@@ -4106,12 +4111,16 @@ function _record_uncovered_view(public::_CachePublicTags,record::DiscreteEntity)
     return filtered
 end
 
-function _cache_uncovered_records(model,public)
+# `upcoming` are the labels of the cache about to be published. The restore
+# below drops every saved entry those labels cover, so such entries (after a
+# higher-dimensional pass: the whole new mesh) are not saved in the first
+# place.
+function _cache_uncovered_records(model,public,upcoming=nothing)
     records=Dict{Tuple{Int,Int},DiscreteEntity}()
     public===nothing && return records
     for (owner,record) in Model._discrete_mesh_records_model(model)
         _cache_covers_record(public,owner...) || continue
-        uncovered=_record_uncovered_view(public,record)
+        uncovered=_record_uncovered_view(public,record,upcoming)
         uncovered===nothing || (records[owner]=deepcopy(uncovered))
     end
     return records
