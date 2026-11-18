@@ -981,7 +981,13 @@ function _model_occ_face_measure(kernel,id)
         (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,
          sqrt(rec.height*rec.height+(rec.r1-rec.r2)*(rec.r1-rec.r2)))
     elseif occ===:torus
-        (0.0,rec.angle,0.0,_OCC_TWO_PI)
+        # a Boolean can leave a genuine sector narrower than the carrier's
+        # own sweep (a torus halved by a plane through its axis): the
+        # closed form runs over the wire's window, not `rec.angle`
+        win=haskey(rec,:pcurves) ?
+            _occ_torus_sector_window(kernel,id,rec) : nothing
+        win===nothing ? (0.0,rec.angle,0.0,_OCC_TWO_PI) :
+            (win[1],win[2],0.0,_OCC_TWO_PI)
     else
         throw(ErrorException(
             "OCC.get_mass: unsupported OCC surface kind $occ"))
@@ -1312,6 +1318,17 @@ function _occ_torus_sector_window(kernel,fid,rec)
         end
     end
     return (umin,umax)
+end
+
+# The carrier record re-framed onto a sector window: X at azimuth `umin`,
+# sweep `umax-umin` — the form the canonical-sector helpers expect.
+function _occ_torus_window_record(rec,win)
+    u0,u1=win
+    (u0==0.0 && u1==rec.angle) && return rec
+    s,c=_gm_sincos(u0)
+    Y=_occ_frame_y(rec)
+    return merge(rec,(X=ntuple(i->c*rec.X[i]+s*Y[i],3),
+                      Y=ntuple(i->c*Y[i]-s*rec.X[i],3),angle=u1-u0))
 end
 
 # Divergence moments belong in a nearby coordinate frame. Integrating
@@ -1814,7 +1831,13 @@ function _model_occ_face_moment2(kernel,id)
         (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,
          sqrt(rec.height*rec.height+(rec.r1-rec.r2)*(rec.r1-rec.r2)))
     elseif occ===:torus
-        (0.0,rec.angle,0.0,_OCC_TWO_PI)
+        # a Boolean can leave a genuine sector narrower than the carrier's
+        # own sweep (a torus halved by a plane through its axis): the
+        # closed form runs over the wire's window, not `rec.angle`
+        win=haskey(rec,:pcurves) ?
+            _occ_torus_sector_window(kernel,id,rec) : nothing
+        win===nothing ? (0.0,rec.angle,0.0,_OCC_TWO_PI) :
+            (win[1],win[2],0.0,_OCC_TWO_PI)
     else
         throw(ErrorException("OCC.get_matrix_of_inertia: unsupported " *
             "OCC surface kind $occ"))

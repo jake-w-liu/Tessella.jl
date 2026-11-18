@@ -170,7 +170,12 @@ function _model_occ_shape_bbox(kernel,id)
             rec.center[3]-rec.radius,
             rec.center[1]+rec.radius,rec.center[2]+rec.radius,
             rec.center[3]+rec.radius)
-        rec.occ===:torus && return _occ_torus_bounding_box(rec)
+        if rec.occ===:torus
+            win=haskey(rec,:pcurves) ?
+                _occ_torus_sector_window(kernel,id,rec) : nothing
+            return _occ_torus_bounding_box(win===nothing ? rec :
+                _occ_torus_window_record(rec,win))
+        end
         haskey(rec,:patch) &&
             return _model_occ_controls_box(rec.patch.surface.controls)
         # Plane faces and ruled rim faces (cylinder, cone) reach every

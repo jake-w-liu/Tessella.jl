@@ -200,11 +200,12 @@ function _model_volume_bounds(
                 id=get(m.occ_kernel.bindings,(2,surface),nothing)
                 id===nothing && continue
                 rec=m.occ_kernel.shapes[id].geometry.geometry
-                (get(rec,:occ,nothing)===:torus && haskey(rec,:pcurves) &&
-                 _occ_torus_sector_window(m.occ_kernel,id,rec)!==nothing) ||
+                (get(rec,:occ,nothing)===:torus && haskey(rec,:pcurves)) ||
                     continue
-                bounds=_model_bounds_union(bounds,
-                    _model_entity_bounding_box(m,2,surface,caller))
+                win=_occ_torus_sector_window(m.occ_kernel,id,rec)
+                win===nothing && continue
+                bounds=_model_bounds_union(bounds,_occ_torus_bounding_box(
+                    _occ_torus_window_record(rec,win)))
             end
         end
     end

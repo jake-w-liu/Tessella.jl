@@ -114,6 +114,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_rotated_sphere_test.jl",
         "interfaces/api_occ_boolean_bbox_test.jl",
         "interfaces/api_occ_boolean_torus_cavity_test.jl",
+        "interfaces/api_occ_boolean_torus_sector_test.jl",
         "interfaces/api_onelab_run_test.jl",
         "interfaces/api_onelab_typed_test.jl",
         "interfaces/api_onelab_metadata_test.jl",
