@@ -95,16 +95,29 @@ function _model_transfinite_surface_production(m,t,kernel,mesh,input,high_water,
     length(birth_rows)==nnodes(mesh) && allunique(birth_rows) &&
         all(row->1<=row<=nnodes(mesh),birth_rows) || throw(ArgumentError(
             "$caller: transfinite node birth rows do not cover its actual grid"))
+    fresh=Int[]
     for row in birth_rows
         retained[row] && continue
         limit<typemax(UInt64) || throw(ArgumentError(
             "$caller: transfinite node allocation exhausts UInt64 public labels"))
         limit+=1;tags[row]=limit
-        parameters[row]=producer_parameters===nothing ?
-            model_parametrization(m,2,t,mesh.coords[:,row]) :
-            copy(get(producer_parameters,row) do
+        if producer_parameters===nothing
+            push!(fresh,row)
+        else
+            parameters[row]=copy(get(producer_parameters,row) do
                 throw(ArgumentError("$caller: emitted Surface node lacks its actual UV binding"))
             end)
+        end
+    end
+    # One batched parametrization: its per-call setup (surface frame, model
+    # bounding box) is independent of the queried points.
+    if !isempty(fresh)
+        uv=model_parametrization(m,2,t,vec(mesh.coords[:,fresh]))
+        length(uv)==2*length(fresh) || throw(ArgumentError(
+            "$caller: transfinite Surface parametrization lost a node"))
+        for (k,row) in enumerate(fresh)
+            parameters[row]=uv[2k-1:2k]
+        end
     end
     allunique(tags) || throw(ArgumentError(
         "$caller: transfinite emitted rows repeat an actual node identity"))
