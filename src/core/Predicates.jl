@@ -590,50 +590,105 @@ end
 # ════════════════════════════════════════════════════════════════════════════════
 
 # rank[k] = ascending-index rank (1-based) of the k-th argument point.
-@inline _sos_ranks(idx::NTuple{N,Int}) where {N} = invperm(sortperm(collect(idx)))
+@inline _sos_ranks(idx::NTuple{N,Int}) where {N} =
+    ntuple(i -> 1 + count(j -> idx[j] < idx[i], 1:N), N)   # indices are distinct
 
 # Exact +ε SoS sign of the orientation of M=(d+1) points in d-space. `coords[k]` is a
 # length-d tuple of exact values (Float64 for real coords, Rational{BigInt} for a
 # paraboloid-lift coordinate). Correct for every degenerate configuration.
-function _orient_nd_sos_exact(coords, idx::NTuple{M,Int}, d::Int)::Int where {M}
-    rk = _sos_ranks(idx)
-    M == d + 1 || throw(ArgumentError("SoS orientation requires d+1 points"))
+#
+# Each perturbation exponent is a distinct power of two.  Consequently every subset
+# of perturbed matrix entries has a unique epsilon exponent: coefficients from
+# different subsets can never cancel.  Expand by generalized cofactors over the
+# at-most 501 partial row/coordinate-column matchings of a 5x5 determinant, ordered
+# by exponent, and stop at the first nonzero exact minor.  The ordered cofactor
+# table depends only on (M, d) and the index ranks, so it is built once per rank
+# permutation and cached.  A minor that keeps only Float64 coordinate columns
+# (`nf` leading columns of every point are Float64) is the homogeneous orientation
+# of a coordinate projection — a coordinate comparison, `orient2` or `orient3` —
+# and is decided by those exact adaptive predicates without allocation; any other
+# minor (one that keeps a paraboloid-lift column, or rational coordinates) is
+# evaluated by the exact fraction-free BigInt determinant.
+struct _SoSTerm
+    rows::Vector{Int8}   # remaining rows (argument positions), increasing
+    cols::Vector{Int8}   # remaining coordinate columns, increasing (ones column implicit)
+    flip::Bool           # generalized-cofactor sign
+end
 
-    # Each perturbation exponent is a distinct power of two.  Consequently every
-    # subset of perturbed matrix entries has a unique epsilon exponent: coefficients
-    # from different subsets can never cancel.  Expand by generalized cofactors over
-    # the at-most 501 partial row/coordinate-column matchings of a 5x5 determinant,
-    # ordered by exponent, and stop at the first nonzero exact minor.  This computes
-    # the identical leading term as the sparse-polynomial Leibniz expansion above,
-    # without constructing its large Rational{BigInt} polynomial intermediates.
-    base=Matrix{_RAT}(undef,M,M)
-    @inbounds for r in 1:M
-        for c in 1:d;base[r,c]=_RAT(coords[r][c]);end
-        base[r,M]=one(_RAT)
-    end
-    choices=Tuple{BigInt,Vector{Int},Vector{Int}}[]
-    rows=Int[];cols=Int[]
-    function visit(nextrow::Int,used::UInt,exponent::BigInt)
-        push!(choices,(exponent,copy(rows),copy(cols)))
-        @inbounds for r in nextrow:M,c in 1:d
-            bit=UInt(1)<<(c-1)
-            used&bit==0 || continue
-            push!(rows,r);push!(cols,c)
-            visit(r+1,used|bit,exponent+(big(1)<<(rk[r]*d-c)))
-            pop!(rows);pop!(cols)
+const _SOS_TERMS = Dict{Tuple{Int,Int,NTuple{5,Int8}},Vector{_SoSTerm}}()
+const _SOS_TERMS_LOCK = ReentrantLock()
+
+function _build_sos_terms(M::Int, d::Int, rk)
+    choices = Tuple{Int,Vector{Int},Vector{Int}}[]
+    rows = Int[]; cols = Int[]
+    function visit(nextrow::Int, used::UInt, exponent::Int)
+        push!(choices, (exponent, copy(rows), copy(cols)))
+        @inbounds for r in nextrow:M, c in 1:d
+            bit = UInt(1) << (c - 1)
+            used & bit == 0 || continue
+            push!(rows, r); push!(cols, c)
+            visit(r + 1, used | bit, exponent + (1 << (rk[r] * d - c)))
+            pop!(rows); pop!(cols)
         end
     end
-    visit(1,zero(UInt),big(0));sort!(choices;by=first)
-    allrows=collect(1:M);allcols=collect(1:M)
-    for (_,rs,cs) in choices
-        rset=Set(rs);cset=Set(cs)
-        rr=Int[r for r in allrows if !(r in rset)]
-        cc=Int[c for c in allcols if !(c in cset)]
-        s=_rat_det_sign(base[rr,cc]);s==0&&continue
-        inversions=0
-        @inbounds for i in 1:length(cs),j in i+1:length(cs);cs[i]>cs[j]&&(inversions+=1);end
-        isodd(sum(rs)+sum(cs)+inversions) && (s=-s)
-        return s
+    visit(1, zero(UInt), 0); sort!(choices; by=first)
+    terms = Vector{_SoSTerm}(undef, length(choices))
+    for (k, (_, rs, cs)) in enumerate(choices)
+        inversions = 0
+        @inbounds for i in 1:length(cs), j in i+1:length(cs); cs[i] > cs[j] && (inversions += 1); end
+        terms[k] = _SoSTerm(Int8[r for r in 1:M if !(r in rs)], Int8[c for c in 1:d if !(c in cs)],
+                            isodd(sum(rs) + sum(cs) + inversions))
+    end
+    return terms
+end
+
+function _sos_terms(M::Int, d::Int, rk)
+    key = (M, d, ntuple(i -> i <= M ? Int8(rk[i]) : Int8(0), 5))
+    lock(_SOS_TERMS_LOCK) do
+        get!(() -> _build_sos_terms(M, d, rk), _SOS_TERMS, key)
+    end
+end
+
+# Exact sign of det[coords[r][cols] 1] over r in rows (homogeneous orientation).
+function _sos_minor_sign(coords, rows::Vector{Int8}, cols::Vector{Int8}, nf::Int)::Int
+    k = length(rows)
+    k == 1 && return 1
+    @inbounds if cols[end] <= nf
+        r1 = rows[1]; r2 = rows[2]
+        if k == 2
+            a = Float64(coords[r1][cols[1]]); b = Float64(coords[r2][cols[1]])
+            return a > b ? 1 : (a < b ? -1 : 0)
+        elseif k == 3
+            c1 = cols[1]; c2 = cols[2]; r3 = rows[3]
+            return orient2((Float64(coords[r1][c1]), Float64(coords[r1][c2])),
+                           (Float64(coords[r2][c1]), Float64(coords[r2][c2])),
+                           (Float64(coords[r3][c1]), Float64(coords[r3][c2])))
+        elseif k == 4
+            p(r) = (Float64(coords[r][cols[1]]), Float64(coords[r][cols[2]]),
+                    Float64(coords[r][cols[3]]))
+            return orient3(p(r1), p(r2), p(rows[3]), p(rows[4]))
+        end
+    end
+    A = Matrix{_RAT}(undef, k, k)
+    @inbounds for (i, r) in enumerate(rows)
+        for (j, c) in enumerate(cols); A[i, j] = _RAT(coords[r][c]); end
+        A[i, k] = one(_RAT)
+    end
+    return _rat_det_sign(A)
+end
+
+# `known_zero=true` skips the unperturbed determinant (term 1) when the caller has
+# already established that it vanishes exactly.
+function _orient_nd_sos_exact(coords, idx::NTuple{M,Int}, d::Int; nf::Int=0,
+                              known_zero::Bool=false)::Int where {M}
+    rk = _sos_ranks(idx)
+    M == d + 1 || throw(ArgumentError("SoS orientation requires d+1 points"))
+    terms = _sos_terms(M, d, rk)
+    for k in (known_zero ? 2 : 1):length(terms)
+        term = @inbounds terms[k]
+        s = _sos_minor_sign(coords, term.rows, term.cols, nf)
+        s == 0 && continue
+        return term.flip ? -s : s
     end
     error("SoS determinant remained identically zero")
 end
@@ -647,7 +702,7 @@ resolves ties by the same canonical evaluator as the higher-dimension predicates
 """
 function _orient2_sos_exact(pa, pb, pc, ia::Integer, ib::Integer, ic::Integer)::Int
     coords = ((_x(pa),_y(pa)), (_x(pb),_y(pb)), (_x(pc),_y(pc)))
-    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic)), 2)
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic)), 2; nf=2, known_zero=true)
 end
 
 """
@@ -660,18 +715,19 @@ function _orient3_sos_exact(pa, pb, pc, pd,
                             ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
     coords = ((_x(pa),_y(pa),_z(pa)), (_x(pb),_y(pb),_z(pb)),
               (_x(pc),_y(pc),_z(pc)), (_x(pd),_y(pd),_z(pd)))
-    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id)), 3)
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id)), 3; nf=3, known_zero=true)
 end
 
 # incircle SoS = orientation SoS of the points lifted to the paraboloid (x,y,x²+y²),
 # with the lift an INDEPENDENT coordinate perturbed by the EM scheme (the algorithm-
 # consistent formulation — verified against a canonical lifted-orientation oracle over
 # every degenerate labeling). Reached only for the fully-degenerate (collinear) tie.
-@inline _incircle_lift(p) = (xr = Rational{BigInt}(_x(p)); yr = Rational{BigInt}(_y(p)); (xr, yr, xr*xr + yr*yr))
+@inline _incircle_lift(p) = (x = _x(p); y = _y(p); xr = Rational{BigInt}(x); yr = Rational{BigInt}(y);
+                             (x, y, xr*xr + yr*yr))
 function _incircle_sos_exact(pa, pb, pc, pd,
                              ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
     coords = (_incircle_lift(pa), _incircle_lift(pb), _incircle_lift(pc), _incircle_lift(pd))
-    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id)), 3)
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id)), 3; nf=2, known_zero=true)
 end
 
 """
@@ -705,20 +761,21 @@ function incircle3_sos(pa,pb,pc,pd,
     det=al*(bx*cy-cx*by)+bl*(cx*ay-ax*cy)+cl*(ax*by-bx*ay)
     det>0&&return 1;det<0&&return -1
     lifted=ntuple(4) do k
-        q=(a,b,c,d)[k];(R(q[axes[1]]),R(q[axes[2]]),sum(R(q[j])^2 for j in 1:3))
+        q=(a,b,c,d)[k];(q[axes[1]],q[axes[2]],sum(R(q[j])^2 for j in 1:3))
     end
-    return _orient_nd_sos_exact(lifted,idx,3)
+    return _orient_nd_sos_exact(lifted,idx,3;nf=2,known_zero=true)
 end
 
 # insphere SoS = orientation SoS of the points lifted to (x,y,z,x²+y²+z²) in 4-D — the
 # same paraboloid-lift construction as incircle, one dimension up. Correct-by-construction
 # +ε for EVERY degenerate configuration (cospherical or coplanar).
-@inline _insphere_lift(p) = (xr = Rational{BigInt}(_x(p)); yr = Rational{BigInt}(_y(p)); zr = Rational{BigInt}(_z(p));
-                             (xr, yr, zr, xr*xr + yr*yr + zr*zr))
+@inline _insphere_lift(p) = (x = _x(p); y = _y(p); z = _z(p);
+                             xr = Rational{BigInt}(x); yr = Rational{BigInt}(y); zr = Rational{BigInt}(z);
+                             (x, y, z, xr*xr + yr*yr + zr*zr))
 function _insphere_sos_exact(pa, pb, pc, pd, pe,
                              ia::Integer, ib::Integer, ic::Integer, id::Integer, ie::Integer)::Int
     coords = (_insphere_lift(pa), _insphere_lift(pb), _insphere_lift(pc), _insphere_lift(pd), _insphere_lift(pe))
-    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id),Int(ie)), 4)
+    return _orient_nd_sos_exact(coords, (Int(ia),Int(ib),Int(ic),Int(id),Int(ie)), 4; nf=3, known_zero=true)
 end
 
 # ════════════════════════════════════════════════════════════════════════════════
