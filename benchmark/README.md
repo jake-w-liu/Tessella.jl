@@ -155,3 +155,86 @@ run of each case. Julia loaded a compatible cache with optimization level 2,
 bounds checks, and one thread. The cache build was timed separately using
 `Base.compilecache`. Re-run on an idle host for the source and Julia version
 being used.
+
+## Solid meshing
+
+This benchmark meshes CAD solids end to end through the session API of both
+programs: `generate(2)` for curves and surfaces, then `generate(3)` for the
+tetrahedra, with one uniform mesh size and default options. It measures the
+whole pipeline a user runs, including entity bookkeeping, not the kernels alone.
+
+On the measured Windows host (Intel Core Ultra 7 265K, Julia 1.13.1, Gmsh
+4.15.2, one thread each), Tessella's volume pass took between 0.92 and 1.30
+times Gmsh's on the six meshes above 100,000 tetrahedra, and between 1.0 and
+1.1 times on the largest mesh of each curved solid. It took 1.3 to 1.7 times
+as long between 20,000 and 100,000 tetrahedra and 1.15 to 2.2 times below
+20,000. The surfaces of the sphere, cylinder and torus meshed in 0.5 to 1.0
+times Gmsh's time; the planar faces of the box took 1.4 to 2.1 times as long
+and the drilled block 1.1 to 2.0 times. Tessella is faster than Gmsh in one
+volume case, the 562,000-tetrahedron box.
+
+| Solid | Size | Tetrahedra (T / G) | Min. gamma (T / G) | Surface s (T / G) | Volume s (T / G) | Volume T/G |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| box | 0.1 | 4,966 / 4,979 | 0.30 / 0.30 | 0.024 / 0.014 | 0.064 / 0.029 | 2.20 |
+| box | 0.05 | 37,357 / 37,262 | 0.30 / 0.30 | 0.097 / 0.054 | 0.356 / 0.214 | 1.67 |
+| box | 0.03 | 178,145 / 178,869 | 0.28 / 0.28 | 0.328 / 0.153 | 1.944 / 1.494 | 1.30 |
+| box | 0.02 | 562,185 / 560,591 | 0.20 / 0.26 | 0.637 / 0.465 | 6.658 / 7.245 | 0.92 |
+| sphere | 0.2 | 2,736 / 2,583 | 0.30 / 0.27 | 0.009 / 0.019 | 0.031 / 0.021 | 1.52 |
+| sphere | 0.1 | 20,225 / 20,564 | 0.26 / 0.29 | 0.041 / 0.072 | 0.186 / 0.146 | 1.28 |
+| sphere | 0.06 | 90,510 / 91,035 | 0.30 / 0.30 | 0.113 / 0.195 | 1.220 / 0.707 | 1.73 |
+| sphere | 0.04 | 297,451 / 294,952 | 0.27 / 0.19 | 0.269 / 0.434 | 3.322 / 3.192 | 1.04 |
+| cylinder | 0.1 | 8,136 / 7,933 | 0.30 / 0.30 | 0.020 / 0.035 | 0.075 / 0.066 | 1.15 |
+| cylinder | 0.05 | 60,828 / 59,581 | 0.30 / 0.21 | 0.104 / 0.135 | 0.723 / 0.504 | 1.43 |
+| cylinder | 0.03 | 265,991 / 265,942 | 0.29 / 0.28 | 0.341 / 0.357 | 3.262 / 3.226 | 1.01 |
+| torus | 0.15 | 14,484 / 14,468 | 0.30 / 0.26 | 0.043 / 0.070 | 0.204 / 0.158 | 1.29 |
+| torus | 0.1 | 46,956 / 47,127 | 0.22 / 0.15 | 0.143 / 0.157 | 0.738 / 0.574 | 1.28 |
+| torus | 0.07 | 133,270 / 133,188 | 0.21 / 0.12 | 0.312 / 0.316 | 1.921 / 1.781 | 1.08 |
+| drilled block | 0.15 | 10,275 / 10,345 | 0.30 / 0.30 | 0.043 / 0.039 | 0.122 / 0.081 | 1.51 |
+| drilled block | 0.08 | 59,725 / 59,861 | 0.29 / 0.30 | 0.282 / 0.139 | 0.662 / 0.485 | 1.37 |
+| drilled block | 0.05 | 236,509 / 236,283 | 0.26 / 0.24 | 0.421 / 0.366 | 2.727 / 2.668 | 1.02 |
+
+`T` is Tessella and `G` is Gmsh. Times are seconds; each driver meshes a case
+twice in one process and reports the second run, which excludes compilation,
+and the table gives the faster of two such driver runs. The
+[retained results](results/) hold both runs of each program. Minimum gamma is
+Gmsh's `gamma` quality of the worst tetrahedron. The two programs do not produce
+the same meshes: tetrahedron counts differ by under 3%, 6% on the coarsest
+sphere, and the errors of the enclosed volumes against the exact solids agree
+to within 1%.
+
+The drilled block is a 2×2×2 box with a cylinder of radius 0.5 cut through it.
+
+### Models with many faces
+
+The cost that the table above does not show grows with the number of CAD
+faces. Tessella rebuilds its mesh bookkeeping after every face it meshes, so
+the surface pass grows with the square of the face count. For an n×n grid of
+unit plane faces at size 0.2, where both programs produce identical node and
+triangle counts:
+
+| Faces | Triangles | Curves s (T / G) | Surfaces s (T / G) |
+| ---: | ---: | ---: | ---: |
+| 25 | 1,670 | 0.013 / 0.001 | 0.091 / 0.014 |
+| 100 | 6,658 | 0.048 / 0.005 | 0.659 / 0.052 |
+| 400 | 26,544 | 0.206 / 0.018 | 9.760 / 0.206 |
+
+The triangulation itself takes about a quarter of a second of the 400-face
+run; the rest is the per-face rebuild. Until that is made incremental, expect
+models with hundreds of faces to mesh far more slowly than in Gmsh.
+
+### Running it
+
+Install the Gmsh Python package (`pip install gmsh`); it is not a Tessella
+dependency. From the repository root:
+
+```sh
+julia --project=. --startup-file=no -O2 --threads=1 benchmark/solid_meshing.jl tessella.toml
+python benchmark/solid_meshing_gmsh.py gmsh.toml
+julia --project=. --startup-file=no -O2 --threads=1 benchmark/solid_meshing.jl --faces tessella_faces.toml
+python benchmark/solid_meshing_gmsh.py --faces gmsh_faces.toml
+```
+
+Run the programs one after the other on an idle host. Each TOML lists, per
+case, the node, triangle and tetrahedron counts, the enclosed volume, the
+minimum and mean gamma, and the two times. Omit the file name to print to
+standard output.
