@@ -835,6 +835,48 @@ end
 
 # ---- faces -----------------------------------------------------------
 
+# Does a quadric face's wire bound exactly the rectangular chart window
+# [u0,u1]×[v0,v1]? Primitive faces do (four iso-line uses running corner to
+# corner); a Boolean kept piece shares the carrier's record over a sub-domain
+# wire — a sphere octant, a cylinder wall clipped between two planes — and
+# must integrate over its pcurves instead of the carrier's whole chart.
+# Records without a complete pcurve table keep the canonical reading.
+function _occ_quadric_window_wire(kernel,shape,rec,u0,u1,v0,v1)
+    haskey(rec,:pcurves) || return true
+    for wire_id in shape.children, (eid,_) in kernel.shapes[wire_id].geometry.uses
+        haskey(rec.pcurves,kernel.shape_tags[eid][2]) || return true
+    end
+    length(shape.children)==1 || return false
+    uses=kernel.shapes[shape.children[1]].geometry.uses
+    length(uses)==4 || return false
+    tol=1e-9*max(1.0,abs(u1-u0),abs(v1-v0))
+    corner(uv)=(abs(uv[1]-u0)<=tol || abs(uv[1]-u1)<=tol) &&
+               (abs(uv[2]-v0)<=tol || abs(uv[2]-v1)<=tol)
+    for (eid,rev) in uses
+        ent=rec.pcurves[kernel.shape_tags[eid][2]]
+        pc=(rev && ent.rev!==nothing) ? ent.rev : ent.fwd
+        (pc!==nothing && hasproperty(pc,:lin2d)) || return false
+        eg=kernel.shapes[eid].geometry.geometry
+        (haskey(eg,:t0) && haskey(eg,:t1)) || return false
+        a=_occ_pcurve_d0(pc,eg.t0); b=_occ_pcurve_d0(pc,eg.t1)
+        (corner(a) && corner(b)) || return false
+        (abs(a[1]-b[1])<=tol || abs(a[2]-b[2])<=tol) || return false
+    end
+    return true
+end
+
+# Canonical chart window of a quadric record — partial sweeps carry `angle`
+# (azimuth span) and `lat1`/`lat2` (sphere latitude range).
+function _occ_quadric_window(rec)
+    occ=rec.occ
+    occ===:cylinder && return (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,rec.height)
+    occ===:sphere && return (0.0,get(rec,:angle,_OCC_TWO_PI),
+                             get(rec,:lat1,-π/2),get(rec,:lat2,π/2))
+    occ===:cone && return (0.0,get(rec,:angle,_OCC_TWO_PI),0.0,
+        sqrt(rec.height*rec.height+(rec.r1-rec.r2)*(rec.r1-rec.r2)))
+    return nothing
+end
+
 function _model_occ_face_measure(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
     if hasproperty(rec,:natural_bounds)
@@ -873,6 +915,13 @@ function _model_occ_face_measure(kernel,id)
     if occ===:torus && haskey(rec,:pcurves) &&
             _occ_torus_sector_window(kernel,id,rec)===nothing
         return _model_occ_trimmed_face_measure(kernel,id)
+    end
+    # The same holds for cylinder/sphere/cone pieces: only a wire tracing
+    # the record's own chart window may use the closed forms.
+    if occ===:cylinder || occ===:sphere || occ===:cone
+        _occ_quadric_window_wire(kernel,shape,rec,
+                                 _occ_quadric_window(rec)...) ||
+            return _model_occ_trimmed_face_measure(kernel,id)
     end
     # Quadric patches over their canonical domains — the closed-form
     # ∫P·dA integrals (u-mean cos/sin cover the partial torus sweep).
@@ -1692,7 +1741,10 @@ function _model_occ_face_moment2(kernel,id)
     # exact arm.
     if (get(rec,:trimmed,false) && haskey(rec,:pcurves)) ||
          (occ===:torus && haskey(rec,:pcurves) &&
-          _occ_torus_sector_window(kernel,id,rec)===nothing)
+          _occ_torus_sector_window(kernel,id,rec)===nothing) ||
+         ((occ===:cylinder || occ===:sphere || occ===:cone) &&
+          !_occ_quadric_window_wire(kernel,shape,rec,
+                                    _occ_quadric_window(rec)...))
         return _model_occ_trimmed_face_moment2(kernel,id;centroid)
     end
     if haskey(rec,:patch)
