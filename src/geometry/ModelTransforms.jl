@@ -1482,7 +1482,7 @@ end
 # physical, and non-point discrete tag.
 function _geo_newreg_tag(m::GeoModel)
     mx=max(m.next_tag[2],m.next_tag[3],m.next_tag[4],m.physical_tag_max)
-    for t in keys(m.loops); mx=max(mx,t); end
+    for t in keys(m.loops); t in m.derived_loops || (mx=max(mx,t)); end
     for (d,t) in keys(m.discrete); d>0 && (mx=max(mx,t)); end
     for t in keys(m.surface_loops); mx=max(mx,t); end
     return mx+1
@@ -1684,6 +1684,7 @@ function _duplicate_surface!(m::GeoModel, src::Int, caller, memo=nothing)
            ((isempty(m.loops) ? 0 : maximum(keys(m.loops)))+1)
         m.loops[lt]=occ ? curves :
             _geo_surface_loop_stored(curves,i,sign(l))
+        push!(m.derived_loops,lt)
         push!(loops,lt)
     end
     m.surfaces[t]=loops
@@ -2072,6 +2073,7 @@ function _extrude_lateral_surface!(m::GeoModel, src::Int, chapeau::Int,
     end
     lt=_geo_derived_loop_tag(m,surf)
     m.loops[lt]=generatrices
+    push!(m.derived_loops,lt)
     m.surfaces[surf]=Int[lt]
     # `ExtrudeCurve`: a collapsed side gives a three-edge `MSH_SURF_TRIC`
     # patch, otherwise the four-generatrix `MSH_SURF_REGL` ruled surface.
@@ -2141,6 +2143,7 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
         # pass reconstructs this canonical order back out of `m.loops[lt]`.
         m.loops[lt]=_geo_surface_loop_stored(copies,i,
                                              sign(m.surfaces[tag][i]))
+        push!(m.derived_loops,lt)
         push!(loop_tags,lt)
     end
     m.surfaces[top]=loop_tags

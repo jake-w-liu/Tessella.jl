@@ -93,7 +93,8 @@ using ..IO: _geo_apply_list_assignment!, _geo_list_term_values
 using ..IO: _geo_brace_terminated_statement, _geo_extrude_shape_group,
             _geo_extrude_pipe_candidate, _geo_extrude_pending_params
 using ..IO: _GeoTagAllocatorState, _geo_context_refresh_allocators!
-using ..IO: _geo_allocator_observe_statement!,_geo_allocator_resync_model!
+using ..IO: _geo_allocator_observe_statement!,_geo_allocator_resync_model!,
+            _geo_allocator_resync_builtin_model!
 using ..IO: _geo_allocator_delete_entities!, _geo_allocator_reset_model!
 using ..IO: _GEO_SHAPE_DEFINITION_DIMS, _geo_statement_marks_internals
 using ..IO: _geo_allocator_set_factory!
@@ -1526,6 +1527,12 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             # live. The unanchored match also covers `s() = Split Curve…`.
             occursin(r"\bSplit\s+Curve\b",line) &&
                 _geo_allocator_resync_model!(allocator_state,m)
+            # Built-in `Extrude`/`Duplicata`/transforms/`Coherence` allocate
+            # through the model counters the observer cannot replay (it
+            # invalidates on them) — resync so `newp`-family reads stay live.
+            !syntax_aborted && allocator_state.geometry_unavailable!==nothing &&
+                occursin(r"\b(?:Extrude|Duplicata|Coherence|Translate|Rotate|Dilate|Symmetry|Affine)\b",line) &&
+                _geo_allocator_resync_builtin_model!(allocator_state,m)
             # `error tEND` recovery: a `;`-terminated statement's own
             # terminator ends the discard; a `}`-terminated one (Delete,
             # Boolean*, Extrude, transforms) has none, so recovery eats
@@ -4743,6 +4750,7 @@ function _geo_bl_curve_lateral!(m::GeoModel,c::Int,params,closed,
     generatrices=Int[c,cend,-chapeau,-cbeg]
     lt=_geo_derived_loop_tag(m,surf)
     m.loops[lt]=generatrices
+    push!(m.derived_loops,lt)
     m.surfaces[surf]=Int[lt]
     m.surface_types[surf]=:ruled
     m.meshing.extrude[(2,surf)]=params
@@ -4914,6 +4922,7 @@ function _geo_bl_surface_extrude!(m::GeoModel,is::Int,params,blmeta,
         # reconstructs this canonical order from `m.loops[lt]`.
         m.loops[lt]=_geo_surface_loop_stored(copies,i,
                                              sign(m.surfaces[tag][i]))
+        push!(m.derived_loops,lt)
         push!(loop_tags,lt)
     end
     m.surfaces[top]=loop_tags
@@ -8246,11 +8255,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         curves=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller curves";
             signed=true,allow_empty=true)
+        Base.inferencebarrier(Model._yield_derived_loop!)(m,trunc(Int,tag))
         _geo_dup_entity!(context,haskey(m.loops,trunc(Int,tag)),
                          :curve_loop,"curve loop",tag,zero_literal,
                          allocator_state) && return
         t=Base.inferencebarrier(_alloc_curve_loop_tag)(m,Base.inferencebarrier(_tag)(tag,caller,1),caller;
                                 literal_zero=zero_literal)
+        delete!(m.derived_loops,t)
         if all(id->haskey(m.curves,abs(id)),curves)
             # `SortEdgesInLoop` stores the chained prefix even on a dead-end.
             (ordered,ok)=Base.inferencebarrier(_geo_sort_loop_partial)(m,curves)

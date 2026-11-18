@@ -223,6 +223,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_curved_sized_fill_test.jl",
         "interfaces/api_occ_oblique_plane_surface_test.jl",
         "interfaces/api_occ_curvature_adjacent_face_size_test.jl",
+        "geometry/geo_extrude_tag_allocator_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

@@ -3655,6 +3655,33 @@ function _geo_allocator_resync_model!(state::_GeoTagAllocatorState,m)
     return nothing
 end
 
+# Built-in `Extrude`/`Duplicata`/transform/`Coherence` statements allocate
+# through the model's own per-dimension counters (`m.next_tag`, the mirror of
+# `GEO_Internals::_max*Num`: hidden copies, decrement-on-delete and the
+# coherence reset included), which the statement observer cannot replay. Once
+# such a statement ran, those counters are the exact `getMaxTag(dim)` values,
+# so `newp`-family reads stay live instead of becoming unavailable.
+function _geo_allocator_resync_builtin_model!(state::_GeoTagAllocatorState,m)
+    _geo_allocator_resync_model!(state,m)
+    state.occ_active && return nothing
+    discrete_max=ntuple(4) do d
+        top=0
+        for (dd,tag) in keys(m.discrete)
+            dd==d-1 && tag>top && (top=tag)
+        end
+        top
+    end
+    state.builtin_point_max=max(m.next_tag[1],discrete_max[1])
+    state.builtin_curve_max=max(m.next_tag[2],discrete_max[2])
+    state.builtin_surface_max=max(m.next_tag[3],discrete_max[3])
+    state.builtin_volume_max=max(m.next_tag[4],discrete_max[4])
+    for t in keys(m.loops)
+        t in m.derived_loops ||
+            (state.builtin_curveloop_max=max(state.builtin_curveloop_max,t))
+    end
+    return nothing
+end
+
 @inline _geo_ascii_letter(c::Char)=('a'<=c<='z') || ('A'<=c<='Z') || c=='_'
 @inline _geo_ascii_digit(c::Char)=('0'<=c<='9')
 @inline _geo_ascii_ident(c::Char)=_geo_ascii_letter(c) || _geo_ascii_digit(c)

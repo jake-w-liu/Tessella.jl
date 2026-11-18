@@ -556,6 +556,11 @@ mutable struct GeoModel
     # `Delete All`/`NewModel`.
     name::String
     occ_kernel::_ModelNativeOCCKernel
+    # Curve-loop records the model derives for `Extrude`/`Duplicata` surfaces.
+    # Gmsh's derived surfaces carry no `EdgeLoop`, so these tags stay out of
+    # `_maxLineLoopNum` (`newll`/`NEWREG()`) and yield to a later explicit
+    # `Curve Loop(t)` declaration.
+    derived_loops::Set{Int}
 end
 
 """
@@ -597,7 +602,8 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Dict{Tuple{Int,Int},DiscreteEntity}(),
                       Int[0,0,0,0],
                       "",
-                      _ModelNativeOCCKernel())
+                      _ModelNativeOCCKernel(),
+                      Set{Int}())
 
 include("ModelMeshProjection.jl")
 
@@ -711,10 +717,34 @@ end
 function _alloc_curve_loop_tag(m::GeoModel,requested::Int,caller;
                                literal_zero::Bool=false)
     (requested!=0 || literal_zero) && return requested
-    current=isempty(m.loops) ? 0 : maximum(keys(m.loops))
+    current=_declared_loop_max(m)
     current<typemax(Int32) || throw(ArgumentError(
         "$caller: no automatic Curve Loop tags remain"))
     return current+1
+end
+
+# Largest curve-loop tag outside the derived (`Extrude`/`Duplicata`) records.
+function _declared_loop_max(m::GeoModel)
+    mx=0
+    for t in keys(m.loops)
+        t in m.derived_loops || (mx=max(mx,t))
+    end
+    return mx
+end
+
+# A derived loop occupying the tag of an explicit `Curve Loop(t)` declaration
+# moves to a fresh tag (rewiring its surfaces) — upstream the derived surface
+# has no loop record that could clash.
+function _yield_derived_loop!(m::GeoModel,t::Int)
+    (haskey(m.loops,t) && t in m.derived_loops) || return nothing
+    fresh=maximum(keys(m.loops))+1
+    m.loops[fresh]=pop!(m.loops,t)
+    delete!(m.derived_loops,t);push!(m.derived_loops,fresh)
+    for (s,ls) in m.surfaces
+        any(l->abs(l)==t,ls) || continue
+        m.surfaces[s]=Int[abs(l)==t ? sign(l)*fresh : l for l in ls]
+    end
+    return nothing
 end
 
 function _finite3(x,y,z,caller)
@@ -1595,8 +1625,10 @@ function add_curve_loop!(m::GeoModel, curves; tag::Integer=0,
     ordered=_sort_curve_loop(m,ids,caller)
     t=_alloc_curve_loop_tag(m,_tag(tag,caller,1),caller;
                             literal_zero=_zero_literal)
+    _yield_derived_loop!(m,t)
     haskey(m.loops,t) && throw(ArgumentError("$caller: Loop[$t] already exists"))
     m.loops[t]=ordered
+    delete!(m.derived_loops,t)
     return t
 end
 
