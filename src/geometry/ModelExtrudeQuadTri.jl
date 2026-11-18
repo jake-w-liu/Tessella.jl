@@ -37,7 +37,8 @@ function _extrude_quadtri_source_root(m::GeoModel,t::Int)
 end
 
 function _extrude_quadtri_toroidal_root(m::GeoModel,t::Int,
-                                        caller::AbstractString)
+                                        caller::AbstractString;
+                                        require_quadtri::Bool=true)
     root=_extrude_quadtri_source_root(m,t)
     adjacent=Int[]
     for r in _extrude_quadtri_regions(m,root,caller)
@@ -67,7 +68,7 @@ function _extrude_quadtri_toroidal_root(m::GeoModel,t::Int,
         ep!==nothing && link!==nothing && link[1]==2 || return 0
         quadtri|=ep.quad_to_tri!==:none
         last=abs(link[2])
-        last==root && return quadtri ? root : 0
+        last==root && return (quadtri || !require_quadtri) ? root : 0
     end
     throw(ArgumentError("QuadToTri toroidal cap has a cyclic source dependency"))
 end
@@ -77,7 +78,9 @@ function _extrude_quadtri_closing_root(m::GeoModel,r::Int,
     link=get(m.meshing.extrude_sources,(3,r),nothing)
     link!==nothing && link[1]==2 || return 0
     src=abs(link[2])
-    root=_extrude_quadtri_toroidal_root(m,src,caller)
+    # Any closed sweep chain, ordinary or QuadToTri, ends on the original
+    # source mesh: upstream's `pos.find` welds the closing level onto it.
+    root=_extrude_quadtri_toroidal_root(m,src,caller;require_quadtri=false)
     root!=0 && root!=src && r in _extrude_quadtri_regions(m,root,caller) || return 0
     return root
 end

@@ -58,4 +58,20 @@ Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
     @test oc.counts[3] == 112
     @test oc.counts[5] == 80
 
+    # A chain of ordinary rotations closing a full turn onto its source face
+    # must weld onto the source mesh (upstream `pos.find`) instead of
+    # rejecting the closing level. Gmsh 4.15.2: 194 nodes, 171 quadrangles,
+    # 108 hexahedra.
+    rev = _xgeo_mesh("""
+        Point(1)={1,0,0,0.2}; Point(2)={2,0,0,0.2}; Point(3)={2,0,1,0.2}; Point(4)={1,0,1,0.2};
+        Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+        Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+        Transfinite Curve{1:4}=4; Transfinite Surface{1}; Recombine Surface{1};
+        s1[] = Extrude {{0,0,1},{0,0,0},2*Pi/3} { Surface{1}; Layers{4}; Recombine; };
+        s2[] = Extrude {{0,0,1},{0,0,0},2*Pi/3} { Surface{s1[0]}; Layers{4}; Recombine; };
+        s3[] = Extrude {{0,0,1},{0,0,0},2*Pi/3} { Surface{s2[0]}; Layers{4}; Recombine; };
+        """, 3)
+    @test rev.nodes == 194
+    @test rev.counts[3] == 171
+    @test rev.counts[5] == 108
 end
