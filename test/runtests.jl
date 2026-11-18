@@ -108,6 +108,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_boolean_face_measures_test.jl",
         "interfaces/api_occ_boolean_clipped_cylinder_test.jl",
         "interfaces/api_occ_boolean_abutting_test.jl",
+        "interfaces/api_occ_dilate_measures_test.jl",
         "interfaces/api_onelab_run_test.jl",
         "interfaces/api_onelab_typed_test.jl",
         "interfaces/api_onelab_metadata_test.jl",

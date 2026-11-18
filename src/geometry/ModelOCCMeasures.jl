@@ -170,6 +170,24 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
     return area,Mx,My
 end
 
+# uv→physical area factor |X×Y| and unit normal of a plane record. A
+# transform maps the stored frame vectors without renormalizing them — a
+# dilation stretches `X`/`Y` (and `axis`) while the pcurves keep their uv
+# coordinates — so a uv shoelace area is not the physical area and `axis`
+# is not a unit normal. Orthonormal frames return `(1.0, axis)` verbatim.
+function _occ_plane_metric(rec)
+    X=(Float64(rec.X[1]),Float64(rec.X[2]),Float64(rec.X[3]))
+    Y=(Float64(rec.Y[1]),Float64(rec.Y[2]),Float64(rec.Y[3]))
+    c=_occ_cross(X,Y)
+    J=_occ_modulus(c)
+    (abs(J-1.0)<=1e-14 && abs(_dot3(rec.axis,rec.axis)-1.0)<=1e-14) &&
+        return 1.0,rec.axis
+    (isfinite(J) && J>0) || throw(ErrorException(
+        "OCC.get_mass: plane face has a degenerate frame"))
+    s=_dot3(c,rec.axis)>=0 ? 1.0/J : -1.0/J
+    return J,(c[1]*s,c[2]*s,c[3]*s)
+end
+
 @inline _model_occ_plane_eval(rec,u,v)=
     (fma(u,rec.X[1],v*rec.Y[1])+rec.center[1],
      fma(u,rec.X[2],v*rec.Y[2])+rec.center[2],
@@ -306,6 +324,7 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
                                 face_rec=nothing,centered=false)
     shape=kernel.shapes[id]
     rec=face_rec===nothing ? shape.geometry.geometry : face_rec
+    J,_=_occ_plane_metric(rec)
     A=0.0
     raw_per_wire=NamedTuple[]
     for wire_id in shape.children
@@ -328,7 +347,7 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
         cu+=w*wire.raw[2]/area; cv+=w*wire.raw[3]/area
     end
     c3=_model_occ_plane_eval(rec,cu,cv)
-    want_tensor || return A,c3,nothing
+    want_tensor || return A*J,c3,nothing
     # Conic and spline traces cannot use the straight-chord fan; integrate
     # the actual boundary 1-forms instead (this also covers disk faces).
     curved=_model_occ_plane_curved(kernel,shape,rec)
@@ -345,7 +364,7 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
             T=_model_occ_plane_tensor(_model_occ_plane_eval(rec,cu_b,cv_b),
                 rec.X,rec.Y,raw)
         end
-        return A,c3,T
+        return A*J,c3,T.*J
     end
     T=zeros(3,3)
     # Pass 2: per-wire signed fan from (cu,cv); each wire's contribution
@@ -384,7 +403,7 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
             end
         end
     end
-    return A,c3,T
+    return A*J,c3,T.*J
 end
 
 # ---- cylinder patches ------------------------------------------------
@@ -1431,7 +1450,8 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             # Reclassified-from-plane tensor cap: the exact plane record
             # keeps shoelace precision on conic wires.
             prec=rec.plane_rec
-            n=(σ*prec.axis[1],σ*prec.axis[2],σ*prec.axis[3])
+            nh=_occ_plane_metric(prec)[2]
+            n=(σ*nh[1],σ*nh[2],σ*nh[3])
             A,c3,_=_model_occ_plane_stats(kernel,fid;face_rec=prec)
             d=A*_dot3(n,c3)
             V+=d/3
@@ -1484,7 +1504,8 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
             end
             continue
         end
-        n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
+        nh=_occ_plane_metric(rec)[2]
+        n=(σ*nh[1],σ*nh[2],σ*nh[3])
         # On a plane face r·n̂ is the constant face offset, so the centroid
         # moment ∬_F r(r·n̂)dA = (n̂·c̄)·A·c̄ — no per-edge tensor pass, and
         # conic-bounded plane faces stay supported.
@@ -1612,7 +1633,8 @@ function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
         cu_b=raw[(1,0)]/raw[(0,0)];cv_b=raw[(0,1)]/raw[(0,0)]
         mc=_model_occ_centered_plane_moments(raw,cu_b,cv_b)
         base=_occ3_sub(_model_occ_plane_eval(rec,cu_b,cv_b),center)
-        return _model_occ_plane_cubic(base,rec.X,rec.Y,mc)
+        return _model_occ_plane_cubic(base,rec.X,rec.Y,mc).*
+            _occ_plane_metric(rec)[1]
     end
     U=zeros(3,3,3)
     for (index,wire) in enumerate(raw_per_wire)
@@ -1646,7 +1668,7 @@ function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
             end
         end
     end
-    return U
+    return U.*_occ_plane_metric(rec)[1]
 end
 
 # Centered face second-moment tensor T_F = ∬_F(r-c)⊗(r-c)dA over a trimmed
@@ -1932,7 +1954,8 @@ function _model_occ_solid_moment2(kernel,id)
                 m[i,j]+=σ*integrals.centered_div_second[i,j]
             end
         elseif rec.occ===:plane
-            n=(σ*rec.axis[1],σ*rec.axis[2],σ*rec.axis[3])
+            nh=_occ_plane_metric(rec)[2]
+            n=(σ*nh[1],σ*nh[2],σ*nh[3])
             U=_model_occ_plane_moment3(kernel,fid;center=centroid)
             for i in 1:3,j in 1:3,k in 1:3
                 m[i,j]+=n[k]*U[i,j,k]/5
