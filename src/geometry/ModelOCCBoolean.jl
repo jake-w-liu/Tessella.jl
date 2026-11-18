@@ -1275,6 +1275,7 @@ function _occ_shared_rim_keys(specs,tol)
         ra!=rb && (uf[ra]=rb;par[ra]=pa⊻pb⊻d)
     end
     canon=Dict{Int,Any}();canon_par=Dict{Int,Int}()
+    canon_arc=Dict{Int,Any}()
     out=NamedTuple[]
     for (si,spec) in enumerate(specs)
         wires=map(enumerate(spec.wires)) do (wi,w)
@@ -1285,10 +1286,19 @@ function _occ_shared_rim_keys(specs,tol)
                     # first arc of the group becomes the canonical record —
                     # remember its parity so partners measure direction
                     # against it
-                    canon[r]=ar.key;canon_par[r]=pi
+                    canon[r]=ar.key;canon_par[r]=pi;canon_arc[r]=ar
                     return ar
                 end
                 ck==ar.key && return ar
+                # The emitted edge materializes the canonical arc's curve
+                # record, so the relabeled arc's pcurve must be re-expressed
+                # in that record's parameter: the partner edge generally has
+                # another origin or runs the other way (two abutting boxes'
+                # coincident edges do), and a pcurve left in its own
+                # parameter traces the shared edge from the wrong end on this
+                # face — the wire then encloses a wrong area.
+                moved=_occ_rim_reparam(ar,canon_arc[r],ck,tol)
+                moved===nothing || return moved
                 # flip `fwd` when this arc's own record is anti-parallel to
                 # the canonical record that the emitted edge materializes
                 flip=pi⊻canon_par[r]
@@ -1299,6 +1309,37 @@ function _occ_shared_rim_keys(specs,tol)
         push!(out,merge(spec,(wires=wires,)))
     end
     return out
+end
+
+# Re-express a rim arc on the canonical arc's curve record `ca.crv` — the
+# member→canonical affine parameter map composed into the pcurve, exactly as
+# `_brep_merge_edge_pieces` relabels fused pieces. Returns `nothing` when the
+# two records afford no affine map or the pcurve no reparametrization (the
+# caller then keeps the key-only relabel).
+function _occ_rim_reparam(ar,ca,ck,tol)
+    ar.crv===ca.crv && return merge(ar,(key=ck,))
+    mp=_brep_canonical_map(ar.crv,ca.crv,ar.vt0,tol)
+    mp===nothing && return nothing
+    α,β=mp
+    abs(abs(α)-1.0)<=1e-12 && (α=α<0 ? -1.0 : 1.0)
+    vlo,vhi=minmax(α*ar.vt0+β,α*ar.vt1+β)
+    if ca.crv.kind===:circle || ca.crv.kind===:ellipse
+        # the angular lift may sit whole turns off the canonical arc's span
+        clo=min(ca.vt0,ca.vt1)
+        k=round((clo-vlo)/_OCC_TWO_PI)
+        β+=k*_OCC_TWO_PI;vlo+=k*_OCC_TWO_PI;vhi+=k*_OCC_TWO_PI
+    end
+    γ,δ=ar.neg ? (-1/α,β/α) : (1/α,-β/α)
+    local pc2,f
+    try
+        pc2,f=_brep_pc_reparam(ar.pc,γ,δ,tol,"OCC Boolean")
+    catch err
+        err isa ArgumentError || rethrow()
+        return nothing
+    end
+    fwd2=xor(ar.fwd,α<0,ar.neg,f)
+    return merge(ar,(key=ck,fwd=fwd2,pc=pc2,crv=ca.crv,vt0=vlo,vt1=vhi,
+                     neg=f,t0=f ? -vhi : vlo,t1=f ? -vlo : vhi))
 end
 
 # uv containment against a kept region spec's wires (outer + holes —
