@@ -537,12 +537,38 @@ function _scaled_odt_coordinate(coordinate_scale,anchor,edge_scale,offset)
     return result==0 ? 0.0 : result
 end
 
-# nodes lying on any boundary face (fixed during smoothing)
+# Nodes fixed during smoothing: nodes on any boundary face, on a face shared by
+# tets of different region tags (an internal interface), and nodes of the mesh's
+# lower-dimensional cells (embedded/interface triangles and segments).  Moving an
+# interface node changes the interface geometry and the per-region volumes even
+# though every tet stays positive.
 function _boundary_nodes(m::Mesh)
     isb = falses(nnodes(m))
     bf, _ = boundary_faces(m.tets)
     @inbounds for f in bf; isb[f[1]]=true; isb[f[2]]=true; isb[f[3]]=true; end
+    @inbounds for j in 1:size(m.tris,2), i in 1:3; isb[m.tris[i,j]]=true; end
+    @inbounds for j in 1:size(m.segs,2), i in 1:2; isb[m.segs[i,j]]=true; end
+    tags=m.tet_tag
+    if length(tags)==ntets(m) && any(!=(first(tags)),tags)
+        owner=Dict{NTuple{3,Int32},Int32}()
+        @inbounds for t in 1:ntets(m)
+            v=(m.tets[1,t],m.tets[2,t],m.tets[3,t],m.tets[4,t])
+            for k in 1:4
+                f=_sorted_face(ntuple(i->v[i<k ? i : i+1],3))
+                previous=get!(owner,f,tags[t])
+                if previous!=tags[t]
+                    isb[f[1]]=true; isb[f[2]]=true; isb[f[3]]=true
+                end
+            end
+        end
+    end
     return isb
+end
+
+@inline function _sorted_face(f::NTuple{3,Int32})
+    a,b,c=f
+    a>b && ((a,b)=(b,a)); b>c && ((b,c)=(c,b)); a>b && ((a,b)=(b,a))
+    return (a,b,c)
 end
 
 function _node_neighbours(m::Mesh)

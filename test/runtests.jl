@@ -246,6 +246,7 @@ include("functional/fixtures.jl")
         "interfaces/cli_embedded_multi_surface_test.jl",
         "core/predicates_underflow_test.jl",
         "core/predicates_sos_minors_test.jl",
+        "meshing/optimize_region_interface_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
