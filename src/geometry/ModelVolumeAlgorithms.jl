@@ -223,6 +223,17 @@ function _model_native_quality_volume_fill(surface,order,kernel,caller;protected
     return Mesh(surface.coords;tets=mapped)
 end
 
+# Whether the first rows of `mesh` are the rows of `source`, coordinate for
+# coordinate: a row index then names the same vertex in both.
+function _model_mesh_rows_prefix(mesh,source)
+    count=size(source.coords,2)
+    size(mesh.coords,2)>=count || return false
+    @inbounds for row in 1:count,axis in 1:3
+        mesh.coords[axis,row]==source.coords[axis,row] || return false
+    end
+    return true
+end
+
 # A geometric fill can cover a planar Source sheet with the opposite
 # diagonal. Actual lower constructor facets also need their exact row
 # incidence before the fill can return ahead of constrained recovery.
@@ -258,9 +269,24 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
     failures=String[]
     function certify(mesh)
         passed,why=_certify_surface_fill(surface,mesh)
-        passed && node_order!==nothing && !_model_native_boundary_facets_match(surface,mesh) &&
+        # A fill bounded by the surface triangles themselves has the actual
+        # constructor facet incidence by definition.
+        passed && node_order!==nothing && !_fill_boundary_is_surface(surface,mesh) &&
+            !_model_native_boundary_facets_match(surface,mesh) &&
             return false,"actual PLC constructor facet incidence differs"
         return passed,why
+    end
+    # General boundaries: recover the surface inside a tetrahedralization of
+    # its own vertices. The result has exactly the surface triangles as its
+    # boundary, so it is tried before the fallbacks below, which either rely
+    # on the Delaunay tetrahedralization happening to conform or subdivide
+    # the boundary.
+    function recover()
+        recovered,reason,_=recover_boundary_flips(initial_surface.coords,surface.tris)
+        recovered===nothing && (push!(failures,reason);return nothing)
+        valid,why=certify(recovered)
+        valid || (push!(failures,why);return nothing)
+        return _finish_interior(recovered,extra)
     end
     if node_order!==nothing
         native_kernel=Ref{ModelNativeInitialTet.Kernel}()
@@ -298,6 +324,8 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
             push!(failures,sprint(showerror,error))
         end
     end
+    finished=recover()
+    finished===nothing || return finished
     try
         # Constrained recovery must retain every actual initial vertex,
         # including embedded inputs already present before the cube births.

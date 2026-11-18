@@ -406,6 +406,7 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
         element_numbers=nothing,element_high_water=nothing,
         node_numbers=nothing,node_high_water=nothing,
         native_storage_order::Bool=false,return_numbers::Bool=false,
+        audit::Bool=true,
         max_nodes::Int=PIPELINE_DEFAULT_MAX_NODES,
         max_tets::Int=PIPELINE_DEFAULT_MAX_TETS,max_iterations::Int=1_000_000)
     caller="native 3-D Delaunay insertion"
@@ -521,8 +522,8 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
     end
     output=Mesh(coordinates;segs=copy(mesh.segs),tris=copy(mesh.tris),tets=tets,
         seg_tag=copy(mesh.seg_tag),tri_tag=copy(mesh.tri_tag),tet_tag=output_tags)
-    validate(output).ok || throw(ErrorException("$caller: invalid replacement mesh"))
-    Set(first(boundary_faces(output.tets)))==Set(first(boundary_faces(mesh.tets))) ||
+    audit && (validate(output).ok || throw(ErrorException("$caller: invalid replacement mesh")))
+    _single_tet_faces(output.tets)==_single_tet_faces(mesh.tets) ||
         throw(ErrorException("$caller: exterior boundary changed"))
     return return_numbers ? _GmshDelaunay3Product(output,output_numbers,number,vertex_numbers,vertex_number) : output
 end

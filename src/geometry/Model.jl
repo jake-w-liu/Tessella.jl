@@ -46,13 +46,15 @@ using ..Mesh3D: tetrahedralize, mesh_boolean, recover_segment3, recover_triangle
                 _gopt_gamma, _gopt_area, _gmsh3_native_center
 using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _tet_edge_set, _volume_edge_set, _volume_cell_boundary_faces,
-                _mesh_covering_faces3, _certify_surface_fill,
+                _mesh_covering_faces3, _certify_surface_fill, _fill_boundary_is_surface,
+                _sorted_tet_faces, _tet_face_count, _single_tet_faces,
                 _protected_cells!, _sorted_face3, _graft_sheet_face3,
                 _recover_sheet_edge3,
                 _on_segment3, _pt3, _segment_chain3,
                 delaunay3d, to_mesh3, _classify_by_centroid, _rb_drop_flats,
                 _finish_interior, _recover_boundary_exact, recover_boundary,
                 _plc_self_intersection3
+using ..BoundaryRecovery: recover_boundary_flips
 using ..Periodic: periodic_identify_affine
 using ..TransfiniteVolume: mesh_transfinite_volume
 using ..TransfinitePrism: mesh_transfinite_prism
@@ -409,6 +411,13 @@ mutable struct ModelMeshingAttributes
     # field; `mesh_model_surface` grows the certified wall strip off each
     # listed boundary curve and refills the shrunken face.
     boundary_layer_fields::Dict{Int,_ModelBoundaryLayerField}
+    # Generation-scoped: a primitive or Boolean solid fills from the meshes of
+    # its own boundary Surfaces, like every other Region, instead of from its
+    # compact analytic tessellation. The session generator sets it, because a
+    # Region must conform to the Surface meshes it publishes and follow the
+    # requested sizes; the analytic tessellation stays the product of the
+    # direct `mesh_model_volume` call on a model that has no Surface meshes.
+    conforming_solids::Bool
 end
 
 ModelMeshingAttributes() = ModelMeshingAttributes(
@@ -461,7 +470,8 @@ ModelMeshingAttributes() = ModelMeshingAttributes(
     1e33,
     Dict{Int,Tuple{Bool,Int}}(),
     Any[],
-    Dict{Int,_ModelBoundaryLayerField}())
+    Dict{Int,_ModelBoundaryLayerField}(),
+    false)
 
 Base.:(==)(a::ModelMeshingAttributes,b::ModelMeshingAttributes)=
     all(n->getfield(a,n)==getfield(b,n),fieldnames(ModelMeshingAttributes))
@@ -10480,8 +10490,9 @@ end
 # likewise keep their materialized boundary for queries but mesh through the
 # operand snapshot (`m.booleans`/`m.boolean_operands`).
 _implicit_volume_surface(m::GeoModel,t::Int) =
-    haskey(m.cylinders,t) || haskey(m.spheres,t) || haskey(m.cones,t) ||
-    haskey(m.booleans,t)
+    !m.meshing.conforming_solids &&
+    (haskey(m.cylinders,t) || haskey(m.spheres,t) || haskey(m.cones,t) ||
+     haskey(m.booleans,t))
 
 function _model_volume_faces_use_meshadapt(m::GeoModel,t::Int,caller)
     any(_model_volume_boundary_surfaces(m,t,caller;certify_shells=false)) do signed
@@ -10969,11 +10980,27 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         for (_,_,face) in native_constraints.embedded_faces
             push!(protected_faces,_sorted_face3(face...))
         end
+        # A curve cell whose two rows are joined by a tetrahedron edge is
+        # covered by that edge. The edge table is built once per mesh; only a
+        # cell without its own edge takes the geometric chain search, and
+        # only a recovery replaces the mesh the table describes.
+        source=initial_geometry.surface
+        tabled=nothing;table=nothing;bound=false
         for (curve,_,edge) in native_constraints.edges
-            p=_model_mesh_coordinate(initial_geometry.surface,edge[1])
-            q=_model_mesh_coordinate(initial_geometry.surface,edge[2])
-            mesh_covers_segment3(mesh,p,q) ||
-                (mesh=recover_segment3(mesh,p,q))
+            if tabled!==mesh
+                tabled=mesh
+                bound=_model_mesh_rows_prefix(mesh,source)
+                table=bound ? _tet_edge_set(mesh) : nothing
+            end
+            first_row=Int32(edge[1]);second_row=Int32(edge[2])
+            covered=bound && (first_row<second_row ? (first_row,second_row) :
+                                                      (second_row,first_row)) in table
+            if !covered
+                p=_model_mesh_coordinate(source,edge[1])
+                q=_model_mesh_coordinate(source,edge[2])
+                mesh_covers_segment3(mesh,p,q) ||
+                    (mesh=recover_segment3(mesh,p,q))
+            end
             # Register the recovered chain so a later cavity fill cannot drop
             # it, mirroring the generic embedded-curve ordering below.
             push!(protected_edges,minmax(edge...))
@@ -11050,7 +11077,10 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             element_high_water=receipt===nothing ? nothing : receipt.element_high_water,
             node_numbers=receipt===nothing ? nothing : receipt.node_tags,
             node_high_water=receipt===nothing ? nothing : receipt.node_high_water,
-            native_storage_order=receipt!==nothing,return_numbers=receipt!==nothing)
+            native_storage_order=receipt!==nothing,return_numbers=receipt!==nothing,
+            # The complete structural audit runs once, on the finished Region
+            # below; here it would only repeat on an intermediate mesh.
+            audit=false)
         if receipt===nothing
             mesh=refined
         else

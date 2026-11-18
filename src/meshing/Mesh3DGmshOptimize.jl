@@ -124,6 +124,10 @@ end
 # Reconnection retains neighbors outside the supplied local cavity. Embedded
 # faces remain cuts in the graph, as in native connectTets.
 function _gopt_connect!(state,indices)
+    # Ingesting a whole mesh bonds every cell at once: sort the faces rather
+    # than hash them.
+    indices isa AbstractUnitRange && length(indices)>256 &&
+        return _gopt_connect_sorted!(state,indices)
     faces=Dict{NTuple{3,Int32},Tuple{Int32,Int}}()
     for index in indices
         cell=state.cells[index]
@@ -139,6 +143,37 @@ function _gopt_connect!(state,indices)
                 cell.neighbors[face]=previous[1]
             end
         end
+    end
+    return nothing
+end
+
+# The same bonds as the hashed pass above. The sort is stable, so the owners
+# of a face stay in the order the cells were given, and each later owner
+# bonds with the first, exactly as the hashed pass leaves them.
+function _gopt_connect_sorted!(state,indices::AbstractUnitRange)
+    records=Vector{Tuple{NTuple{3,Int32},Int32,Int8}}()
+    sizehint!(records,4*length(indices))
+    for index in indices
+        cell=state.cells[index]
+        cell.deleted && continue
+        for face in 1:4
+            key=_gopt_face(cell.vertices,face)
+            key in state.embedded_faces && continue
+            push!(records,(key,Int32(index),Int8(face)))
+        end
+    end
+    sort!(records;by=first,alg=MergeSort)
+    position=1;total=length(records)
+    @inbounds while position<=total
+        next=position+1
+        head=records[position]
+        while next<=total && records[next][1]==head[1]
+            other=records[next]
+            state.cells[head[2]].neighbors[head[3]]=other[2]
+            state.cells[other[2]].neighbors[other[3]]=head[2]
+            next+=1
+        end
+        position=next
     end
     return nothing
 end

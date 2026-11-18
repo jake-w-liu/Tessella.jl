@@ -37,6 +37,7 @@ include("functional/fixtures.jl")
     for path in (
         "meshing/ordered_matching_seeded_test.jl",
         "meshing/periodic_test.jl",
+        "meshing/boundary_recovery_test.jl",
         "meshing/optimize_tri_centroid_range_test.jl",
         "interfaces/api_hybrid_winslow_allocation_test.jl",
         "core/transform_axis_scale_test.jl",

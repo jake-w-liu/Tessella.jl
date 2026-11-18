@@ -53,6 +53,7 @@ include("meshing/Mesh1D.jl")      # graded 1-D edge meshing
 include("meshing/PipelineSupport.jl") # top-level pipeline input/resource certificates
 include("meshing/MeshSurface.jl") # planar / cylinder / parametric surface meshing
 include("meshing/Mesh3D.jl")      # 3-D Delaunay + volume filling (+ multi-region)
+include("meshing/BoundaryRecovery.jl") # flip-based boundary recovery for closed surfaces
 include("meshing/RecoverCDT.jl")  # general conforming-Delaunay boundary recovery (exact)
 include("meshing/Optimize.jl")    # tet quality report + Laplacian smoothing
 include("geometry/Heal.jl")       # surface-defect detection ("heal, don't fail")

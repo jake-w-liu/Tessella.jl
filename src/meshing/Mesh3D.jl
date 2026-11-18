@@ -6531,11 +6531,99 @@ function _rb_gate(surface::Mesh, m, regions::Vector{RBRegion}, S, Px,Py,Pz, face
     return (true, nrec, "ok")
 end
 
+# Every face of every tetrahedron as a sorted vertex triple, in sorted order:
+# a face shared by two tetrahedra appears twice in a row. Sorting a flat array
+# is several times cheaper than counting through a hash table.
+function _sorted_tet_faces(tets::AbstractMatrix{<:Integer})
+    nt = size(tets, 2)
+    faces = Vector{NTuple{3,Int32}}(undef, 4 * nt)
+    @inbounds for t in 1:nt
+        a = Int32(tets[1, t]); b = Int32(tets[2, t]); c = Int32(tets[3, t]); d = Int32(tets[4, t])
+        faces[4t-3] = _sort3t(b, c, d); faces[4t-2] = _sort3t(a, c, d)
+        faces[4t-1] = _sort3t(a, b, d); faces[4t] = _sort3t(a, b, c)
+    end
+    sort!(faces)
+    return faces
+end
+
+# The faces that belong to exactly one tetrahedron, as sorted triples in sorted
+# order. `faces` is the table from `_sorted_tet_faces`.
+function _single_tet_faces(faces::Vector{NTuple{3,Int32}})
+    single = NTuple{3,Int32}[]
+    position = 1; total = length(faces)
+    @inbounds while position <= total
+        next = position + 1
+        while next <= total && faces[next] == faces[position]
+            next += 1
+        end
+        next - position == 1 && push!(single, faces[position])
+        position = next
+    end
+    return single
+end
+_single_tet_faces(tets::AbstractMatrix{<:Integer}) = _single_tet_faces(_sorted_tet_faces(tets))
+
+# Number of tetrahedra that have the sorted triple `face` among `faces`.
+@inline function _tet_face_count(faces::Vector{NTuple{3,Int32}}, face::NTuple{3,Int32})
+    return length(searchsorted(faces, face))
+end
+
+# Whether the faces of `m` that belong to a single tetrahedron are exactly the
+# triangles of `surface`, on the very same vertex rows.
+#
+# Such a fill needs no geometric gate. Its boundary is the surface by
+# construction, so every crease chain is present and no boundary face can lie
+# outside it; and once `validate` has found every tetrahedron positively
+# oriented with faces paired two by two, the tetrahedra cover the region the
+# surface encloses exactly once (a positively oriented chain is determined by
+# its boundary), so no edge can pierce a facet either. The region-by-region
+# audit below, whose cost grows with the square of the surface size, is left
+# to fills whose boundary retriangulates or subdivides the surface.
+function _fill_boundary_is_surface(surface::Mesh, m)
+    m isa Mesh || return false
+    ns = size(surface.coords, 2); nf = size(surface.tris, 2); nt = size(m.tets, 2)
+    (nf > 0 && nt > 0 && size(m.coords, 2) >= ns) || return false
+    @inbounds for i in 1:ns
+        (surface.coords[1, i] == m.coords[1, i] && surface.coords[2, i] == m.coords[2, i] &&
+         surface.coords[3, i] == m.coords[3, i]) || return false
+    end
+    wanted = Vector{NTuple{3,Int32}}(undef, nf)
+    @inbounds for f in 1:nf
+        a = Int32(surface.tris[1, f]); b = Int32(surface.tris[2, f]); c = Int32(surface.tris[3, f])
+        (a == b || b == c || a == c) && return false
+        wanted[f] = _sort3t(a, b, c)
+    end
+    sort!(wanted)
+    @inbounds for f in 2:nf
+        wanted[f] == wanted[f-1] && return false
+    end
+    faces = _sorted_tet_faces(m.tets)
+    found = 0; i = 1; total = length(faces)
+    @inbounds while i <= total
+        j = i + 1
+        while j <= total && faces[j] == faces[i]
+            j += 1
+        end
+        if j - i == 1
+            found += 1
+            (found <= nf && faces[i] == wanted[found]) || return false
+        elseif j - i > 2
+            return false
+        end
+        i = j
+    end
+    return found == nf
+end
+
 # Certify that an arbitrary tet fill has the same piecewise-linear boundary as
 # `surface`.  This is the reusable front door to the exact recovery gate: validity
 # and closed-manifold checks alone are insufficient because a restricted Delaunay
 # fill can cap a non-convex PLC while remaining a perfectly valid convex-hull mesh.
 function _certify_surface_fill(surface::Mesh, m)
+    if _fill_boundary_is_surface(surface, m)
+        v = validate(m)
+        return v.ok ? (true, "ok") : (false, "invalid tet mesh: $(join(v.messages, "; "))")
+    end
     Px, Py, Pz, facets = _rb_dedup_surface(surface)
     length(Px) >= 4 || return (false, "input has fewer than four distinct vertices")
     isempty(facets) && return (false, "input has no non-degenerate facets")

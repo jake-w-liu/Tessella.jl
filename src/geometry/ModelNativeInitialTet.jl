@@ -540,30 +540,48 @@ end
 # positive, closed, unit-volume tet mesh can still fail every published PLC cell.
 function _model_certify_native_volume_constraints(mesh,constraints,volume,caller)
     mesh isa Mesh || throw(ArgumentError("$caller: actual Volume constraints require a tetrahedral mesh"))
-    faces=Dict{NTuple{3,Int32},Int}()
-    for tet in eachcol(mesh.tets),skip in 1:4
-        face=_sorted_face3((tet[i] for i in 1:4 if i!=skip)...)
-        faces[face]=get(faces,face,0)+1
-    end
+    faces=_sorted_tet_faces(mesh.tets)
     for (surface,label,face) in constraints.outer_faces
-        get(faces,_sorted_face3(face...),0)==1 || throw(ArgumentError(
+        _tet_face_count(faces,_sorted_face3(face...))==1 || throw(ArgumentError(
             "$caller: Volume[$volume] lost actual boundary Surface[$surface] cell $label"))
     end
+    # Every listed cell is a single-incidence face; the boundary is exactly
+    # those cells when it has no other face and no cell is listed twice.
     expected=Set(_sorted_face3(face...) for (_,_,face) in constraints.outer_faces)
-    observed=Set(face for (face,count) in faces if count==1)
-    expected==observed || throw(ArgumentError(
+    single=0;position=1;total=length(faces)
+    @inbounds while position<=total
+        next=position+1
+        while next<=total && faces[next]==faces[position]
+            next+=1
+        end
+        next-position==1 && (single+=1)
+        position=next
+    end
+    single==length(expected) || throw(ArgumentError(
         "$caller: Volume[$volume] tetrahedron boundary differs from its actual Surface cells"))
     for (surface,label,face) in constraints.embedded_faces
-        get(faces,_sorted_face3(face...),0)==2 || throw(ArgumentError(
+        _tet_face_count(faces,_sorted_face3(face...))==2 || throw(ArgumentError(
             "$caller: Volume[$volume] lost actual embedded Surface[$surface] cell $label"))
     end
     if !isempty(constraints.edges)
         required=Set(minmax(edge...) for (_,_,edge) in constraints.edges)
+        # Only an edge between two curve rows can be a required cell.
+        marked=falses(size(mesh.coords,2))
+        for edge in required
+            marked[edge[1]]=true;marked[edge[2]]=true
+        end
         found=Set{Tuple{Int32,Int32}}()
         sizehint!(found,length(required))
-        for tet in eachcol(mesh.tets),first in 1:3,last in first+1:4
-            edge=minmax(tet[first],tet[last])
-            edge in required && push!(found,edge)
+        tets=mesh.tets
+        @inbounds for column in axes(tets,2),first in 1:3
+            head=tets[first,column]
+            marked[head] || continue
+            for last in first+1:4
+                tail=tets[last,column]
+                marked[tail] || continue
+                edge=minmax(head,tail)
+                edge in required && push!(found,edge)
+            end
         end
         for (curve,label,edge) in constraints.edges
             minmax(edge...) in found || throw(ArgumentError(
@@ -935,14 +953,11 @@ end
 function _model_native_volume_boundary_writeback!(m,volume,mesh::Mesh,constraints,
                                                  geometry,authority,births,
                                                  caller;persist::Bool=true)
-    face_count=Dict{NTuple{3,Int32},Int}()
-    for tet in eachcol(mesh.tets),skip in 1:4
-        face=_sorted_face3((tet[i] for i in 1:4 if i!=skip)...)
-        face_count[face]=get(face_count,face,0)+1
-    end
-    boundary=Set(face for (face,count) in face_count if count==1)
+    single=_single_tet_faces(mesh.tets)
     declared=Set(_sorted_face3(face...) for (_,_,face) in constraints.outer_faces)
-    declared==boundary && return constraints,nothing
+    # The usual case: the boundary is the declared cells, nothing to write back.
+    length(single)==length(declared) && all(in(declared),single) && return constraints,nothing
+    boundary=Set(single)
     input_rows=nnodes(geometry.surface)
     RB=Rational{BigInt}
     pts=RecoverCDT.RBv[(RB(mesh.coords[1,row]),RB(mesh.coords[2,row]),

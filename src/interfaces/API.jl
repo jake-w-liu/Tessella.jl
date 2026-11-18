@@ -2698,6 +2698,7 @@ function _apply_generation_meshing_options!(m::GeoModel,settings)
     m.meshing.lc_extend_from_boundary=settings.lc_extend_from_boundary
     m.meshing.aniso_max=settings.aniso_max
     m.meshing.order=settings.order
+    m.meshing.conforming_solids=true
     hasproperty(settings,:boundary_layer_fields) &&
         (m.meshing.boundary_layer_fields=copy(settings.boundary_layer_fields))
     # `PView::list` for boundary-layer `Extrude` `Using View[i]`: session
