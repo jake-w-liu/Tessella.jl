@@ -8024,6 +8024,24 @@ function _geo_color_expr_value(rhs::AbstractString,
             _geo_int_value(values[i],"$caller color component") : 255,4)
         return rgba
     end
+    # `tSTRING '.' tColor '.' tSTRING` — another color option's value
+    # (`Geometry.Color.Surfaces = Geometry.Color.Points;` in tutorials/t3.geo);
+    # unknown options read 0 after the `ColorOption` diagnostic.
+    if (cm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*Color\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)$",
+                 s))!==nothing
+        family=String(cm.captures[1]);member=String(cm.captures[2])
+        key=(family,0,member)
+        haskey(context.option_colors,key) && return context.option_colors[key]
+        names=get(_GEO_COLOR_OPTION_NAMES,family,nothing)
+        if names===nothing || !(member in names)
+            context.soft_unknown_reads || throw(ArgumentError(
+                "$caller: Unknown color option '$family.$member'"))
+            _geo_msg_error!(context,names===nothing ?
+                "Unknown color option category '$family'" :
+                "Unknown color option '$family.$member'")
+        end
+        return (0,0,0,255)
+    end
     name=String(strip(s,'"'))
     haskey(_GEO_COLOR_NAMES,name) && return _GEO_COLOR_NAMES[name]
     context.soft_unknown_reads || throw(ArgumentError(

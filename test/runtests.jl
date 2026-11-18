@@ -240,6 +240,7 @@ include("functional/fixtures.jl")
         "interfaces/cli_save_all_physical_test.jl",
         "geometry/geo_extend_field_options_test.jl",
         "interfaces/cli_unrolled_details_test.jl",
+        "geometry/geo_color_option_read_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
