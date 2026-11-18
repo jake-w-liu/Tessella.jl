@@ -1448,7 +1448,7 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                 authority!==nothing && authority.mesh!==nothing || throw(ErrorException(
                     "tessella: one-dimensional generation omitted its classified mesh"))
                 write_msh(destination,_cli_physical_selection(
-                              _scaled_mesh_copy(authority.mesh,scaling),save_all);
+                              _scaled_mesh_copy(authority.mesh,scaling),save_all;version);
                           version,binary,
                           save_parametric,save_topology,preserve_numbering)
                 failure===nothing || throw(failure)
@@ -1483,7 +1483,7 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                 if save_parametric!==nothing || save_topology!==nothing
                     if classified isa MixedMesh
                         classified_out=_cli_physical_selection(
-                            _scaled_mesh_copy(classified,scaling),save_all)
+                            _scaled_mesh_copy(classified,scaling),save_all;version)
                         write_msh(destination,classified_out;version,binary,
                                   save_parametric,save_topology,
                                   preserve_numbering)
@@ -1504,7 +1504,7 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                     end
                 elseif classified isa MixedMesh
                     mixed_out=_cli_physical_selection(
-                        _scaled_mesh_copy(classified,scaling),save_all)
+                        _scaled_mesh_copy(classified,scaling),save_all;version)
                     write_mixed_msh(destination,mixed_out;version,binary,
                         preserve_numbering)
                     emit_topology(mixed_out)
@@ -1541,7 +1541,7 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                     "tessella: selected $entity_name projection omits periodic " *
                     "relations $missing_relations"))
                 projected_out=_cli_physical_selection(
-                    _scaled_mesh_copy(projected,scaling),save_all)
+                    _scaled_mesh_copy(projected,scaling),save_all;version)
                 write_msh(destination,projected_out;
                           version,binary,
                           save_parametric,save_topology,preserve_numbering)
@@ -1568,33 +1568,52 @@ end
 # parametric node coordinates the merged `result.mesh` may not carry.
 # `Mesh.SaveAll = 0` (the default): once the model has physical groups, the
 # MSH writers only emit elements of entities carrying a physical tag (upstream
-# `saveAll || noPhysicalGroups()`); every node is still written (MSH 4.1
-# `$Nodes` keeps all entity blocks, as Gmsh 4.15.2 does).
-_cli_physical_selection(mesh,save_all::Bool)=mesh
-function _cli_physical_selection(mesh::MixedMesh,save_all::Bool)
+# `saveAll || noPhysicalGroups()`). Nodes follow the elements: MSH 4.1 keeps
+# the nodes those elements reference plus nodes classified on physical
+# entities, MSH 2.2 only the referenced ones (Gmsh 4.15.2 on tutorials/t2.geo
+# -2 writes the nodes of surface 1 and its boundary only).
+_cli_physical_selection(mesh,save_all::Bool;version=4.1)=mesh
+function _cli_physical_selection(mesh::MixedMesh,save_all::Bool;version=4.1)
     save_all && return mesh
     data=mesh.entity_data
     data===nothing && return mesh
     # Element-indexed view data / partition records keep the full set.
     (mesh.partition_data===nothing && isempty(mesh.data_sections)) ||
         return mesh
+    physical(dim,tag)=begin
+        entity=get(data.entities,(Int(dim),Int(tag)),nothing)
+        entity!==nothing && !isempty(entity.physical_tags)
+    end
     any(entity->!isempty(entity.physical_tags),values(data.entities)) ||
         return mesh
+    selections=[findall(owner->physical(_partition_dim(block),owner),
+                        data.block_entities[bi])
+                for (bi,block) in enumerate(mesh.blocks)]
+    keep=falses(size(mesh.coords,2))
+    for (bi,block) in enumerate(mesh.blocks),j in selections[bi]
+        for node in _partition_nodes(block,j);keep[Int(node)]=true;end
+    end
+    # `$Periodic` node pairs must stay resolvable: keep every node then.
+    isempty(mesh.periodic_links) || fill!(keep,true)
+    if version!=2.2
+        for (row,owner) in enumerate(data.node_entities)
+            physical(owner[1],owner[2]) && (keep[row]=true)
+        end
+    end
+    rows=findall(keep)
+    inverse=zeros(Int32,size(mesh.coords,2))
+    inverse[rows].=Int32.(eachindex(rows))
     blocks=MixedElementBlock[];owners=Vector{Int32}[]
     element_tags=Vector{UInt64}[];elementary=Vector{Int32}[]
     for (bi,block) in enumerate(mesh.blocks)
-        dim=_partition_dim(block)
-        columns=findall(owner->begin
-                entity=get(data.entities,(dim,Int(owner)),nothing)
-                entity!==nothing && !isempty(entity.physical_tags)
-            end,data.block_entities[bi])
+        columns=selections[bi]
         isempty(columns) && continue
         if block isa ElementBlock
-            push!(blocks,ElementBlock(block.msh,block.nodes[:,columns],
+            push!(blocks,ElementBlock(block.msh,inverse[block.nodes[:,columns]],
                                       block.tags[columns]))
         else
             push!(blocks,SpecialElementBlock(block.msh,
-                [collect(_partition_nodes(block,j)) for j in columns],
+                [inverse[collect(_partition_nodes(block,j))] for j in columns],
                 block.tags[columns]))
         end
         push!(owners,data.block_entities[bi][columns])
@@ -1603,15 +1622,18 @@ function _cli_physical_selection(mesh::MixedMesh,save_all::Bool)
             push!(elementary,mesh.elementary_entities[bi][columns])
     end
     metadata=MixedEntityData(data.entities;
-        node_entities=data.node_entities,
-        node_parametric=data.node_parametric,
-        external_node_tags=data.external_node_tags,
+        node_entities=data.node_entities[rows],
+        node_parametric=data.node_parametric[rows],
+        external_node_tags=data.external_node_tags[rows],
         block_entities=owners,external_element_tags=element_tags,
         _native_mesh_tags=data.native_mesh_tags)
-    return MixedMesh(mesh.coords,blocks;
+    return MixedMesh(mesh.coords[:,rows],blocks;
         entity_data=metadata,physical_names=mesh.physical_names,
         elementary_entities=mesh.elementary_entities===nothing ? nothing : elementary,
-        periodic_links=mesh.periodic_links,
+        periodic_links=MixedPeriodicLink[MixedPeriodicLink(link.dim,
+            link.slave_entity,link.master_entity,inverse[link.slave_nodes],
+            inverse[link.master_nodes];affine=link.affine)
+            for link in mesh.periodic_links],
         ancillary_sections=mesh.ancillary_sections)
 end
 
