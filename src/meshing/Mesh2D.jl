@@ -42,6 +42,12 @@ const GHOST = Int32(0)   # the single vertex at infinity closing the convex hull
 # Working triangulation
 # ════════════════════════════════════════════════════════════════════════════════
 
+mutable struct _SlotHeap
+    h::Vector{Int32}
+    member::BitVector
+end
+_SlotHeap() = _SlotHeap(Int32[], falses(0))
+
 """
     Triangulation(xs, ys)
 
@@ -50,12 +56,6 @@ be finite `Vector{Float64}` values of equal length and are copied. The public
 [`delaunay2d`](@ref) and [`constrained_delaunay`](@ref) drivers return initialized
 instances; the two-vector constructor creates empty working topology.
 """
-mutable struct _SlotHeap
-    h::Vector{Int32}
-    member::BitVector
-end
-_SlotHeap() = _SlotHeap(Int32[], falses(0))
-
 mutable struct Triangulation
     x::Vector{Float64}          # real point x, indices 1..nreal (GHOST=0 has no coords)
     y::Vector{Float64}
