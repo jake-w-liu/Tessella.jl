@@ -2624,7 +2624,7 @@ function _geo_exec_transform_term(m::GeoModel,raw::AbstractString,
         out=try
             Base.inferencebarrier(_geo_occ_bind_entities!)(m,entities,kernel,caller)
             first(Base.inferencebarrier(Model._model_occ_get_closest_entities)(
-                m,vals[1],vals[2],vals[3],entities,1))
+                m,vals[1],vals[2],vals[3],entities,length(entities)))
         catch err
             err isa InterruptException && rethrow()
             err isa ArgumentError || rethrow()
