@@ -588,207 +588,236 @@ end
 
 """
     set_transfinite_automatic!(model, dim_tags=NTuple{2,Int}[],
-                               corner_angle=2.35, recombine=true)
+                               corner_angle=2.35, recombine=true;
+                               options=nothing)
 
 Apply transfinite constraints automatically, matching Gmsh's
-`setTransfiniteAutomatic`. For every listed surface (all native surfaces when
-`dim_tags` is empty) whose boundary has 3 or 4 corners — vertices where
-consecutive boundary segments turn by more than `corner_angle` radians — a
-transfinite surface is recorded and matching node counts are written onto the
-boundary curves. For every listed 6-faced volume, a transfinite volume is
-recorded and its surfaces are processed the same way. When `recombine` is
-true, each processed surface also records a 45° recombination constraint.
+`setTransfiniteAutomatic` (`MeshSetTransfiniteFacesAutomatic`). Candidate
+surfaces (all surfaces when `dim_tags` is empty, else the listed surfaces and
+the faces of the listed volumes) must have exactly four bounding curves forming
+one closed loop, no embedded entities, and no corner whose tangent angle exceeds
+`corner_angle` radians. Their curves are grouped into chords of opposite quad
+edges; every curve of a chord receives the chord's mean target node count (the
+count ordinary 1-D meshing would produce under `options`), rounded and raised to
+an even number, with a uniform Progression. A candidate whose opposite curves
+then agree becomes a transfinite surface with the `Right` arrangement (and a 45°
+recombination when `recombine`). Six-faced volumes of Euler characteristic 2
+(all volumes, or the listed ones) whose faces are all transfinite become
+transfinite volumes.
 """
 function set_transfinite_automatic!(m::GeoModel,dim_tags=NTuple{2,Int}[],
-                                    corner_angle=2.35,recombine=true)
+                                    corner_angle=2.35,recombine=true;
+                                    options=nothing)
     caller="set_transfinite_automatic!"
     (dim_tags isa AbstractVector || dim_tags isa Tuple) || throw(ArgumentError(
         "$caller: dim_tags must be a vector or tuple of (dim, tag) pairs"))
     angle=_mesh_attr_finite(corner_angle,caller,"corner_angle")
-    0<angle<=pi || throw(ArgumentError(
-        "$caller: corner_angle must be in (0, pi] radians (got $corner_angle)"))
     recombine isa Bool || throw(ArgumentError(
         "$caller: recombine must be Bool"))
-    selected=Tuple{Int,Int}[]
-    if isempty(dim_tags)
-        for surface in sort!(collect(keys(m.surfaces)))
-            push!(selected,(2,surface))
-        end
-        for volume in sort!(collect(keys(m.volumes)))
-            push!(selected,(3,volume))
-        end
-    else
-        for entry in dim_tags
-            pair=if entry isa Pair
-                (first(entry),last(entry))
-            elseif (entry isa Tuple || entry isa AbstractVector) &&
-                   length(entry)==2
-                (entry[1],entry[2])
-            else
-                throw(ArgumentError(
-                    "$caller: each dim_tags entry must be a (dim, tag) pair"))
-            end
-            dimension=_dimension(pair[1],caller)
-            t=_tag(pair[2],caller,dimension)
-            dimension in (2,3) || throw(ArgumentError(
-                "$caller: dim_tags must list surfaces or volumes"))
-            _mesh_attr_entity!(m,dimension,t,caller)
-            push!(selected,(dimension,t))
-        end
-    end
-    surfaces=Set{Int}()
-    for (dimension,t) in selected
-        if dimension==2
-            push!(surfaces,t)
+    pairs=Tuple{Int,Int}[]
+    for entry in dim_tags
+        pair=if entry isa Pair
+            (first(entry),last(entry))
+        elseif (entry isa Tuple || entry isa AbstractVector) && length(entry)==2
+            (entry[1],entry[2])
         else
-            shells=get(m.volumes,t,nothing)
-            shells===nothing && throw(ArgumentError(
-                "$caller: Volume[$t] has no explicit boundary"))
-            volume_surfaces=Int[]
-            for shell in shells
-                signed_surfaces=get(m.surface_loops,shell,nothing)
-                signed_surfaces===nothing && throw(ErrorException(
-                    "$caller: Volume[$t] references missing Surface " *
-                    "Loop[$shell]; rebuild the model"))
-                append!(volume_surfaces,abs.(signed_surfaces))
-            end
-            length(unique(volume_surfaces))==6 || throw(ArgumentError(
-                "$caller: Volume[$t] is not 6-sided — transfinite volumes " *
-                "require 6 boundary surfaces"))
-            set_transfinite_volume!(m,t)
-            for surface in volume_surfaces
-                push!(surfaces,surface)
-            end
+            throw(ArgumentError(
+                "$caller: each dim_tags entry must be a (dim, tag) pair"))
+        end
+        dimension=_dimension(pair[1],caller)
+        t=_tag(pair[2],caller,dimension)
+        dimension in (2,3) || continue
+        _mesh_attr_entity!(m,dimension,t,caller)
+        push!(pairs,(dimension,t))
+    end
+    candidates=Set{Int}()
+    if isempty(pairs)
+        union!(candidates,keys(m.surfaces))
+    else
+        for (dimension,t) in pairs
+            dimension==2 ? push!(candidates,t) :
+                union!(candidates,_transfinite_automatic_volume_faces(m,t))
         end
     end
-    for surface in sort!(collect(surfaces))
-        _transfinite_automatic_surface!(m,surface,angle,caller) || continue
-        recombine && (m.meshing.recombine[(2,surface)]=45.0)
+    faces=Int[]
+    for surface in sort!(collect(candidates))
+        isempty(get(m.embeds,(2,surface),NTuple{2,Int}[])) || continue
+        _transfinite_automatic_valid_quad(m,surface,angle,caller) &&
+            push!(faces,surface)
+    end
+    opts=options===nothing ? _model_default_mesh1d_options(m,caller) : options
+    target=Dict{Int,Int}()
+    target_points(curve)=get!(target,curve) do
+        _transfinite_automatic_target_points(m,curve,opts,caller)
+    end
+    # build_chords: connected classes of opposite quad edges.
+    edge_faces=Dict{Int,Vector{Int}}()
+    for face in faces, curve in _transfinite_automatic_face_curves(m,face)
+        push!(get!(edge_faces,curve,Int[]),face)
+    end
+    done=Set{Int}()
+    chords=Vector{Vector{Int}}()
+    for start in sort!(collect(keys(edge_faces)))
+        start in done && continue
+        push!(done,start)
+        queue=[start];chord=Int[]
+        while !isempty(queue)
+            curve=popfirst!(queue)
+            push!(chord,curve)
+            for face in edge_faces[curve]
+                opposite=_transfinite_automatic_opposite(m,face,curve)
+                opposite===nothing && continue
+                opposite in done && continue
+                push!(queue,opposite);push!(done,opposite)
+            end
+        end
+        length(chord)>=2 && push!(chords,chord)
+    end
+    for chord in chords
+        average=sum(target_points,chord)/length(chord)
+        n=trunc(Int,average+0.5)
+        n==0 && (n=2)
+        isodd(n) && (n+=1)
+        for curve in chord
+            m.meshing.transfinite_curves[curve]=
+                (num_nodes=n,kind=:progression,coef=1.0,reversed=false)
+        end
+    end
+    for face in faces
+        curves=_transfinite_automatic_face_curves(m,face)
+        counts=[get(m.meshing.transfinite_curves,c,nothing) for c in curves]
+        any(isnothing,counts) && continue
+        n=[c.num_nodes for c in counts]
+        n[1]==n[3] && n[2]==n[4] || continue
+        m.meshing.transfinite_surfaces[face]=(arrangement=:right,corners=Int[])
+        recombine && (m.meshing.recombine[(2,face)]=45.0)
+    end
+    volumes=isempty(pairs) ? sort!(collect(keys(m.volumes))) :
+        Int[t for (dimension,t) in pairs if dimension==3]
+    for volume in volumes
+        surfaces=_transfinite_automatic_volume_faces(m,volume)
+        length(surfaces)==6 &&
+            _transfinite_automatic_euler(m,surfaces)==2 &&
+            all(s->haskey(m.meshing.transfinite_surfaces,s),surfaces) ||
+            continue
+        haskey(m.meshing.transfinite_volumes,volume) ||
+            (m.meshing.transfinite_volumes[volume]=Int[])
     end
     return nothing
 end
 
-# Ordered boundary point tags of a surface's outer loop — signed curve list
-# resolved through `m.curves`, checked for end-to-end connectivity.
-function _transfinite_automatic_loop_points(
-    m::GeoModel,surface::Int,caller::AbstractString)
-    loop_ids=get(m.surfaces,surface,nothing)
-    loop_ids===nothing && throw(ArgumentError(
-        "$caller: unknown Surface[$surface]"))
-    isempty(loop_ids) && return Int[]
-    length(loop_ids)==1 || return Int[]
-    signed_curves=get(m.loops,loop_ids[1],nothing)
-    signed_curves===nothing && throw(ErrorException(
-        "$caller: Surface[$surface] references missing Curve " *
-        "Loop[$(loop_ids[1])]; rebuild the model"))
-    points=Int[]
-    for signed_curve in signed_curves
-        endpoints=get(m.curves,abs(signed_curve),nothing)
-        endpoints===nothing && throw(ErrorException(
-            "$caller: Curve Loop[$(loop_ids[1])] references missing " *
-            "Curve[$(abs(signed_curve))]; rebuild the model"))
-        head,tail=signed_curve>0 ? endpoints : (endpoints[2],endpoints[1])
-        if isempty(points)
-            push!(points,head,tail)
-        else
-            points[end]==head || throw(ArgumentError(
-                "$caller: Surface[$surface] boundary is not a connected loop"))
-            push!(points,tail)
+function _transfinite_automatic_volume_faces(m::GeoModel,volume::Int)
+    out=Int[]
+    for shell in get(m.volumes,volume,Int[])
+        for s in get(m.surface_loops,shell,Int[])
+            abs(s) in out || push!(out,abs(s))
         end
     end
-    length(points)>1 && points[end]==points[1] && pop!(points)
-    return points
+    return out
 end
 
-# Detect 3 or 4 corner vertices on a surface's boundary loop, then record the
-# transfinite surface and matching per-curve node counts.
-function _transfinite_automatic_surface!(
-    m::GeoModel,surface::Int,corner_angle::Float64,caller::AbstractString)
-    points=_transfinite_automatic_loop_points(m,surface,caller)
-    n=length(points)
-    n>=3 || return false
-    coords=NTuple{3,Float64}[]
-    for point in points
-        coord=get(m.points,point,nothing)
-        coord===nothing && throw(ErrorException(
-            "$caller: Surface[$surface] boundary references missing " *
-            "Point[$point]; rebuild the model"))
-        push!(coords,coord)
+# `gf->edges()` in boundary order (all loops), each curve once.
+function _transfinite_automatic_face_curves(m::GeoModel,surface::Int)
+    out=Int[]
+    for loop in get(m.surfaces,surface,Int[]),c in get(m.loops,loop,Int[])
+        abs(c) in out || push!(out,abs(c))
     end
-    # A vertex is a corner when its interior angle does not exceed
-    # `corner_angle` — Gmsh ignores faces whose patch corners are flatter than
-    # the threshold, so ineligible surfaces are skipped, not rejected.
-    corners=Int[]
-    for i in 1:n
-        previous=coords[mod1(i-1,n)]
-        current=coords[i]
-        following=coords[mod1(i+1,n)]
-        incoming=Float64.(current).-Float64.(previous)
-        outgoing=Float64.(following).-Float64.(current)
-        ni=sqrt(sum(v->v*v,incoming));no=sqrt(sum(v->v*v,outgoing))
-        (ni==0.0 || no==0.0) && continue
-        cosine=clamp(sum(incoming.*outgoing)/(ni*no),-1.0,1.0)
-        interior=pi-acos(cosine)
-        interior<=corner_angle && push!(corners,points[i])
+    return out
+end
+
+# Upstream `quad_face_opposite_edge`: the one face curve sharing no endpoint.
+function _transfinite_automatic_opposite(m::GeoModel,face::Int,curve::Int)
+    curves=_transfinite_automatic_face_curves(m,face)
+    length(curves)==4 && curve in curves || return nothing
+    a,b=m.curves[curve]
+    found=nothing
+    for c in curves
+        c==curve && continue
+        x,y=m.curves[c]
+        (x in (a,b) || y in (a,b)) && continue
+        found===nothing || return nothing
+        found=c
     end
-    if n in (3,4)
-        length(corners)==n || return false
-    else
-        length(corners) in (3,4) || return false
+    return found
+end
+
+# V - E + F of the volume's boundary closure (upstream `_eulerCharacteristic`).
+function _transfinite_automatic_euler(m::GeoModel,surfaces)
+    curves=Set{Int}();points=Set{Int}()
+    for s in surfaces, c in _transfinite_automatic_face_curves(m,s)
+        push!(curves,c);union!(points,m.curves[c])
     end
-    # Distribute one node count per patch edge: equal counts on opposite edges
-    # of a quad patch, each edge subdividing its curves proportionally to
-    # length. A patch edge runs from one corner to the next along the loop.
-    nedges=length(corners)
-    edge_lengths=zeros(Float64,nedges)
-    edge_curves=[Int[] for _ in 1:nedges]
-    # Curve `signed_curves[i]` covers vertices `points[i] -> points[i+1]`
-    # because `points` was built in loop order above.
-    signed_curves=m.loops[m.surfaces[surface][1]]
-    corner_set=Set(corners)
-    corner_positions=[i for i in 1:n if points[i] in corner_set]
-    for k in 1:nedges
-        start=corner_positions[k]
-        stop=corner_positions[mod1(k+1,nedges)]
-        length_acc=0.0
-        i=start
-        while i!=stop
-            a=coords[i];b=coords[mod1(i+1,n)]
-            length_acc+=sqrt(sum((Float64.(b).-Float64.(a)).^2))
-            # the curve covering vertex i -> i+1 is the k-th curve index in loop order
-            push!(edge_curves[k],signed_curves[i])
-            i=mod1(i+1,n)
+    return length(points)-length(curves)+length(surfaces)
+end
+
+function _transfinite_automatic_tangent(m::GeoModel,curve::Int,at_end::Bool,
+                                        caller::AbstractString)
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    t=at_end ? t1 : t0
+    d=try
+        model_derivative(m,1,curve,[t])
+    catch err
+        err isa InterruptException && rethrow()
+        h=(t1-t0)*1e-6
+        p=_model_curve_point(m,curve,at_end ? t-h : t,caller)
+        q=_model_curve_point(m,curve,at_end ? t : t+h,caller)
+        [(q[k]-p[k])/h for k in 1:3]
+    end
+    n=hypot(d[1],d[2],d[3])
+    return n>0 ? (d[1]/n,d[2]/n,d[3]/n) : (0.0,0.0,0.0)
+end
+
+# Upstream `faceIsValidQuad`: four curves closing one loop, every corner
+# tangent angle at most `threshold`.
+function _transfinite_automatic_valid_quad(m::GeoModel,surface::Int,
+                                           threshold::Float64,caller::AbstractString)
+    curves=_transfinite_automatic_face_curves(m,surface)
+    length(curves)==4 || return false
+    ends=[m.curves[c] for c in curves]
+    any(e->e[1]==e[2],ends) && return false
+    loop=Int[ends[1][1],ends[1][2]];used=falses(4);used[1]=true
+    while length(loop)<4
+        k=findfirst(i->!used[i] && loop[end] in ends[i],1:4)
+        k===nothing && return false
+        used[k]=true
+        push!(loop,ends[k][1]==loop[end] ? ends[k][2] : ends[k][1])
+    end
+    k=findfirst(!,used)
+    Set(ends[k])==Set((loop[4],loop[1])) || return false
+    threshold>0 || return true
+    for i in 1:4
+        v1=loop[i];v2=loop[mod1(i+1,4)];v3=loop[mod1(i+2,4)]
+        t21=(0.0,0.0,0.0);t23=(0.0,0.0,0.0)
+        for c in curves
+            a,b=m.curves[c]
+            if (a,b)==(v1,v2)
+                t=_transfinite_automatic_tangent(m,c,true,caller);t21=(-t[1],-t[2],-t[3])
+            elseif (a,b)==(v2,v1)
+                t21=_transfinite_automatic_tangent(m,c,false,caller)
+            elseif (a,b)==(v2,v3)
+                t23=_transfinite_automatic_tangent(m,c,false,caller)
+            elseif (a,b)==(v3,v2)
+                t=_transfinite_automatic_tangent(m,c,true,caller);t23=(-t[1],-t[2],-t[3])
+            end
         end
-        edge_lengths[k]=length_acc
+        cosine=clamp(t21[1]*t23[1]+t21[2]*t23[2]+t21[3]*t23[3],-1.0,1.0)
+        acos(cosine)>threshold && return false
     end
-    lc=Inf
-    for point in points
-        # `point_size` stores 0.0 for unsized vertices (upstream `!lc` →
-        # MAX_LC); a stored zero is not a constraining size.
-        s=get(m.point_size,point,0.0)
-        s!=0.0 && (lc=min(lc,s))
-    end
-    isfinite(lc) || (lc=1.0)
-    counts=[max(2,round(Int,edge_lengths[k]/lc)+1) for k in 1:nedges]
-    if nedges==4
-        opposite=max(counts[1],counts[3])
-        counts[1]=counts[3]=opposite
-        opposite=max(counts[2],counts[4])
-        counts[2]=counts[4]=opposite
-    end
-    for k in 1:nedges
-        curves_on_edge=edge_curves[k]
-        isempty(curves_on_edge) && continue
-        share=max(2,round(Int,counts[k]/length(curves_on_edge)))
-        for signed_curve in curves_on_edge
-            curve=abs(signed_curve)
-            m.meshing.transfinite_curves[curve]=
-                (num_nodes=share,kind=:progression,coef=1.0,reversed=false)
-        end
-    end
-    m.meshing.transfinite_surfaces[surface]=
-        (arrangement=:left,corners=corners)
     return true
+end
+
+# Upstream `meshGEdgeTargetNumberOfPoints`: the node count the curve's current
+# 1-D meshing settings produce before point filtering.
+function _transfinite_automatic_target_points(m::GeoModel,curve::Int,options,
+                                              caller::AbstractString)
+    spec=get(m.meshing.transfinite_curves,curve,nothing)
+    spec===nothing ||
+        return _flexible_transfinite_nodes(m,spec.num_nodes,curve,caller)
+    a,b=m.curves[curve]
+    t0,t1=_model_curve_param_bounds(m,curve,caller)
+    params=_model_curve_grade_params(m,curve,t0,t1,options,caller;
+                                     _skip_filter=true)
+    return length(params)
 end
 
 # Return the `DiscreteEntity` node/element record for `(dim, tag)` — the

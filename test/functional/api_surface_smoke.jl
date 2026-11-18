@@ -76,12 +76,10 @@ let api=Tessella.API
         end
 
         # Transfinite-automatic on a unit quad with explicit corner sizes:
-        # recombining surfaces yields a conforming 5x5 grid; parametric size
-        # points insert a pinned node; a curve compound meshes two collinear
-        # curves as one. (Corner sizes are required because unsized points —
-        # point_size==0.0, which is what geo/occ synchronization writes for
-        # every default vertex — currently trip an InexactError inside
-        # _transfinite_automatic_surface!; see the audit report.)
+        # each chord takes its target node count (5 at size 0.25) raised to
+        # an even 6, as Gmsh 4.15.2 does, so recombination yields a 6x6
+        # grid; parametric size points insert a pinned node; a curve compound
+        # meshes two collinear curves as one.
         api.initialize()
         geo=api.model.geo
         t1=geo.add_point(0.0,0.0,0.0);t2=geo.add_point(1.0,0.0,0.0)
@@ -96,7 +94,7 @@ let api=Tessella.API
         mesh=api.mesh.get()
         @test api.rec_dimension_max(mesh)==2
         ttags,_,_=api.mesh.get_nodes()
-        @test length(ttags)==25
+        @test length(ttags)==36
         types,elements,nodes=api.mesh.get_elements()
         @test any(==(3),types)
 

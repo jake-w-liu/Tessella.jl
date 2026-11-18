@@ -8060,8 +8060,11 @@ end
 function _set_transfinite_automatic(dim_tags=(),corner_angle=2.35,
                                     recombine=true)
     lock(STATE_LOCK) do
-        set_transfinite_automatic!(_model_locked(),dim_tags,corner_angle,
-                                   recombine)
+        m=_model_locked()
+        # Chord node counts follow the current 1-D size settings, like
+        # upstream `meshGEdgeTargetNumberOfPoints`.
+        set_transfinite_automatic!(m,dim_tags,corner_angle,recombine;
+            options=_session_mesh1d_options(m,"API.mesh.set_transfinite_automatic"))
     end
     return nothing
 end
