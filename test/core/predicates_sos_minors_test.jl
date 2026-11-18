@@ -4,6 +4,8 @@
 # points: ~110 µs).  Minors that keep only Float64 coordinate columns are now
 # decided by the exact Float64 predicates.  The signs must equal the rational
 # predicates (whose minors all take the BigInt path) on every degenerate input.
+# In its own module: the suite includes every test file into Main.
+module PredicatesSosMinorsTests
 using Test
 using Tessella.Predicates
 import Tessella.Predicates as P
@@ -42,4 +44,5 @@ import Tessella.Predicates as P
     orient2_sos((0.0, 0.0), (1.0, 1.0), (2.0, 2.0), 3, 1, 2)
     Base.JLOptions().compile_enabled != 3 &&
         @test _o2sos_alloc((0.0, 0.0), (1.0, 1.0), (2.0, 2.0)) == 0
+end
 end

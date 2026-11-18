@@ -3,6 +3,8 @@
 # thousands of bytes per call, which dominated Delaunay time on cospherical input).
 # Signs must equal the independent rational oracle; the exact-zero path must not
 # allocate.
+# In its own module: the suite includes every test file into Main.
+module PredicatesExpansionTests
 using Test
 using Tessella.Predicates
 import Tessella.Predicates as P
@@ -54,4 +56,5 @@ using .Oracles
     @test incircle((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)) == 0
     Base.JLOptions().compile_enabled != 3 &&
         @test _ic_alloc((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)) == 0
+end
 end

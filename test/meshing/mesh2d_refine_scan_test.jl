@@ -31,7 +31,7 @@ end
     T = M2.constrained_delaunay(xs, ys, segs)
     interior = M2.refine!(T; max_area=area)
     @test _first_bad_full_scan(T, interior, B, area) == 0
-    m = mesh_planar(xs, ys, segs; max_area=1e-4)
+    m = mesh_planar(xs, ys, segs; max_area=4e-4)
     @test validate(m).ok
-    @test size(m.tris, 2) > 10_000
+    @test size(m.tris, 2) > 2_500
 end

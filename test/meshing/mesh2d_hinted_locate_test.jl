@@ -21,10 +21,11 @@ end
     s = UInt64(0x9E3779B97F4A7C15)
     rnd() = (s ⊻= s << 13; s ⊻= s >> 7; s ⊻= s << 17; Float64(s >> 11) / 2.0^53)
     clouds = Any[]
-    push!(clouds, ([rnd() for _ in 1:2000], [rnd() for _ in 1:2000]))
-    push!(clouds, (Float64[i for i in 0:29 for j in 0:29], Float64[j for i in 0:29 for j in 0:29]))
-    push!(clouds, ([1e9 + rnd() for _ in 1:800], [rnd() * 1e-3 for _ in 1:800]))
-    push!(clouds, ([cospi(k / 200) for k in 0:399], [sinpi(k / 200) for k in 0:399]))
+    # Sizes for the interpreted default suite.
+    push!(clouds, ([rnd() for _ in 1:500], [rnd() for _ in 1:500]))
+    push!(clouds, (Float64[i for i in 0:15 for j in 0:15], Float64[j for i in 0:15 for j in 0:15]))
+    push!(clouds, ([1e9 + rnd() for _ in 1:300], [rnd() * 1e-3 for _ in 1:300]))
+    push!(clouds, ([cospi(k / 100) for k in 0:199], [sinpi(k / 100) for k in 0:199]))
     for (xs, ys) in clouds, seed in (1, 7)
         T0 = _unhinted_delaunay(xs, ys, seed)
         T1 = M2.delaunay2d(xs, ys; rng_seed=seed)

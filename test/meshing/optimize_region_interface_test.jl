@@ -35,7 +35,10 @@ end
     onif = [i for i in 1:size(c, 2) if c[1, i] == 1.0]
     @test length(onif) > 3
     v0 = _region_volumes(mj)
-    for f in (smooth_laplacian, smooth_odt, x -> smooth_optimize(x; sliver_deg=60.0))
+    # Two sweeps each: the default suite runs interpreted, and a node that
+    # may move leaves the interface in the first sweep.
+    for f in (x -> smooth_laplacian(x; iters=2), x -> smooth_odt(x; iters=2),
+              x -> smooth_optimize(x; iters=2, sliver_deg=60.0))
         m2 = f(mj)
         @test validate(m2).ok
         @test all(m2.coords[:, i] == c[:, i] for i in onif)

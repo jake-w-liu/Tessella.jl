@@ -2,6 +2,8 @@
 # that underflows is later multiplied by a large factor (a z-difference or a lift),
 # so its lost bits can dominate a determinant whose computed value and permanent
 # are comfortably normal; the old filters then certified the wrong sign.
+# In its own module: the suite includes every test file into Main.
+module PredicatesUnderflowTests
 using Test
 using Tessella.Predicates
 include("oracles.jl")
@@ -57,4 +59,5 @@ using .Oracles
         insphere(p3...) == oracle_insphere(p3...) || (bad += 1)
     end
     @test bad == 0
+end
 end
