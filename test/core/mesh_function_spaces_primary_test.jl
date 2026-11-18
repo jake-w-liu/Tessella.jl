@@ -1,3 +1,5 @@
+# The suite includes every test file into Main; this file keeps its aliases to itself.
+module FunctionSpacesPrimaryTests
 using Test
 using Tessella
 import Tessella.MeshFunctionSpaces as FS
@@ -28,4 +30,5 @@ import Tessella.MeshFunctionSpaces as FS
                   FS.mesh_basis_functions(primary, points[primary], space, every)
         end
     end
+end
 end

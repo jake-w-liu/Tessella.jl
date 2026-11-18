@@ -1,3 +1,5 @@
+# The suite includes every test file into Main; this file keeps its aliases to itself.
+module SphereRecoveryTests
 using Test
 using Tessella
 import Tessella.API as A
@@ -44,4 +46,5 @@ end
         @test fill.coords[:, 1:size(coords, 2)] == coords
         @test size(fill.coords, 2) - size(coords, 2) <= 4
     end
+end
 end

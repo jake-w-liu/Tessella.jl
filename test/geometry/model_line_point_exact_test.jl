@@ -1,3 +1,5 @@
+# The suite includes every test file into Main; this file keeps its aliases to itself.
+module LinePointExactTests
 using Test
 using Random
 using Tessella
@@ -69,4 +71,5 @@ end
     end
     @test M._model_line_point_fast(m, 1, 0.3) !== nothing
     @test M._model_line_point_fast(m, 2, 0.9453125) === nothing
+end
 end

@@ -1,3 +1,5 @@
+# The suite includes every test file into Main; this file keeps its aliases to itself.
+module PcurveSplineLocalTests
 using Test
 using Random
 using Tessella
@@ -51,4 +53,5 @@ end
     knots = vcat(fill(0.0, p + 1), [0.25, 0.5, 0.75], fill(1.0, p + 1))
     cps = [(randn(rng), randn(rng)) for _ in 1:length(knots)-p-1]
     @test isequal(M._occ_pcurve_d2((spl2d=(knots, p, cps),), 0.4), pcurve_reference(knots, p, cps, 0.4))
+end
 end
