@@ -12568,7 +12568,11 @@ function _geo_exec_command!(m::GeoModel,word::AbstractString,
         Base.inferencebarrier(_geo_sync_physical_view_if_changed!)(m,context)
         Base.inferencebarrier(_geo_exec_include!)(m,arg,context,caller,allocator_state)
     elseif word=="Include"
-        Base.inferencebarrier(_geo_exec_include!)(m,arg,context,caller,allocator_state)
+        # `tInclude` always runs `ParseFile`: the file parses as `.geo`
+        # whatever its extension (e.g. `machine.i1`); only `Merge`
+        # dispatches on the extension.
+        Base.inferencebarrier(_geo_exec_include!)(m,arg,context,caller,allocator_state;
+                                                  as_geo=true)
     elseif word=="Save"
         Base.inferencebarrier(_geo_exec_save!)(m,arg,context,caller)
     elseif word=="Print"
@@ -13149,7 +13153,7 @@ end
 # their mesh into the current mid-file mesh.
 function _geo_exec_include!(m::GeoModel,path::AbstractString,
                             context::_GeoNumericContext,caller::AbstractString,
-                            allocator_state)
+                            allocator_state;as_geo::Bool=false)
     file=_geo_fix_relative_path(context.file_name,path)
     if !isfile(file)
         # `GModel::readGEO`/the file dispatcher reports `Msg::Error` and
@@ -13157,7 +13161,7 @@ function _geo_exec_include!(m::GeoModel,path::AbstractString,
         _geo_msg_error!(context,"Unable to open file '$path'")
         return nothing
     end
-    ext=lowercase(splitext(file)[2])
+    ext=as_geo ? ".geo" : lowercase(splitext(file)[2])
     if ext==".pos"
         # `Merge`/`Include` of a `.pos` file appends its views to the model's
         # view list (upstream `PView` load order); `Background Mesh View[i]`
