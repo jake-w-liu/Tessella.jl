@@ -54,6 +54,21 @@ const IOA_QUAD_TRI_MSH4 = """
             @test length(identities.cell_events) == 2
         end
 
+        @testset "repeated opens give independent models" begin
+            # API.open adopts the staged .msh model without a deep copy; two
+            # opens of one file must still not share mutable model state.
+            IOA_API.initialize()
+            try
+                IOA_API.open(src)
+                IOA_API.open(src)
+                IOA_API.model.set_entity_name(2, 1, "second")
+                IOA_API.model.set_current(IOA_API.model.list()[1])
+                @test IOA_API.model.get_entity_name(2, 1) == ""
+            finally
+                IOA_API.finalize()
+            end
+        end
+
         @testset "truncated binary scalars still raise a clear error" begin
             bin = joinpath(dir, "bin.msh")
             m = IOA_E.read_mixed_msh(src)

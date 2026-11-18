@@ -96,7 +96,10 @@ function _model_export_mesh(model,source,class,version,save_all,caller)
     end
     source_tags=_model_export_source_tags(source,class,caller)
     node_map=Int32[];cell_map=Int32[]
-    if source_tags!==nothing
+    # The UID maps only translate retained periodic links and data sections;
+    # skip building them (two Dicts over every node and cell) when none exist.
+    retained=source isa MixedMesh && (!isempty(source.periodic_links) || !isempty(source.data_sections))
+    if source_tags!==nothing && retained
         positions=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags[rows]))
         cell_positions=Dict(uid=>Int32(index) for (index,uid) in enumerate(reduce(vcat,uids;init=UInt64[])))
         node_map=Int32[get(positions,uid,0) for uid in source_tags.nodes]

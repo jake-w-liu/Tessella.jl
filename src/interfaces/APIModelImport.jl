@@ -224,8 +224,10 @@ function _model_import_prepare(path,dimension;legacy=false)
         Base.invokelatest(_model_import_execute_geo,path,dimension,options,diagnostics;
             legacy,view_receipt)
     end
+    # A staged `.msh` model is built fresh by `_geo_stage_mesh_file` and aliased
+    # nowhere else, so the plan can adopt it without a deep copy of its mesh.
     return _model_import_prepare_result(result,path,options,diagnostics;legacy,caller,
-        geo_views=view_receipt[])
+        geo_views=view_receipt[],detached_result=extension==".msh")
 end
 
 function _model_import_prepare_result(result,path,options,diagnostics;legacy=false,
