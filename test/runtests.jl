@@ -241,6 +241,7 @@ include("functional/fixtures.jl")
         "geometry/geo_extend_field_options_test.jl",
         "interfaces/cli_unrolled_details_test.jl",
         "geometry/geo_color_option_read_test.jl",
+        "geometry/geo_field_string_expr_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

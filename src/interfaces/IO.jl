@@ -9119,7 +9119,21 @@ function _geo_normalize_field_option(raw::AbstractString,name_raw::AbstractStrin
                                      context::_GeoNumericContext,caller::AbstractString)
     name=String(name_raw);caller_string=String(caller)
     value=String(strip(raw))
-    name in _GEO_FIELD_RAW_OPTIONS && return value
+    if name in _GEO_FIELD_RAW_OPTIONS
+        # `Field[i].F = StringExpr`: a `Sprintf(...)`/`StrCat(...)`/string
+        # variable evaluates to its text (tutorials/t10.geo); a quoted
+        # literal is stored as written.
+        (startswith(value,"\"") || startswith(value,"'")) && return value
+        evaluated=try
+            _geo_eval_string(value,context,caller_string)
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa _GeoSyntaxAbort) || rethrow()
+            nothing
+        end
+        evaluated===nothing && return value
+        return "\""*evaluated*"\""
+    end
     if name in _GEO_FIELD_FLOAT_LIST_OPTIONS || name in _GEO_FIELD_INTEGER_LIST_OPTIONS
         list_source,multiplier=_geo_braced_list_source(
             value,context,caller_string;allow_multiplier=false)
