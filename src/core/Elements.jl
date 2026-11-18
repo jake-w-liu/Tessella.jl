@@ -5654,11 +5654,11 @@ function _finish_mixed_read(acc,is_v4::Bool,source_identities=nothing;
         source_identities[]=(node_tags=node_tags,
             element_tags=deepcopy(external_element_tags),is_v4=is_v4,
             element_lookup_primed=element_lookup_primed,node_lookup_primed=node_lookup_primed,
-            cell_events=Tuple(acc.source_cell_events),factory_events=acc.factory===nothing ? nothing :
+            cell_events=copy(acc.source_cell_events),factory_events=acc.factory===nothing ? nothing :
             (initial_node_max=acc.factory.initial.node_max,
              initial_element_max=acc.factory.initial.element_max,
              final_node_max=acc.factory.node_max,final_element_max=acc.factory.element_max,
-             node_events=Tuple(acc.factory.node_events),cell_events=Tuple(acc.factory.cell_events)))
+             node_events=copy(acc.factory.node_events),cell_events=copy(acc.factory.cell_events)))
     end
     data=is_v4 ? MixedEntityData(acc.entities;
         node_entities=acc.node_entities,

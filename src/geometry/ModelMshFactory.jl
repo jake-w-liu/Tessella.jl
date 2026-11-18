@@ -98,7 +98,7 @@ function _model_mesh_factory_events(mesh,identities,caller)
     end
     isempty(events) && state.node_max==factory.final_node_max &&
         state.element_max==factory.final_element_max &&
-        identities.cell_events==Tuple((msh,owner,raw) for (msh,owner,raw,_) in factory.cell_events) ||
+        identities.cell_events==[(msh,owner,raw) for (msh,owner,raw,_) in factory.cell_events] ||
         throw(ArgumentError("$caller: native constructor events or final counters disagree"))
     return factory
 end
