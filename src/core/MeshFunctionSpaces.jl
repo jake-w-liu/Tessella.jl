@@ -803,10 +803,18 @@ function mesh_basis_functions(element_type_value,local_coord,
             length(orientations),space.kind===:grad_lagrange,caller)
         return Int32(space.components),result,Int32(total_orientations)
     end
+    # What remains are the vertex and Whitney functions of the reference
+    # Line, Triangle and Tetrahedron. They belong to the family, not to the
+    # element's geometric order: a 3-node Line has the two functions of the
+    # 2-node Line. The tables below are indexed by the primary type, and a
+    # higher-order type used to select the Tetrahedron's four functions,
+    # which overran the result sized for its own family.
+    element_type=family===:lin ? 1 : family===:tri ? 2 : family===:tet ? 4 :
+        throw(ArgumentError("$caller: element family $family has no first-order simplex basis"))
     gradients=_reference_gradients(element_type)
     pairs=_canonical_edge_pairs(element_type)
     cursor=0
-    @inbounds for orientation in orientations
+    for orientation in orientations
         permutation=space.hierarchical ?
             _orientation_permutation(_vertex_count(element_type),orientation) :
             Int[]
@@ -850,6 +858,8 @@ function mesh_basis_functions(element_type_value,local_coord,
             end
         end
     end
+    cursor==length(result) || error(
+        "MeshFunctionSpaces: internal first-order result length mismatch")
     return Int32(space.components),result,Int32(total_orientations)
 end
 

@@ -42,6 +42,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_sphere_recovery_test.jl",
         "geometry/occ_pcurve_spline_local_test.jl",
         "geometry/model_line_point_exact_test.jl",
+        "core/mesh_function_spaces_primary_test.jl",
         "meshing/optimize_tri_centroid_range_test.jl",
         "interfaces/api_hybrid_winslow_allocation_test.jl",
         "core/transform_axis_scale_test.jl",
