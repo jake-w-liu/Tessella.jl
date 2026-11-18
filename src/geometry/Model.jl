@@ -5820,31 +5820,46 @@ function _model_surface_projection(
     third=plane_third::NTuple{3,Float64}
     # The exact predicate certifies dyadically coplanar input. A plane that
     # went through a rotation, an oblique axis or a trigonometric sector
-    # angle carries rounding noise of a few ulps of its coordinates on every
-    # vertex, which no canonicalization removes; such a point is still on the
-    # plane. Admit an offset within that noise floor — relative to the
-    # coordinate magnitude (cancellation far from the origin) and to the
-    # boundary's own extent — and keep rejecting genuine warp.
-    normal=((second[2]-anchor[2])*(third[3]-anchor[3])-
-            (second[3]-anchor[3])*(third[2]-anchor[2]),
-            (second[3]-anchor[3])*(third[1]-anchor[1])-
-            (second[1]-anchor[1])*(third[3]-anchor[3]),
-            (second[1]-anchor[1])*(third[2]-anchor[2])-
-            (second[2]-anchor[2])*(third[1]-anchor[1]))
-    normal_length=sqrt(normal[1]^2+normal[2]^2+normal[3]^2)
-    magnitude=0.0;extent=0.0
-    for coordinate in coordinates
-        magnitude=max(magnitude,abs(coordinate[1]),abs(coordinate[2]),
-                      abs(coordinate[3]))
-        extent=max(extent,abs(coordinate[1]-anchor[1]),
-                   abs(coordinate[2]-anchor[2]),abs(coordinate[3]-anchor[3]))
-    end
-    noise=max(256eps(Float64)*magnitude,1e-11*extent)
+    # angle (a rotated box, the cap of a tilted cylinder, a Boolean vertex
+    # inherited from a sphere pole) carries rounding noise of a few ulps of
+    # its coordinates on every vertex, which no canonicalization removes;
+    # such a point is still on the plane. Admit an offset within that noise
+    # floor, relative to the coordinate magnitude (cancellation far from the
+    # origin) and to the boundary's own extent, and keep rejecting genuine
+    # warp. The offset is measured against a well-conditioned plane, the
+    # widest triple reachable from the anchor, rather than the fit triple.
+    tolerant=nothing
     for (index,coordinate) in pairs(coordinates)
         orient3(anchor,second,third,coordinate)==0 && continue
-        offset=abs(normal[1]*(coordinate[1]-anchor[1])+
-                   normal[2]*(coordinate[2]-anchor[2])+
-                   normal[3]*(coordinate[3]-anchor[3]))/normal_length
+        if tolerant===nothing
+            far=anchor;far_distance=0.0;magnitude=0.0;extent=0.0
+            for candidate in coordinates
+                distance=hypot(candidate[1]-anchor[1],candidate[2]-anchor[2],
+                               candidate[3]-anchor[3])
+                distance>far_distance && (far=candidate;far_distance=distance)
+                magnitude=max(magnitude,abs(candidate[1]),abs(candidate[2]),
+                              abs(candidate[3]))
+                extent=max(extent,abs(candidate[1]-anchor[1]),
+                           abs(candidate[2]-anchor[2]),abs(candidate[3]-anchor[3]))
+            end
+            u=(far[1]-anchor[1],far[2]-anchor[2],far[3]-anchor[3])
+            normal=(0.0,0.0,0.0);normal_length=0.0
+            for candidate in coordinates
+                v=(candidate[1]-anchor[1],candidate[2]-anchor[2],
+                   candidate[3]-anchor[3])
+                n=(u[2]*v[3]-u[3]*v[2],u[3]*v[1]-u[1]*v[3],
+                   u[1]*v[2]-u[2]*v[1])
+                length_n=hypot(n...)
+                length_n>normal_length && (normal=n;normal_length=length_n)
+            end
+            noise=max(256eps(Float64)*magnitude,1e-11*extent,1e-12*max(1.0,magnitude))
+            tolerant=(normal,normal_length,noise)
+        end
+        normal,normal_length,noise=tolerant
+        offset=normal_length>0 && isfinite(normal_length) ?
+            abs(normal[1]*(coordinate[1]-anchor[1])+
+                normal[2]*(coordinate[2]-anchor[2])+
+                normal[3]*(coordinate[3]-anchor[3]))/normal_length : Inf
         (isfinite(offset) && offset<=noise) || throw(ArgumentError(
             "$caller: Point[$(point_tags[index])] is not coplanar with " *
             "Surface[$surface]"))
