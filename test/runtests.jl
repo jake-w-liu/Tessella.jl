@@ -204,6 +204,7 @@ include("functional/fixtures.jl")
         "interfaces/msh2_type_order_test.jl",
         "geometry/extrude_gmsh_parity_regressions_test.jl",
         "structured/transfinite_volume_gmsh_corners_test.jl",
+        "structured/transfinite_elliptic_smoothing_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

@@ -273,6 +273,7 @@ function mesh_transfinite_quad_patch(side1,
                                      allow_warped::Bool=false,
                                      project_plane=nothing,
                                      interpolate=nothing,
+                                     smoothing::Integer=0,
                                      max_nodes=_DEFAULT_MAX_NODES,
                                      max_quadrangles=_DEFAULT_MAX_QUADRANGLES)::MixedMesh
     for (index,side) in enumerate((side1,side2,side3,side4))
@@ -337,6 +338,7 @@ function mesh_transfinite_quad_patch(side1,
         allow_warped=allow_warped,
         project_plane=project_plane,
         interpolate=interpolate,
+        smoothing=smoothing,
         max_nodes=node_limit,
         max_triangles=certification_triangles)
     (nnodes(certified) == nodes && nsegs(certified) == segments) ||

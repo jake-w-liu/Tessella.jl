@@ -91,6 +91,32 @@ function Transfinite._interpolate_point(grid::_ModelTransfiniteRuledGrid,u,v,i::
     return _ruled_surface_point(grid.model,grid.surface,uv[1],uv[2],grid.caller)
 end
 
+# Upstream smooths a ruled transfinite face in its (u,v) chart: boundary
+# rows keep their Curve parameters, interior rows start from the Coons UV
+# the grid evaluated, and the smoothed UV is re-evaluated on the surface.
+function Transfinite._smooth_interpolated!(grid::_ModelTransfiniteRuledGrid,coords,
+                                           width::Int,L::Int,H::Int,n::Int)
+    bottom,right,back_top,back_left=grid.sides
+    length(bottom)==L+1 && length(right)==H+1 && length(back_top)==L+1 &&
+        length(back_left)==H+1 && length(grid.parameters)==(L-1)*(H-1) ||
+        throw(ArgumentError("$(grid.caller): ruled Surface smoothing loses its UV rows"))
+    uv=Matrix{Float64}(undef,2,size(coords,2))
+    for j in 0:H,i in 0:L
+        p=j==0 ? bottom[i+1] : i==L ? right[j+1] : j==H ? back_top[L-i+1] :
+            i==0 ? back_left[H-j+1] : grid.parameters[(i,j)]
+        row=i+1+j*width
+        uv[1,row]=p[1];uv[2,row]=p[2]
+    end
+    Transfinite._elliptic_smooth!(uv,width,L,H,n)
+    for j in 1:H-1,i in 1:L-1
+        row=i+1+j*width
+        grid.parameters[(i,j)]=(uv[1,row],uv[2,row])
+        point=_ruled_surface_point(grid.model,grid.surface,uv[1,row],uv[2,row],grid.caller)
+        coords[1,row]=point[1];coords[2,row]=point[2];coords[3,row]=point[3]
+    end
+    return true
+end
+
 _model_transfinite_ruled_parameters(grid,mesh,L,H,caller)=nothing
 function _model_transfinite_ruled_parameters(grid::_ModelTransfiniteRuledGrid,mesh,L,H,caller)
     length(grid.parameters)==(L-1)*(H-1) || throw(ArgumentError(

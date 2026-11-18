@@ -7920,8 +7920,8 @@ end
 # many boundary-preserving Laplacian iterations; `reverse` flips triangle
 # orientation, matching Gmsh's `setReverse`/`setSmoothing` semantics.
 function _consume_surface_attributes(m::GeoModel,t::Int,mesh,
-                                     caller::AbstractString)
-    iterations=get(m.meshing.smoothing,(2,t),0)
+                                     caller::AbstractString;laplacian::Bool=true)
+    iterations=laplacian ? get(m.meshing.smoothing,(2,t),0) : 0
     iterations>0 && (mesh=_laplacian_smooth_surface(mesh,iterations,caller,t))
     mesh=_model_orientation_canonical_plane(m,t,mesh,caller)
     get(m.meshing.reverse,(2,t),false) &&
@@ -9426,6 +9426,15 @@ function _transfinite_quad_sphere_eval(m::GeoModel,t::Int,signed_curves,frame,
         _transfinite_quad_frame_parameter(du[2],dv[2],u,v))
 end
 
+# Upstream `meshGFaceTransfinite` elliptic-smoothing count: the surface's
+# `Smoother`/`setSmoothing` value when set, else `Mesh.Smoothing - 1` (the
+# default `Mesh.Smoothing = 1` applies none).
+function _transfinite_surface_smoothing(m::GeoModel,t::Int)
+    stored=get(m.meshing.smoothing,(2,t),nothing)
+    stored===nothing || return max(Int(stored),0)
+    return max(Int(m.meshing.native_smoothing)-1,0)
+end
+
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    param_sizes::Dict{Tuple{Int,Float64},
                                                     Float64},
@@ -9500,7 +9509,9 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
             Mesh(kernel.coords;tris=kernel.tris)
         _transfinite_tri_frame_reversed(m,signed_curves,junctions,caller,t) &&
             (mesh=_reversed_surface_mesh(mesh,caller,t))
-        mesh=_consume_surface_attributes(m,t,mesh,caller)
+        # Upstream never Laplace-smooths a transfinite face; its three-corner
+        # `transfinite3` smoother is not implemented here.
+        mesh=_consume_surface_attributes(m,t,mesh,caller;laplacian=false)
         return _return_surface_production && _mesh_input!==nothing ?
             _model_transfinite_surface_production(m,t,kernel,mesh,_mesh_input,
                 _mesh_node_high_water,param_sizes,caller;size_field,_geometry_points,
@@ -9517,27 +9528,30 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         _model_transfinite_ruled_grid(m,t,signed_curves,junctions,curve_points,_mesh_input,caller) :
         _transfinite_quad_sphere_eval(m,t,signed_curves,junctions,sphere_center,caller)
     bottom,right,top,left=curve_points
+    smoothing=_transfinite_surface_smoothing(m,t)
     kernel=if _model_surface_recombined(m,t)
         mesh_transfinite_quad_patch(bottom,right,top,left;
                                      side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                                     arrangement=spec.arrangement,
                                     allow_warped=allow_warped,
                                     project_plane=project_plane,
-                                    interpolate=interpolate)
+                                    interpolate=interpolate,
+                                    smoothing=smoothing)
     else
         mesh_transfinite_patch(bottom,right,top,left;
                                      side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
                                arrangement=spec.arrangement,
                                allow_warped=allow_warped,
                                project_plane=project_plane,
-                               interpolate=interpolate)
+                               interpolate=interpolate,
+                               smoothing=smoothing)
     end
     mesh=kernel isa MixedMesh ?
         _surface_part_strip(kernel,caller,t) :
         Mesh(kernel.coords;tris=kernel.tris)
     _transfinite_quad_frame_reversed(m,signed_curves,junctions,caller,t) &&
         (mesh=_reversed_surface_mesh(mesh,caller,t))
-    mesh=_consume_surface_attributes(m,t,mesh,caller)
+    mesh=_consume_surface_attributes(m,t,mesh,caller;laplacian=false)
     L=length(bottom)-1;H=length(right)-1
     birth_rows=Int32[i+1+j*(L+1) for i in 0:L for j in 0:H]
     producer_parameters=_model_transfinite_ruled_parameters(interpolate,mesh,L,H,caller)

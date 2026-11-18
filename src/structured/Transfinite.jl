@@ -899,11 +899,43 @@ function _validate_boundary_postcondition(mesh::Mesh)
     return nothing
 end
 
+# Gmsh `meshGFaceTransfinite` elliptic smoother for four-corner grids: `n`
+# in-place Gauss-Seidel sweeps over the interior nodes, `i` outer and `j`
+# inner, with the Winslow coefficients alpha/beta/gamma of each node computed
+# from its current neighbors. Boundary nodes stay fixed.
+function _elliptic_smooth!(coords::Matrix{Float64},width::Int,L::Int,H::Int,
+                           n::Int)
+    at(i,j)=i+1+j*width
+    @inbounds for _ in 1:n,i in 1:L-1,j in 1:H-1
+        c=at(i,j);n1=at(i,j+1);s1=at(i,j-1);e1=at(i+1,j);w1=at(i-1,j)
+        ne=at(i+1,j+1);nw=at(i-1,j+1);se=at(i+1,j-1);sw=at(i-1,j-1)
+        alpha=0.0;gamma=0.0;beta=0.0
+        for k in axes(coords,1)
+            dj=coords[k,n1]-coords[k,s1];di=coords[k,e1]-coords[k,w1]
+            alpha+=dj*dj;gamma+=di*di;beta+=di*dj
+        end
+        alpha*=0.25;gamma*=0.25;beta*=0.0625
+        for k in axes(coords,1)
+            coords[k,c]=0.5*(alpha*(coords[k,e1]+coords[k,w1])+
+                             gamma*(coords[k,n1]+coords[k,s1])-
+                             2.0*beta*(coords[k,ne]-coords[k,nw]-
+                                       coords[k,se]+coords[k,sw]))/
+                        (alpha+gamma)
+        end
+    end
+    return coords
+end
+
+# Elliptic smoothing of an `interpolate`-evaluated patch happens in that
+# surface's own (u,v) chart; an interpolator that exposes its chart
+# overrides this and rewrites the interior coordinates. Others stay unsmoothed.
+_smooth_interpolated!(interpolate,coords,width::Int,L::Int,H::Int,n::Int)=false
+
 """
     mesh_transfinite_patch(side1, side2, side3, side4;
         arrangement=:left, face_tag=0, side_tags=(0,0,0,0),
         allow_warped=false, project_plane=nothing,
-        interpolate=nothing,
+        interpolate=nothing, smoothing=0,
         max_nodes=10_000_000, max_triangles=20_000_000) -> Mesh
 
 Construct a four-sided transfinite triangle patch. Each side is an
@@ -932,8 +964,12 @@ sphere patch with an `In Sphere` projection). Boundary nodes keep their
 side-chain positions either way. `interpolate` implies the warped 3-D audits
 and is mutually exclusive with `project_plane`.
 
+`smoothing=n` applies `n` sweeps of Gmsh's transfinite elliptic smoother to
+the interior nodes of a planar patch (warped, interpolated and projected
+patches are left unsmoothed).
+
 This bounded operation does not discretize curves, apply size or quality fields,
-smooth the grid, handle holes or three-sided/quasi-transfinite patches, map a
+handle holes or three-sided/quasi-transfinite patches, map a
 general CAD parameterization, generate quadrangles, or construct transfinite
 volumes. A boundary whose spatial intersection audit exceeds its linear bounded
 candidate budget is rejected instead of risking unbounded work.
@@ -945,9 +981,12 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
                                 allow_warped::Bool=false,
                                 project_plane=nothing,
                                 interpolate=nothing,
+                                smoothing::Integer=0,
                                 max_nodes=_DEFAULT_MAX_NODES,
                                 max_triangles=_DEFAULT_MAX_TRIANGLES)::Mesh
     mode=_arrangement(arrangement)
+    smoothing>=0 || throw(ArgumentError(
+        "mesh_transfinite_patch: smoothing must be non-negative"))
     node_limit=_limit(max_nodes,"max_nodes")
     triangle_limit=_limit(max_triangles,"max_triangles")
     side_tags isa Tuple && length(side_tags)==4 || throw(ArgumentError(
@@ -1077,6 +1116,15 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
         node=Int(_node(i,j,width))
         coordinates[1,node]=point[1];coordinates[2,node]=point[2]
         coordinates[3,node]=point[3]
+    end
+    # The (u,v) chart of a plane is a rigid map, so upstream's parametric
+    # elliptic smoother is applied verbatim to the in-plane coordinates.
+    if smoothing>0 && project_plane===nothing
+        if planar
+            _elliptic_smooth!(coordinates,width,L,H,Int(smoothing))
+        elseif interpolate!==nothing
+            _smooth_interpolated!(interpolate,coordinates,width,L,H,Int(smoothing))
+        end
     end
 
     segment_topology=Matrix{Int32}(undef,2,segments)
