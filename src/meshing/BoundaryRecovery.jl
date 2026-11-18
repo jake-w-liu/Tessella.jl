@@ -1488,13 +1488,17 @@ function _seed_edge!(R::Recovery, a::Int32, b::Int32)::Bool
     _edge_cavity!(R, a, b) || return false
     isempty(R.crossings) && return false
     cx, cy, cz, nx, ny, nz, extent = R.crossings[1]
+    # Which side is inside is not known yet, and a vertex that lands outside
+    # changes nothing around the edge: one is inserted on each side.
     inserted = false
-    for side in (1.0, -1.0), factor in (0.3, 0.1, 0.03)
-        offset = side * factor * extent
-        vertex = _add_vertex!(R, cx + offset * nx, cy + offset * ny, cz + offset * nz)
-        if _insert_guarded!(R, vertex, T.v2t[a]) != 0
-            inserted = true
-            break
+    for side in (1.0, -1.0)
+        for factor in (0.3, 0.1, 0.03)
+            offset = side * factor * extent
+            vertex = _add_vertex!(R, cx + offset * nx, cy + offset * ny, cz + offset * nz)
+            if _insert_guarded!(R, vertex, T.v2t[a]) != 0
+                inserted = true
+                break
+            end
         end
     end
     return inserted
