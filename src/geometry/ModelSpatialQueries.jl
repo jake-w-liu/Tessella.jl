@@ -184,6 +184,30 @@ function _model_volume_bounds(
         bounds=_model_bounds_union(
             bounds,_model_curve_bounding_box(m,curve,caller))
     end
+    # A sphere face bulges past its boundary curves (a whole sphere's wire
+    # is one meridian; a cap cut by a plane reaches its apex in the face
+    # interior), and a whole torus sector past its seam circles — union the
+    # face boxes so a shelled Boolean result is not boxed by its edges alone.
+    for shell in m.volumes[tag]
+        for signed_surface in m.surface_loops[shell]
+            surface=abs(signed_surface)
+            g=get(m.surface_geometry,surface,nothing)
+            (g!==nothing && hasproperty(g,:occ)) || continue
+            if g.occ===:sphere
+                bounds=_model_bounds_union(bounds,
+                    _model_entity_bounding_box(m,2,surface,caller))
+            elseif g.occ===:torus
+                id=get(m.occ_kernel.bindings,(2,surface),nothing)
+                id===nothing && continue
+                rec=m.occ_kernel.shapes[id].geometry.geometry
+                (get(rec,:occ,nothing)===:torus && haskey(rec,:pcurves) &&
+                 _occ_torus_sector_window(m.occ_kernel,id,rec)!==nothing) ||
+                    continue
+                bounds=_model_bounds_union(bounds,
+                    _model_entity_bounding_box(m,2,surface,caller))
+            end
+        end
+    end
     # NURBS faces bound by their control hull (BRepBndLib over the poles),
     # which no boundary curve reaches — union the padded hull so a shelled
     # volume with tensor surfaces reports the same box the OCC kernel does.
@@ -230,7 +254,7 @@ end
 function _model_curve_bounding_box_non_line(m::GeoModel,curve::Int,caller::AbstractString)
     occ=_occ_geometry_checked(m,curve,caller)
     occ!==nothing && occ.occ===:copied_curve && return _model_bounds_checked(
-        _model_occ_curve_bbox(occ.curve),caller,"Curve[$curve]")
+        _model_occ_copied_curve_bbox(occ),caller,"Curve[$curve]")
     if occ!==nothing && occ.occ===:surface_iso
         surface=occ.face.patch.surface
         controls=occ.axis==1 ? @view(surface.controls[:,occ.fixed==first(surface.knots_v) ? 1 : size(surface.controls,2)]) :
@@ -361,6 +385,19 @@ function _model_entity_bounding_box_selected(m::GeoModel,::Val{2},tag::Int,calle
     # which the boundary-curve union already covers exactly.
     if surface_geometry!==nothing && hasproperty(surface_geometry,:occ) &&
             surface_geometry.occ===:sphere
+        # A Boolean kept piece shares the carrier record over a sub-domain
+        # wire; the OCC registry face it was synchronized from knows the
+        # wire and returns the trimmed box (the ball box for a whole sphere).
+        id=get(m.occ_kernel.bindings,(2,tag),nothing)
+        if id!==nothing
+            rec=m.occ_kernel.shapes[id].geometry.geometry
+            get(rec,:occ,nothing)===:sphere &&
+                rec.center==surface_geometry.center &&
+                rec.radius==surface_geometry.radius &&
+                return _model_bounds_checked(
+                    _model_occ_shape_bbox(m.occ_kernel,id),
+                    caller,"Surface[$tag]")
+        end
         C=surface_geometry.center; r=surface_geometry.radius
         return _model_bounds_checked(
             (C[1]-r,C[2]-r,C[3]-r,C[1]+r,C[2]+r,C[3]+r),

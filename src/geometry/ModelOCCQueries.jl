@@ -21,6 +21,26 @@ function _model_occ_box_points(points)
     return bounds
 end
 
+# Box of a copied-curve edge. A Boolean section curve is one traced contour
+# shared by all the edges cut from it, so its whole-curve hull also covers
+# the parts lying outside the operand that trimmed it — an edge's box must
+# follow its own `[t0,t1]`: the composed curve sampled at every smoothness
+# break and span midpoint of the range.
+function _model_occ_copied_curve_bbox(rec)
+    curve=rec.curve
+    curve isa _ModelOCCSectionCurve || return _model_occ_curve_bbox(curve)
+    lo,hi=minmax(Float64(rec.t0),Float64(rec.t1))
+    ts=vcat(Float64[lo],_model_occ_curve_panels(curve,lo,hi),Float64[hi])
+    bounds=_MODEL_EMPTY_BOUNDS
+    for i in eachindex(ts)
+        bounds=_model_bounds_include(bounds,
+            _model_occ_curve_d2(curve,ts[i])[1])
+        i<length(ts) && (bounds=_model_bounds_include(bounds,
+            _model_occ_curve_d2(curve,(ts[i]+ts[i+1])/2)[1]))
+    end
+    return bounds
+end
+
 # NURBS control-polytope box — the `Bnd_Box`-style padded hull the synced
 # `_model_entity_bounding_box` reports for tensor surfaces.
 function _model_occ_controls_box(controls)
@@ -58,6 +78,52 @@ function _occ_sphere_face_bbox(kernel,shape,rec)
     return bounds
 end
 
+# Even-odd containment of a chart point in a face's stored pcurve wires —
+# inside the outer wire, outside every hole wire. Periodic charts are tried
+# on the neighbouring u lifts as well, since a wire may sit one period off
+# the canonical `[0,2π)` inverse.
+function _occ_face_uv_inside(kernel,shape,rec,u,v)
+    for lift in (0.0,_OCC_TWO_PI,-_OCC_TWO_PI)
+        inside=true
+        for (wi,wire_id) in enumerate(shape.children)
+            crossings=0
+            for (eid,rev) in kernel.shapes[wire_id].geometry.uses
+                ent=rec.pcurves[kernel.shape_tags[eid][2]]
+                pc=(rev && ent.rev!==nothing) ? ent.rev : ent.fwd
+                eg=kernel.shapes[eid].geometry.geometry
+                crossings+=_brep_pc_ray_crossings(pc,eg.t0,eg.t1,u+lift,v,
+                                                  _BREP_TOL)
+            end
+            (isodd(crossings)==(wi==1)) || (inside=false;break)
+        end
+        inside && return true
+    end
+    return false
+end
+
+# A sphere face whose wire bounds only part of the chart — a Boolean kept
+# piece — is no ball: its box is the boundary-edge union plus those of the
+# six axis-extreme points of the carrier that lie inside the trimmed
+# domain. (An extreme point sitting on a pole is reached by the pole's
+# degenerate edge, which the edge union already contains.)
+function _occ_sphere_trimmed_bbox(kernel,shape,rec)
+    bounds=_MODEL_EMPTY_BOUNDS
+    for wire in shape.children
+        for edge in kernel.shapes[wire].children
+            bounds=_model_bounds_union(bounds,
+                _model_occ_shape_bbox(kernel,edge))
+        end
+    end
+    for axis in 1:3, s in (-1.0,1.0)
+        p=ntuple(k->k==axis ? rec.center[k]+s*rec.radius : rec.center[k],3)
+        uv=_brep_surface_uv(rec,p)
+        _brep_uv_singular(rec,uv,1e-9) && continue
+        _occ_face_uv_inside(kernel,shape,rec,uv[1],uv[2]) &&
+            (bounds=_model_bounds_union(bounds,_model_occ_box_point(p)))
+    end
+    return bounds
+end
+
 function _model_occ_shape_bbox(kernel,id)
     shape=kernel.shapes[id]
     d=shape.dimension; g=shape.geometry
@@ -89,12 +155,16 @@ function _model_occ_shape_bbox(kernel,id)
         end
         # :copied_curve — the trimmed sub-range stays inside the full
         # control hull.
-        return _model_occ_curve_bbox(rec.curve)
+        return _model_occ_copied_curve_bbox(rec)
     elseif d==2
         rec=g.geometry
         hasproperty(rec,:natural_bounds) && return _occ_natural_surface_bbox(rec)
         rec.occ===:sphere && (haskey(rec,:lat1) || haskey(rec,:lat2) ||
             haskey(rec,:angle)) && return _occ_sphere_face_bbox(kernel,shape,rec)
+        rec.occ===:sphere && haskey(rec,:pcurves) &&
+            !_occ_quadric_window_wire(kernel,shape,rec,
+                                      _occ_quadric_window(rec)...) &&
+            return _occ_sphere_trimmed_bbox(kernel,shape,rec)
         rec.occ===:sphere && return (
             rec.center[1]-rec.radius,rec.center[2]-rec.radius,
             rec.center[3]-rec.radius,
