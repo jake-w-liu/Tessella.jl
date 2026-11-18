@@ -9770,9 +9770,18 @@ function _geo_split_constant_brace(inner::AbstractString)
         s=strip(item)
         # An option item starts with a bare word NOT followed by an operator or
         # `(` call — `Min 0`, `Name "n"`, `ReadOnly`, `Choices {..}`.
-        if (om=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$",s))!==nothing &&
+        # `Geometry.Curves`/`a[0]`/`a~{1}` are value reads (member access,
+        # indexing), not option items. `Min`/`Max`/`Step` are lexer keywords,
+        # never variables, so `Min -5` is always the option.
+        om=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$",s)
+        if om!==nothing && i>1 && om.captures[1] in ("Min","Max","Step") &&
            !isempty(strip(om.captures[2])) &&
-           match(r"^[-+*/<>=:!&|?^]",strip(om.captures[2]))===nothing &&
+           !startswith(strip(om.captures[2]),"(")
+            boundary=i;break
+        end
+        if om!==nothing &&
+           !isempty(strip(om.captures[2])) &&
+           match(r"^[-+*/<>=:!&|?^.\[~%]",strip(om.captures[2]))===nothing &&
            !(startswith(strip(om.captures[2]),"("))
             boundary=i;break
         end

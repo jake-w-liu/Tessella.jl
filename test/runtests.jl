@@ -230,6 +230,7 @@ include("functional/fixtures.jl")
         "geometry/geo_closest_all_test.jl",
         "geometry/geo_general_bounds_option_test.jl",
         "geometry/geo_extrude_paren_component_test.jl",
+        "geometry/geo_define_constant_options_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
