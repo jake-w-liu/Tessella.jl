@@ -39,7 +39,7 @@ function _occ_brep_plane_pcurve(edge,plane)
         b=(edge.occ===:circle ? edge.r : edge.ry)*sy
         inner=abs(a-b)<=32eps(Float64)*max(a,b) ?
             (circ2d=(center,x,a),) : (ellips2d=(center,x,a,b),)
-        return X[1]*Y[2]-X[2]*Y[1]<0 ? (neg2d=(inner,)) : inner
+        return X[1]*Y[2]-X[2]*Y[1]<0 ? (neg2d=(inner,),) : inner
     elseif edge.occ===:copied_curve && edge.curve isa _ModelOCCNURBSCurve
         cv=edge.curve
         poles=[_occ_brep_plane_uv(plane,p) for p in cv.curve.controls]

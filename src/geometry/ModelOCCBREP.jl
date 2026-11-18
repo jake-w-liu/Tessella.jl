@@ -439,7 +439,7 @@ function _occ_brep_pcurve(curve,caller)
         X,Y=curve.X,curve.Y
         base=curve.kind==2 ? (circ2d=(curve.center,X,curve.a),) :
             (ellips2d=(curve.center,X,curve.a,curve.b),)
-        return X[1]*Y[2]-X[2]*Y[1]<0 ? (neg2d=(base,)) : base
+        return X[1]*Y[2]-X[2]*Y[1]<0 ? (neg2d=(base,),) : base
     elseif curve.kind in (6,7)
         nc=_occ_brep_nurbs_curve(curve,caller)
         if all(==(nc.weights[1]),nc.weights)

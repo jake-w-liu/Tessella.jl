@@ -743,7 +743,7 @@ function _occ_pcurve_reparam(pc,α::Float64,β::Float64)
     o,d=base.lin2d
     o′=neg ? (o[1]-α*d[1],o[2]-α*d[2]) : (o[1]+α*d[1],o[2]+α*d[2])
     inner=(lin2d=(o′,(β*d[1],β*d[2])),)
-    return neg ? (neg2d=(inner,)) : inner
+    return neg ? (neg2d=(inner,),) : inner
 end
 
 function _occ_pcurve_d0(pc,t::Float64)

@@ -111,7 +111,7 @@ _occ_sew_pc_reparamable(pc)=
 function _model_occ_sew_shift_pc(pc,α,β,tol,caller)
     pc===nothing && return nothing
     pc2,neg=_brep_pc_reparam(pc,α,β,tol,caller)
-    return neg ? (neg2d=(pc2,)) : pc2
+    return neg ? (neg2d=(pc2,),) : pc2
 end
 
 # `BRepBuilderAPI_Sewing` + recursive `bind`: emit a fresh, welded
