@@ -41,7 +41,8 @@ export diametral_sign
 # Fast Robust Geometric Predicates" (1997), §4. orient2/orient3 run the A-stage
 # filter, then the exact expansion stages B–D (PredicatesAdaptive.jl), and only
 # fall back to exact dyadic BigInt arithmetic outside the expansion magnitude
-# guard; incircle/insphere use the A-stage filter and the BigInt path.
+# guard; incircle/insphere run the A-stage filter, then an exact expansion
+# evaluation, and use BigInt only outside the expansion magnitude band.
 const EPS = 2.0^-53
 const CCWERRBOUND_A  = (3.0  + 16.0  * EPS) * EPS
 const O3DERRBOUND_A  = (7.0  + 56.0  * EPS) * EPS
@@ -329,6 +330,9 @@ function incircle(a, b, c, d)::Int
                _UNDERFLOW_PAD * (((alift + blift) + (clift + 1.0)) + ((ka + kb) + kc))
     (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
+    # Exact Float64 expansions (no allocation); BigInt only outside their band.
+    expansion = _incircle_expansion(ax, ay, bx, by, cx, cy, dx, dy)
+    expansion === nothing || return expansion
     return _incircle_exact(ax, ay, bx, by, cx, cy, dx, dy)
 end
 
@@ -415,6 +419,9 @@ function insphere(a, b, c, d, e)::Int
                _UNDERFLOW_PAD * ((zsum + 1.0) * liftsum + (((ka + kb) + (kc + kd)) + 1.0))
     (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
+    # Exact Float64 expansions (no allocation); BigInt only outside their band.
+    expansion = _insphere_expansion(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, ex, ey, ez)
+    expansion === nothing || return expansion
     return _insphere_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, ex, ey, ez)
 end
 
@@ -669,6 +676,10 @@ function _sos_minor_sign(coords, rows::Vector{Int8}, cols::Vector{Int8}, nf::Int
             return orient3(p(r1), p(r2), p(rows[3]), p(rows[4]))
         end
     end
+    if k <= 4 && coords[1] isa _LiftPt
+        s = _lift_minor_expansion(coords, rows, cols, nf)
+        s === nothing || return s
+    end
     A = Matrix{_RAT}(undef, k, k)
     @inbounds for (i, r) in enumerate(rows)
         for (j, c) in enumerate(cols); A[i, j] = _RAT(coords[r][c]); end
@@ -722,8 +733,7 @@ end
 # with the lift an INDEPENDENT coordinate perturbed by the EM scheme (the algorithm-
 # consistent formulation — verified against a canonical lifted-orientation oracle over
 # every degenerate labeling). Reached only for the fully-degenerate (collinear) tie.
-@inline _incircle_lift(p) = (x = _x(p); y = _y(p); xr = Rational{BigInt}(x); yr = Rational{BigInt}(y);
-                             (x, y, xr*xr + yr*yr))
+@inline _incircle_lift(p) = (x = _x(p); y = _y(p); _LiftPt((x, y), (x, y)))
 function _incircle_sos_exact(pa, pb, pc, pd,
                              ia::Integer, ib::Integer, ic::Integer, id::Integer)::Int
     coords = (_incircle_lift(pa), _incircle_lift(pb), _incircle_lift(pc), _incircle_lift(pd))
@@ -761,7 +771,7 @@ function incircle3_sos(pa,pb,pc,pd,
     det=al*(bx*cy-cx*by)+bl*(cx*ay-ax*cy)+cl*(ax*by-bx*ay)
     det>0&&return 1;det<0&&return -1
     lifted=ntuple(4) do k
-        q=(a,b,c,d)[k];(q[axes[1]],q[axes[2]],sum(R(q[j])^2 for j in 1:3))
+        q=(a,b,c,d)[k];_LiftPt((q[axes[1]],q[axes[2]]),q)
     end
     return _orient_nd_sos_exact(lifted,idx,3;nf=2,known_zero=true)
 end
@@ -769,9 +779,7 @@ end
 # insphere SoS = orientation SoS of the points lifted to (x,y,z,x²+y²+z²) in 4-D — the
 # same paraboloid-lift construction as incircle, one dimension up. Correct-by-construction
 # +ε for EVERY degenerate configuration (cospherical or coplanar).
-@inline _insphere_lift(p) = (x = _x(p); y = _y(p); z = _z(p);
-                             xr = Rational{BigInt}(x); yr = Rational{BigInt}(y); zr = Rational{BigInt}(z);
-                             (x, y, z, xr*xr + yr*yr + zr*zr))
+@inline _insphere_lift(p) = (x = _x(p); y = _y(p); z = _z(p); _LiftPt((x, y, z), (x, y, z)))
 function _insphere_sos_exact(pa, pb, pc, pd, pe,
                              ia::Integer, ib::Integer, ic::Integer, id::Integer, ie::Integer)::Int
     coords = (_insphere_lift(pa), _insphere_lift(pb), _insphere_lift(pc), _insphere_lift(pd), _insphere_lift(pe))

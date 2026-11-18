@@ -572,3 +572,264 @@ function _orient3_adaptive(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz,
 
     @inbounds return Magnitude ? finnow[finlength] : _isign(finnow[finlength])
 end
+
+# ════════════════════════════════════════════════════════════════════════════════
+# Exact incircle/insphere by floating-point expansions (no BigInt).
+#
+# When the A-stage filter cannot certify a sign, the determinant is evaluated
+# exactly over the differences p - d (incircle) / p - e (insphere), each held as
+# the exact two-component expansion of TWO-DIFF.  Products use SCALE-EXPANSION and
+# FAST-EXPANSION-SUM with zero elimination (Shewchuk 1997, §2), and COMPRESS keeps
+# every intermediate short; when the differences are exact (lattice or dyadic
+# input, the common exactly-degenerate case) the expansions stay tiny.  The sign
+# is that of the most significant component.  Every nonzero difference component
+# must lie in [2^-100, 2^150]: a degree-5 product then neither overflows nor lets
+# a TWO-PRODUCT error term underflow, which the expansion theorems require; other
+# inputs return `nothing` and keep the exact BigInt path.
+# ════════════════════════════════════════════════════════════════════════════════
+
+const _EXPANSION_MIN_MAGNITUDE = 2.0^-100
+const _EXPANSION_MAX_MAGNITUDE = 2.0^150
+
+mutable struct _ExpansionPool
+    v::Vector{Vector{Float64}}
+    n::Vector{Int}
+end
+const _EXP_SLOTS = 48
+const _EXP_T1 = 41; const _EXP_T2 = 42; const _EXP_T3 = 43; const _EXP_T4 = 44
+_ExpansionPool() = _ExpansionPool([Vector{Float64}(undef, 64) for _ in 1:_EXP_SLOTS],
+                                  zeros(Int, _EXP_SLOTS))
+
+const _EXPANSION_POOLS = Vector{_ExpansionPool}()
+const _EXPANSION_POOLS_LOCK = ReentrantLock()
+
+@inline function _expansion_pool()
+    tid = Threads.threadid()
+    pools = _EXPANSION_POOLS
+    if tid > length(pools)
+        lock(_EXPANSION_POOLS_LOCK) do
+            while length(pools) < tid
+                push!(pools, _ExpansionPool())
+            end
+        end
+    end
+    @inbounds return pools[tid]
+end
+
+@inline function _xcap!(P::_ExpansionPool, s::Int, n::Int)
+    @inbounds v = P.v[s]
+    length(v) < n && resize!(v, max(n, 2 * length(v)))
+    return v
+end
+
+@inline _xmag_ok(v::Float64) =
+    (a = abs(v); a == 0.0 || (_EXPANSION_MIN_MAGNITUDE <= a <= _EXPANSION_MAX_MAGNITUDE))
+
+# slot s = a - b exactly; false when outside the magnitude band.
+@inline function _xdiff!(P::_ExpansionPool, s::Int, a::Float64, b::Float64)
+    x, y = _two_diff_pair(a, b)
+    (_xmag_ok(x) && _xmag_ok(y)) || return false
+    v = _xcap!(P, s, 2)
+    @inbounds if y == 0.0
+        v[1] = x; P.n[s] = 1
+    else
+        v[1] = y; v[2] = x; P.n[s] = 2
+    end
+    return true
+end
+
+# COMPRESS (Shewchuk 1997, §2.8) in place; returns the new length.
+function _xcompress!(e::Vector{Float64}, elen::Int)
+    @inbounds begin
+        bottom = elen
+        Q = e[bottom]
+        for i in elen-1:-1:1
+            Qnew, q = _fast_two_sum(Q, e[i])
+            if q != 0.0
+                e[bottom] = Qnew; bottom -= 1; Q = q
+            else
+                Q = Qnew
+            end
+        end
+        top = 0
+        for i in bottom+1:elen
+            Qnew, q = _fast_two_sum(e[i], Q)
+            if q != 0.0
+                top += 1; e[top] = q
+            end
+            Q = Qnew
+        end
+        top += 1; e[top] = Q
+    end
+    return top
+end
+
+# slot d = slot a * slot b (d distinct from a, b and the temporaries).
+function _xmul!(P::_ExpansionPool, d::Int, a::Int, b::Int)
+    @inbounds begin
+        (P.n[a] < P.n[b]) && ((a, b) = (b, a))       # scale the longer one
+        elen = P.n[a]; flen = P.n[b]
+        e = P.v[a]; f = P.v[b]
+        acc = _xcap!(P, _EXP_T1, 2elen)
+        alen = _scale_expansion_zeroelim!(elen, e, f[1], acc)
+        for j in 2:flen
+            t = _xcap!(P, _EXP_T2, 2elen)
+            tlen = _scale_expansion_zeroelim!(elen, e, f[j], t)
+            out = _xcap!(P, _EXP_T3, alen + tlen)
+            alen = _fast_expansion_sum_zeroelim!(alen, acc, tlen, t, out)
+            alen = _xcompress!(out, alen)
+            P.v[_EXP_T1], P.v[_EXP_T3] = out, acc
+            acc = out
+        end
+        alen = _xcompress!(acc, alen)
+        dv = _xcap!(P, d, alen)
+        copyto!(dv, 1, acc, 1, alen)
+        P.n[d] = alen
+    end
+    return nothing
+end
+
+# slot d = slot a + sgn * slot b.
+function _xadd!(P::_ExpansionPool, d::Int, a::Int, b::Int, sgn::Float64=1.0)
+    @inbounds begin
+        flen = P.n[b]; f = P.v[b]
+        if sgn < 0
+            g = _xcap!(P, _EXP_T4, flen)
+            for i in 1:flen; g[i] = -f[i]; end
+            f = g
+        end
+        elen = P.n[a]
+        dv = _xcap!(P, d, elen + flen)
+        len = _fast_expansion_sum_zeroelim!(elen, P.v[a], flen, f, dv)
+        P.n[d] = _xcompress!(dv, len)
+    end
+    return nothing
+end
+
+@inline _xsign(P::_ExpansionPool, s::Int) = @inbounds _isign(P.v[s][P.n[s]])
+
+# Exact incircle sign, or `nothing` outside the expansion magnitude band.
+function _incircle_expansion(ax, ay, bx, by, cx, cy, dx, dy)
+    P = _expansion_pool()
+    ADX = 1; ADY = 2; BDX = 3; BDY = 4; CDX = 5; CDY = 6
+    (_xdiff!(P, ADX, ax, dx) && _xdiff!(P, ADY, ay, dy) &&
+     _xdiff!(P, BDX, bx, dx) && _xdiff!(P, BDY, by, dy) &&
+     _xdiff!(P, CDX, cx, dx) && _xdiff!(P, CDY, cy, dy)) || return nothing
+    U = 7; V = 8; BC = 9; CA = 10; AB = 11; AL = 12; BL = 13; CL = 14
+    W1 = 15; W2 = 16; S = 17
+    _xmul!(P, U, BDX, CDY); _xmul!(P, V, CDX, BDY); _xadd!(P, BC, U, V, -1.0)
+    _xmul!(P, U, CDX, ADY); _xmul!(P, V, ADX, CDY); _xadd!(P, CA, U, V, -1.0)
+    _xmul!(P, U, ADX, BDY); _xmul!(P, V, BDX, ADY); _xadd!(P, AB, U, V, -1.0)
+    _xmul!(P, U, ADX, ADX); _xmul!(P, V, ADY, ADY); _xadd!(P, AL, U, V)
+    _xmul!(P, U, BDX, BDX); _xmul!(P, V, BDY, BDY); _xadd!(P, BL, U, V)
+    _xmul!(P, U, CDX, CDX); _xmul!(P, V, CDY, CDY); _xadd!(P, CL, U, V)
+    _xmul!(P, W1, AL, BC); _xmul!(P, W2, BL, CA); _xadd!(P, S, W1, W2)
+    _xmul!(P, W1, CL, AB); _xadd!(P, W2, S, W1)
+    return _xsign(P, W2)
+end
+
+# Exact insphere sign (the determinant form of `insphere`), or `nothing` outside
+# the expansion magnitude band.
+function _insphere_expansion(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, ex, ey, ez)
+    P = _expansion_pool()
+    AX = 1; AY = 2; AZ = 3; BX = 4; BY = 5; BZ = 6
+    CX = 7; CY = 8; CZ = 9; DX = 10; DY = 11; DZ = 12
+    (_xdiff!(P, AX, ax, ex) && _xdiff!(P, AY, ay, ey) && _xdiff!(P, AZ, az, ez) &&
+     _xdiff!(P, BX, bx, ex) && _xdiff!(P, BY, by, ey) && _xdiff!(P, BZ, bz, ez) &&
+     _xdiff!(P, CX, cx, ex) && _xdiff!(P, CY, cy, ey) && _xdiff!(P, CZ, cz, ez) &&
+     _xdiff!(P, DX, dx, ex) && _xdiff!(P, DY, dy, ey) && _xdiff!(P, DZ, dz, ez)) ||
+        return nothing
+    U = 13; V = 14; W = 15
+    AB = 16; BC = 17; CD = 18; DA = 19; AC = 20; BD = 21
+    _xmul!(P, U, AX, BY); _xmul!(P, V, BX, AY); _xadd!(P, AB, U, V, -1.0)
+    _xmul!(P, U, BX, CY); _xmul!(P, V, CX, BY); _xadd!(P, BC, U, V, -1.0)
+    _xmul!(P, U, CX, DY); _xmul!(P, V, DX, CY); _xadd!(P, CD, U, V, -1.0)
+    _xmul!(P, U, DX, AY); _xmul!(P, V, AX, DY); _xadd!(P, DA, U, V, -1.0)
+    _xmul!(P, U, AX, CY); _xmul!(P, V, CX, AY); _xadd!(P, AC, U, V, -1.0)
+    _xmul!(P, U, BX, DY); _xmul!(P, V, DX, BY); _xadd!(P, BD, U, V, -1.0)
+    ABC = 22; BCD = 23; CDA = 24; DAB = 25
+    # abc = az*bc - bz*ac + cz*ab
+    _xmul!(P, U, AZ, BC); _xmul!(P, V, BZ, AC); _xadd!(P, W, U, V, -1.0)
+    _xmul!(P, U, CZ, AB); _xadd!(P, ABC, W, U)
+    # bcd = bz*cd - cz*bd + dz*bc
+    _xmul!(P, U, BZ, CD); _xmul!(P, V, CZ, BD); _xadd!(P, W, U, V, -1.0)
+    _xmul!(P, U, DZ, BC); _xadd!(P, BCD, W, U)
+    # cda = cz*da + dz*ac + az*cd
+    _xmul!(P, U, CZ, DA); _xmul!(P, V, DZ, AC); _xadd!(P, W, U, V)
+    _xmul!(P, U, AZ, CD); _xadd!(P, CDA, W, U)
+    # dab = dz*ab + az*bd + bz*da
+    _xmul!(P, U, DZ, AB); _xmul!(P, V, AZ, BD); _xadd!(P, W, U, V)
+    _xmul!(P, U, BZ, DA); _xadd!(P, DAB, W, U)
+    AL = 26; BL = 27; CL = 28; DL = 29
+    for (L, X, Y, Z) in ((AL, AX, AY, AZ), (BL, BX, BY, BZ), (CL, CX, CY, CZ), (DL, DX, DY, DZ))
+        _xmul!(P, U, X, X); _xmul!(P, V, Y, Y); _xadd!(P, W, U, V)
+        _xmul!(P, U, Z, Z); _xadd!(P, L, W, U)
+    end
+    # det = (dlift*abc - clift*dab) + (blift*cda - alift*bcd)
+    R1 = 30; R2 = 31
+    _xmul!(P, U, DL, ABC); _xmul!(P, V, CL, DAB); _xadd!(P, R1, U, V, -1.0)
+    _xmul!(P, U, BL, CDA); _xmul!(P, V, AL, BCD); _xadd!(P, R2, U, V, -1.0)
+    _xadd!(P, W, R1, R2)
+    return _xsign(P, W)
+end
+
+# ── SoS cofactors that keep a paraboloid-lift column ────────────────────────────
+# A lifted point stores its Float64 projected coordinates `p` and the coordinates
+# `q` whose squares sum to the lift (column N+1).  The lift is materialised as a
+# Rational only by the BigInt fallback.
+struct _LiftPt{N,M}
+    p::NTuple{N,Float64}
+    q::NTuple{M,Float64}
+end
+@inline Base.getindex(l::_LiftPt{N}, i::Integer) where {N} =
+    i <= N ? l.p[i] : sum(Rational{BigInt}(t)^2 for t in l.q)
+
+# slot s = lift(row a) - lift(row b) exactly; false outside the magnitude band.
+function _xliftdiff!(P::_ExpansionPool, s::Int, a::_LiftPt, b::_LiftPt)
+    U = 38; V = 39; W = 40
+    P.n[W] = 1; _xcap!(P, W, 1)[1] = 0.0
+    for (pt, sgn) in ((a, 1.0), (b, -1.0)), t in pt.q
+        _xmag_ok(t) || return false
+        hi, lo = _two_product_pair(t, t)
+        v = _xcap!(P, U, 2)
+        if lo == 0.0
+            v[1] = sgn * hi; P.n[U] = 1
+        else
+            v[1] = sgn * lo; v[2] = sgn * hi; P.n[U] = 2
+        end
+        _xadd!(P, V, W, U)
+        P.v[V], P.v[W] = P.v[W], P.v[V]; P.n[V], P.n[W] = P.n[W], P.n[V]
+    end
+    dv = _xcap!(P, s, P.n[W]); copyto!(dv, 1, P.v[W], 1, P.n[W]); P.n[s] = P.n[W]
+    return true
+end
+
+# Exact sign of det[coords[r][cols] 1] over r in rows when the last column is the
+# lift (rows 2..4), or `nothing` outside the expansion band.
+function _lift_minor_expansion(coords, rows::Vector{Int8}, cols::Vector{Int8}, N::Int)
+    P = _expansion_pool()
+    k = length(rows); m = k - 1
+    @inbounds last = coords[rows[k]]
+    @inbounds for i in 1:m, j in 1:m
+        s = 3 * (i - 1) + j
+        row = coords[rows[i]]
+        if cols[j] <= N
+            _xdiff!(P, s, row.p[cols[j]], last.p[cols[j]]) || return nothing
+        else
+            _xliftdiff!(P, s, row, last) || return nothing
+        end
+    end
+    m == 1 && return _xsign(P, 1)
+    U = 10; V = 11; W = 12; X = 13; Y = 14; Z = 15
+    if m == 2
+        _xmul!(P, U, 1, 5); _xmul!(P, V, 2, 4); _xadd!(P, W, U, V, -1.0)
+        return _xsign(P, W)
+    end
+    # 3x3 cofactor expansion along the first row (slots 1..9 row-major)
+    _xmul!(P, U, 5, 9); _xmul!(P, V, 6, 8); _xadd!(P, W, U, V, -1.0); _xmul!(P, X, 1, W)
+    _xmul!(P, U, 4, 9); _xmul!(P, V, 6, 7); _xadd!(P, W, U, V, -1.0); _xmul!(P, Y, 2, W)
+    _xadd!(P, Z, X, Y, -1.0)
+    _xmul!(P, U, 4, 8); _xmul!(P, V, 5, 7); _xadd!(P, W, U, V, -1.0); _xmul!(P, X, 3, W)
+    _xadd!(P, Y, Z, X)
+    return _xsign(P, Y)
+end

@@ -247,6 +247,7 @@ include("functional/fixtures.jl")
         "core/predicates_underflow_test.jl",
         "core/predicates_sos_minors_test.jl",
         "meshing/optimize_region_interface_test.jl",
+        "core/predicates_expansion_incircle_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
