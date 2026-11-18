@@ -38,6 +38,27 @@ function _model_occ_curve_panels(curve,t0,t1)
     return cuts
 end
 
+# A Boolean section curve is the composition S(pc(t)): its smoothness breaks
+# sit at the trace pcurve's own knots, which the seed polyline's knot vector
+# need not contain. Panels cut only at the polyline knots leave derivative
+# kinks inside a panel and the adaptive rule never reaches its tolerance.
+function _model_occ_curve_panels(curve::_ModelOCCSectionCurve,t0,t1)
+    cuts=Float64[k for k in curve.curve.knots if t0<k<t1]
+    pc=curve.pc
+    sign=1.0
+    while hasproperty(pc,:neg2d)
+        pc=pc.neg2d[1];sign=-sign
+    end
+    hasproperty(pc,:spl2d) &&
+        append!(cuts,Float64[sign*k for k in pc.spl2d[1] if t0<sign*k<t1])
+    sort!(cuts)
+    out=Float64[]
+    for k in cuts
+        (isempty(out) || k>out[end]) && push!(out,k)
+    end
+    return out
+end
+
 # Nonzero knot spans inside [t0,t1] as (a,b) pairs — the surface analog
 # of `_model_occ_curve_panels`.
 function _model_occ_span_cuts(knots,t0,t1)

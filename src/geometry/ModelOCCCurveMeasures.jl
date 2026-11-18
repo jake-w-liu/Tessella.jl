@@ -31,6 +31,30 @@ function _model_occ_curve_integrals_rule(visit,panels,nodes,weights,origin,cente
         absolute=(area=area,first=absolute_first,second=absolute_second))
 end
 
+# Convergence of two successive rules. The shared criterion scales each
+# component's tolerance by that component's own absolute integral; a curve
+# lying in a coordinate plane has one centroid component that is pure
+# evaluation noise (a section circle in the plane x=1 integrates |x-x0| to
+# ~1e-8), so its tolerance drops below the rounding of the other components
+# and the rule can never satisfy it. Admit a rounding floor relative to the
+# field's largest absolute component.
+function _model_occ_curve_converged(previous,current,fields)
+    _occ_natural_integrals_converged(previous,current,fields) && return true
+    for field in fields
+        a=getproperty(previous,field);b=getproperty(current,field)
+        ba=getproperty(previous.absolute,field)
+        bb=getproperty(current.absolute,field)
+        scale=max(maximum(abs,ba),maximum(abs,bb))
+        isfinite(scale) || return false
+        for (x,y,p,q) in zip(a,b,ba,bb)
+            (isfinite(x) && isfinite(y)) || return false
+            abs(x-y)<=1e-12*max(p,q)+1e-11*max(abs(x),abs(y))+
+                64*eps(Float64)*scale || return false
+        end
+    end
+    return true
+end
+
 function _model_occ_curve_integrals(visit,panels,origin,order;center=nothing,
                                     fields=(:area,:first))
     length(panels)<=65536 || throw(ArgumentError("OCC curve: quadrature capacity exceeded"))
@@ -45,7 +69,7 @@ function _model_occ_curve_integrals(visit,panels,origin,order;center=nothing,
             "OCC curve: adaptive quadrature capacity exceeded"))
         work+=length(panels)*order
         current=_model_occ_curve_integrals_rule(visit,panels,nodes,weights,origin,center)
-        _occ_natural_integrals_converged(previous,current,fields) && return current
+        _model_occ_curve_converged(previous,current,fields) && return current
         refinement<8 || break
         previous=current
         refined=Tuple{Float64,Float64}[]
