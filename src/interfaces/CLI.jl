@@ -1366,7 +1366,8 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
         save_recorder=(family,member,value)->begin
             family=="Mesh" &&
                 member in ("SaveParametric","SaveTopology","ScalingFactor",
-                           "PartitionTopologyFile","PreserveNumberingMsh2") &&
+                           "PartitionTopologyFile","PreserveNumberingMsh2",
+                           "SaveAll") &&
                 (save_options[member]=Float64(value))
             return nothing
         end
@@ -1393,6 +1394,8 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
         # option) emits the stored element numbering on MSH 2.2 output.
         preserve_numbering=!iszero(Float64(get(save_options,
             "PreserveNumberingMsh2",0.0)))
+        save_all=!iszero(Float64(get(save_options,"SaveAll",
+            get(numeric_options,"Mesh.SaveAll",0.0))))
         statreport!==nothing && _geo_stat_report(
             statreport[1],statreport[2],result,dim,first(inputs),
             Float64(time_ns()-exec_t0)/1.e9,
@@ -1444,7 +1447,8 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                 authority=result.model.meshing.mesh_authority
                 authority!==nothing && authority.mesh!==nothing || throw(ErrorException(
                     "tessella: one-dimensional generation omitted its classified mesh"))
-                write_msh(destination,_scaled_mesh_copy(authority.mesh,scaling);
+                write_msh(destination,_cli_physical_selection(
+                              _scaled_mesh_copy(authority.mesh,scaling),save_all);
                           version,binary,
                           save_parametric,save_topology,preserve_numbering)
                 failure===nothing || throw(failure)
@@ -1478,7 +1482,8 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                 classified=_cli_classified_mesh(result)
                 if save_parametric!==nothing || save_topology!==nothing
                     if classified isa MixedMesh
-                        classified_out=_scaled_mesh_copy(classified,scaling)
+                        classified_out=_cli_physical_selection(
+                            _scaled_mesh_copy(classified,scaling),save_all)
                         write_msh(destination,classified_out;version,binary,
                                   save_parametric,save_topology,
                                   preserve_numbering)
@@ -1498,7 +1503,8 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                                       version)
                     end
                 elseif classified isa MixedMesh
-                    mixed_out=_scaled_mesh_copy(classified,scaling)
+                    mixed_out=_cli_physical_selection(
+                        _scaled_mesh_copy(classified,scaling),save_all)
                     write_mixed_msh(destination,mixed_out;version,binary,
                         preserve_numbering)
                     emit_topology(mixed_out)
@@ -1534,7 +1540,8 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
                 isempty(missing_relations) || throw(ArgumentError(
                     "tessella: selected $entity_name projection omits periodic " *
                     "relations $missing_relations"))
-                projected_out=_scaled_mesh_copy(projected,scaling)
+                projected_out=_cli_physical_selection(
+                    _scaled_mesh_copy(projected,scaling),save_all)
                 write_msh(destination,projected_out;
                           version,binary,
                           save_parametric,save_topology,preserve_numbering)
@@ -1559,6 +1566,55 @@ end
 # Classified `MixedMesh` preferred for `-save_parametric`/`-save_topology`
 # output: the meshing authority's native record retains entity ownership and
 # parametric node coordinates the merged `result.mesh` may not carry.
+# `Mesh.SaveAll = 0` (the default): once the model has physical groups, the
+# MSH writers only emit elements of entities carrying a physical tag (upstream
+# `saveAll || noPhysicalGroups()`); every node is still written (MSH 4.1
+# `$Nodes` keeps all entity blocks, as Gmsh 4.15.2 does).
+_cli_physical_selection(mesh,save_all::Bool)=mesh
+function _cli_physical_selection(mesh::MixedMesh,save_all::Bool)
+    save_all && return mesh
+    data=mesh.entity_data
+    data===nothing && return mesh
+    # Element-indexed view data / partition records keep the full set.
+    (mesh.partition_data===nothing && isempty(mesh.data_sections)) ||
+        return mesh
+    any(entity->!isempty(entity.physical_tags),values(data.entities)) ||
+        return mesh
+    blocks=MixedElementBlock[];owners=Vector{Int32}[]
+    element_tags=Vector{UInt64}[];elementary=Vector{Int32}[]
+    for (bi,block) in enumerate(mesh.blocks)
+        dim=_partition_dim(block)
+        columns=findall(owner->begin
+                entity=get(data.entities,(dim,Int(owner)),nothing)
+                entity!==nothing && !isempty(entity.physical_tags)
+            end,data.block_entities[bi])
+        isempty(columns) && continue
+        if block isa ElementBlock
+            push!(blocks,ElementBlock(block.msh,block.nodes[:,columns],
+                                      block.tags[columns]))
+        else
+            push!(blocks,SpecialElementBlock(block.msh,
+                [collect(_partition_nodes(block,j)) for j in columns],
+                block.tags[columns]))
+        end
+        push!(owners,data.block_entities[bi][columns])
+        push!(element_tags,data.external_element_tags[bi][columns])
+        mesh.elementary_entities===nothing ||
+            push!(elementary,mesh.elementary_entities[bi][columns])
+    end
+    metadata=MixedEntityData(data.entities;
+        node_entities=data.node_entities,
+        node_parametric=data.node_parametric,
+        external_node_tags=data.external_node_tags,
+        block_entities=owners,external_element_tags=element_tags,
+        _native_mesh_tags=data.native_mesh_tags)
+    return MixedMesh(mesh.coords,blocks;
+        entity_data=metadata,physical_names=mesh.physical_names,
+        elementary_entities=mesh.elementary_entities===nothing ? nothing : elementary,
+        periodic_links=mesh.periodic_links,
+        ancillary_sections=mesh.ancillary_sections)
+end
+
 function _cli_classified_mesh(result)
     authority=result.model.meshing.mesh_authority
     authority!==nothing && authority.mesh isa MixedMesh && return authority.mesh

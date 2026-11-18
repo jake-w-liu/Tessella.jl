@@ -247,7 +247,7 @@ Physical Volume("domain", 72) = {1};
         @test embedded_periodic_curve.master_entity==5
         @test length(embedded_periodic_curve.slave_nodes)==3
         @test mixed_crc(periodic_embedded).sha==
-              "576af4ec0913c0bccec83f22ea3fe140f443b4b3c3a8fdaba0c34ed73647deef"
+              "ad40074b33981119ab736a6f63012a446841e3296e80f762f276014c2fec133b"
 
         periodic_graph_input=joinpath(directory,"periodic-graph.geo")
         periodic_graph_output=joinpath(directory,"periodic-graph.msh")
@@ -274,7 +274,7 @@ Physical Volume("domain", 72) = {1};
         @test all(link->length(link.slave_nodes)==4,
                   values(graph_curve_links))
         @test mixed_crc(periodic_graph).sha==
-              "cb07cbeab1f5374cc01af18e10285fd655a255090bfd8d7f623a9c755b597db3"
+              "d09af997b2cec9845502b4241bdeed52c8fc94ce75a44c8720b110be353fb8ea"
 
         embedded_input=joinpath(directory,"embedded.geo")
         embedded_output=joinpath(directory,"embedded.msh")
@@ -287,14 +287,16 @@ Physical Volume("domain", 72) = {1};
         @test embedded.entity_data.entities[(2,1)].embedded_curves==Int32[5]
         point_block=only(findall(block->block.msh==15,embedded.blocks))
         line_block=only(findall(block->block.msh==1,embedded.blocks))
+        # Mesh.SaveAll = 0: only physical entities' elements are written
+        # (Gmsh 4.15.2 writes point elements on 5,6,7 and lines on curve 5).
         @test Set(embedded.entity_data.block_entities[point_block])==
-              Set(Int32.(1:7))
+              Set(Int32[5,6,7])
         @test Set(embedded.entity_data.block_entities[line_block])==
-              Set(Int32.(1:5))
+              Set(Int32[5])
         @test embedded.physical_names==Dict(
             (0,31)=>"embedded points",(1,32)=>"embedded line",(2,33)=>"domain")
         @test mixed_crc(embedded).sha==
-              "e5ab2f11e33514f6ab1294250fae50955d2171cf8529ffd23bb019528be2ac4c"
+              "a9502c61fe11a6e08553945d368afa83a8b7847cc45fc6e9c269086193a0e170"
 
         embedded_volume_input=joinpath(directory,"embedded-volume.geo")
         embedded_volume_output=joinpath(directory,"embedded-volume.msh")
@@ -316,7 +318,7 @@ Physical Volume("domain", 72) = {1};
             (0,51)=>"sheet points",(1,52)=>"sheet curves",
             (2,53)=>"sheet",(3,54)=>"domain")
         @test mixed_crc(embedded_volume).sha==
-              "4a6300f6581c7187f0395542fd9abdc85cd8209acca15c6f8b596e4afe266412"
+              "c52d01fa89b0c87b3ca9ad41f9877e6e7e35c2b47afd46831df5c8675eed26f2"
 
         explicit_shell_input=joinpath(directory,"explicit-shell.geo")
         explicit_shell_output=joinpath(directory,"explicit-shell.msh")
@@ -329,11 +331,12 @@ Physical Volume("domain", 72) = {1};
         @test explicit_shell.entity_data!==nothing
         @test explicit_shell.entity_data.entities[(3,1)].boundaries==
               Int32[1,2,3,4]
-        @test Set(block.msh for block in explicit_shell.blocks)==Set([15,1,2,4])
+        # Only the physical surfaces/volume are written (Gmsh 4.15.2: 2, 4).
+        @test Set(block.msh for block in explicit_shell.blocks)==Set([2,4])
         @test explicit_shell.physical_names==Dict(
             (2,71)=>"boundary",(3,72)=>"domain")
         @test mixed_crc(explicit_shell).sha==
-              "252591a1b11b04febb7fade884cc6fc3eb02a1e563e706f83b921c59ed9aecab"
+              "3b0956116f046ac14bdb54335a146ecc5082d862365db36da37c01ab4f7e10e2"
 
         geometry_expression_input=joinpath(
             directory,"geometry-expressions.geo")
@@ -407,7 +410,7 @@ Physical Volume("domain", 72) = {1};
         point_mesh_size=read_msh(point_mesh_size_output).mesh
         @test validate(point_mesh_size).ok
         @test mesh_crc(point_mesh_size).sha==
-              "132a95502bc83280cca1771f2440076d1d8d9bb59199c3b979b638991a8cff58"
+              "8a67d9438df20ec8bbf33536ec089b59c458e61d9902bc8c93e0e2f27aaa8c22"
 
         points_of_input=joinpath(directory,"point-mesh-size-points-of.geo")
         points_of_output=joinpath(directory,"point-mesh-size-points-of.msh")
@@ -418,7 +421,7 @@ Physical Volume("domain", 72) = {1};
         points_of_mesh=read_mixed_msh(points_of_output)
         @test validate(points_of_mesh).ok
         @test mixed_crc(points_of_mesh).sha==
-              "27dcec147a5b355d7fd3a5d0e05588a24726cdd8a9d4d52c41a71cef188d789e"
+              "7396d93e2c67a9e2d6762473ab5ffd48cfcef64c8dd92d474fdb141827758808"
         @test points_of_mesh.physical_names==
               Dict((0,11)=>"vertices",(3,12)=>"domain",
                    (0,21)=>"endpoints",(1,22)=>"face boundary",
