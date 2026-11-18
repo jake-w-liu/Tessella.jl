@@ -209,6 +209,7 @@ include("functional/fixtures.jl")
         "fields/restrict_include_boundary_test.jl",
         "interfaces/api_occ_box_surface_native_test.jl",
         "interfaces/api_occ_curved_sized_fill_test.jl",
+        "interfaces/api_occ_oblique_plane_surface_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

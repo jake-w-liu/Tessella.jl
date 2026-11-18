@@ -5766,7 +5766,21 @@ function _model_surface_projection(
         ntuple(axis->constant_axes[axis] ? c[axis] : _model_occ_snap_coord(c[axis]),3)
         for c in source_coordinates]
     anchor=coordinates[1]
-    second_index=findfirst(point->point!=anchor,@view coordinates[2:end])
+    # The second plane point must be geometrically distinct from the anchor:
+    # an evaluated rim sample of a closed circle edge lands a few ulps off
+    # the edge's own vertex on an oblique plane, and a basis vector made of
+    # that rounding noise spans no plane at all. Skip such near-duplicates
+    # (relative to the boundary's extent); exact input keeps its first
+    # distinct point.
+    spread=0.0
+    for coordinate in coordinates
+        spread=max(spread,abs(coordinate[1]-anchor[1]),
+                   abs(coordinate[2]-anchor[2]),abs(coordinate[3]-anchor[3]))
+    end
+    second_index=findfirst(@view coordinates[2:end]) do point
+        max(abs(point[1]-anchor[1]),abs(point[2]-anchor[2]),
+            abs(point[3]-anchor[3]))>1e-9*spread
+    end
     second_index===nothing && throw(ArgumentError(
         "$caller: Surface[$surface] has only one distinct coordinate"))
     second_index+=1
@@ -5804,8 +5818,34 @@ function _model_surface_projection(
     projection===nothing && throw(ArgumentError(
         "$caller: Surface[$surface] points are collinear"))
     third=plane_third::NTuple{3,Float64}
+    # The exact predicate certifies dyadically coplanar input. A plane that
+    # went through a rotation, an oblique axis or a trigonometric sector
+    # angle carries rounding noise of a few ulps of its coordinates on every
+    # vertex, which no canonicalization removes; such a point is still on the
+    # plane. Admit an offset within that noise floor — relative to the
+    # coordinate magnitude (cancellation far from the origin) and to the
+    # boundary's own extent — and keep rejecting genuine warp.
+    normal=((second[2]-anchor[2])*(third[3]-anchor[3])-
+            (second[3]-anchor[3])*(third[2]-anchor[2]),
+            (second[3]-anchor[3])*(third[1]-anchor[1])-
+            (second[1]-anchor[1])*(third[3]-anchor[3]),
+            (second[1]-anchor[1])*(third[2]-anchor[2])-
+            (second[2]-anchor[2])*(third[1]-anchor[1]))
+    normal_length=sqrt(normal[1]^2+normal[2]^2+normal[3]^2)
+    magnitude=0.0;extent=0.0
+    for coordinate in coordinates
+        magnitude=max(magnitude,abs(coordinate[1]),abs(coordinate[2]),
+                      abs(coordinate[3]))
+        extent=max(extent,abs(coordinate[1]-anchor[1]),
+                   abs(coordinate[2]-anchor[2]),abs(coordinate[3]-anchor[3]))
+    end
+    noise=max(256eps(Float64)*magnitude,1e-11*extent)
     for (index,coordinate) in pairs(coordinates)
-        orient3(anchor,second,third,coordinate)==0 || throw(ArgumentError(
+        orient3(anchor,second,third,coordinate)==0 && continue
+        offset=abs(normal[1]*(coordinate[1]-anchor[1])+
+                   normal[2]*(coordinate[2]-anchor[2])+
+                   normal[3]*(coordinate[3]-anchor[3]))/normal_length
+        (isfinite(offset) && offset<=noise) || throw(ArgumentError(
             "$caller: Point[$(point_tags[index])] is not coplanar with " *
             "Surface[$surface]"))
     end
