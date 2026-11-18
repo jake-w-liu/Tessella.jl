@@ -1369,22 +1369,15 @@ function _materialized_sphere_consistent(m::GeoModel, tag::Int, rec)
     curve,g=first(circles)
     _points_close(g.center,rec.center,tol) || return false
     abs(g.r-rec.radius)>tol && return false
-    north=(rec.center[1],rec.center[2],rec.center[3]+rec.radius)
-    south=(rec.center[1],rec.center[2],rec.center[3]-rec.radius)
-    found_north=found_south=false
-    for p in degenerates
-        point=m.points[p]
-        if _points_close(point,north,tol)
-            found_north && return false
-            found_north=true
-        elseif _points_close(point,south,tol)
-            found_south && return false
-            found_south=true
-        else
-            return false
-        end
-    end
-    return found_north && found_south
+    # The encoding stores no polar axis: a rotated sphere is still the same
+    # ball, with its pole vertices on any diameter. Requiring the world-z
+    # poles rejected every generically rotated sphere as "inconsistent".
+    pa=m.points[degenerates[1]];pb=m.points[degenerates[2]]
+    C=rec.center
+    da=(pa[1]-C[1],pa[2]-C[2],pa[3]-C[3])
+    db=(pb[1]-C[1],pb[2]-C[2],pb[3]-C[3])
+    abs(sqrt(da[1]^2+da[2]^2+da[3]^2)-rec.radius)<=tol || return false
+    return _points_close(da,(-db[1],-db[2],-db[3]),tol)
 end
 
 function _materialized_cone_consistent(m::GeoModel, tag::Int, rec)
