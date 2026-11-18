@@ -1470,7 +1470,11 @@ function _run(tokens::Vector{String};_reuse_session::Bool=false)
             end
             explicit_shell=dim==3 && target!==nothing &&
                            !isempty(result.model.volumes[target])
-            if isempty(constraints) && !embedded && !explicit_shell
+            # The single-entity projection needs exactly one target; with several
+            # surfaces/volumes the classified authority mesh (which carries the
+            # embedded and periodic records itself) is written instead.
+            if (isempty(constraints) && !embedded && !explicit_shell) ||
+               (target===nothing && _cli_classified_mesh(result) isa MixedMesh)
                 # `-save_parametric`/`-save_topology` need classified
                 # ownership/parameters — prefer the meshing authority's
                 # native `MixedMesh` when one was produced. It is preferred
