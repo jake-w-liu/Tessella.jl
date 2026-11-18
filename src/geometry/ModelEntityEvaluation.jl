@@ -59,6 +59,82 @@ function _model_line_derivative(line,tag::Int,caller::AbstractString)
         line.delta[axis],caller,"Line[$tag] derivative"),3)
 end
 
+# The exact sum of five doubles rounded to nearest even: the partial sums are
+# kept as a non-overlapping expansion and rounded once, as in CPython's
+# `math.fsum`. `nothing` when a partial sum overflows.
+function _model_exact_sum5(x1::Float64,x2::Float64,x3::Float64,x4::Float64,x5::Float64)
+    partials=(0.0,0.0,0.0,0.0,0.0);n=0
+    for term in (x1,x2,x3,x4,x5)
+        x=term;kept=0
+        for k in 1:n
+            y=partials[k]
+            abs(x)<abs(y) && ((x,y)=(y,x))
+            hi=x+y
+            lo=y-(hi-x)
+            if lo!=0.0
+                kept+=1
+                partials=Base.setindex(partials,lo,kept)
+            end
+            x=hi
+        end
+        isfinite(x) || return nothing
+        n=kept
+        if x!=0.0
+            n+=1
+            partials=Base.setindex(partials,x,n)
+        end
+    end
+    n==0 && return 0.0
+    hi=partials[n];rest=n-1;lo=0.0
+    while rest>0
+        x=hi;y=partials[rest];rest-=1
+        hi=x+y
+        lo=y-(hi-x)
+        lo!=0.0 && break
+    end
+    if rest>0 && ((lo<0.0 && partials[rest]<0.0) || (lo>0.0 && partials[rest]>0.0))
+        y=2.0lo;x=hi+y
+        y==x-hi && (hi=x)
+    end
+    return hi
+end
+
+# `a + t(b - a)` rounded once, the value the rational evaluation below
+# returns, from two error-free products and an exact sum. `nothing` outside
+# the range where the products' errors are representable, and when the terms
+# are more than 100 binades apart: the rational path converts through a
+# 256-bit quotient, which holds every bit only of terms that close.
+function _model_exact_lerp(a::Float64,b::Float64,t::Float64)
+    p=t*b;q=t*a
+    (isfinite(p) && isfinite(q)) || return nothing
+    (t==0.0 || b==0.0 || abs(p)>=0x1p-960) || return nothing
+    (t==0.0 || a==0.0 || abs(q)>=0x1p-960) || return nothing
+    largest=max(abs(a),abs(p),abs(q))
+    floor=largest*0x1p-100
+    ((a==0.0 || abs(a)>=floor) && (p==0.0 || abs(p)>=floor) && (q==0.0 || abs(q)>=floor)) ||
+        return nothing
+    return _model_exact_sum5(a,p,fma(t,b,-p),-q,-fma(t,a,-q))
+end
+
+# A straight Line of the built-in kernel at `parameter`, without the rational
+# arithmetic: curve length and size integration evaluate hundreds of points
+# per Line. `nothing` leaves the evaluation, and every diagnostic, to the
+# rational path.
+function _model_line_point_fast(m::GeoModel,tag::Int,parameter::Float64)
+    curve=get(m.curves,tag,nothing)
+    curve===nothing && return nothing
+    first_point,last_point=curve
+    first=get(m.points,first_point,nothing);last=get(m.points,last_point,nothing)
+    (first===nothing || last===nothing) && return nothing
+    (first[1]==last[1] && first[2]==last[2] && first[3]==last[3]) && return nothing
+    x=_model_exact_lerp(first[1],last[1],parameter)
+    y=_model_exact_lerp(first[2],last[2],parameter)
+    z=_model_exact_lerp(first[3],last[3],parameter)
+    (x===nothing || y===nothing || z===nothing) && return nothing
+    (isfinite(x) && isfinite(y) && isfinite(z)) || return nothing
+    return (x,y,z)
+end
+
 function _model_line_point(
     line,parameter,caller::AbstractString,point_index::Int)
     R=Rational{BigInt}
@@ -823,6 +899,8 @@ function _model_curve_point(
     elseif occ!==nothing && occ.occ===:line
         return _occ_line_point(occ,parameter)
     elseif _curve_type(m,tag)==:line
+        fast=_model_line_point_fast(m,tag,parameter)
+        fast===nothing || return fast
         line=_model_line_geometry(m,tag,caller)
         return _model_line_point(line,parameter,caller,index)
     elseif _curve_type(m,tag) in _SPLINE_CURVE_TYPES
