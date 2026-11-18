@@ -2296,9 +2296,19 @@ end
 _geo_exec_lc(context::_GeoNumericContext)=context.native_context_lc
 
 function _geo_sync_native_context!(m::GeoModel,context::_GeoNumericContext)
+    bbox=Base.inferencebarrier(Model._model_mesh_bbox)(m,"execute_geo: synchronize")
+    # `General.MinX`…`General.MaxZ` read `GModel::current()->bounds()` — the
+    # synchronized model's box, 0 when it is empty — whatever `BoundingBox`
+    # forced for the scene.
+    empty=isempty(m.points) && isempty(m.curves) && isempty(m.surfaces) &&
+          isempty(m.volumes) && isempty(m.discrete)
+    for (k,axis) in enumerate(("X","Y","Z"))
+        context.option_numbers[("General",0,"Min"*axis)]=empty ? 0.0 : bbox[2k-1]
+        context.option_numbers[("General",0,"Max"*axis)]=empty ? 0.0 : bbox[2k]
+    end
     context.native_context_forced_bbox && return nothing
     tolerance=something(_geo_option_number(context,"Geometry",0,"Tolerance"),1e-8)
-    context.native_context_lc=Base.inferencebarrier(_model_mesh_lc)(m,tolerance,"execute_geo: synchronize")
+    context.native_context_lc=Model._gmsh_bbox_characteristic_length(bbox,tolerance)
     return nothing
 end
 
@@ -4387,6 +4397,10 @@ function _geo_extrude_vector_values(part::AbstractString,
     if startswith(s,"{") || startswith(s,"(")
         content,rest=s[1]=='{' ? _geo_balanced_group(s,caller) :
                                  _geo_balanced_paren(s,caller)
+        # `(left?-1:1)*lb/2`, `(zmax - zmin) + 2 * l`: a parenthesized
+        # scalar head followed by more FExpr — not a `( VExpr )` group.
+        s[1]=='(' && !isempty(strip(rest)) &&
+            return _geo_exec_numeric_values(s,context,caller)
         isempty(strip(rest)) || throw(ArgumentError(
             "$caller: malformed displacement expression $(repr(s))"))
         return _geo_exec_numeric_values(content,context,caller)

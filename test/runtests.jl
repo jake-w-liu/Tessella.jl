@@ -228,6 +228,7 @@ include("functional/fixtures.jl")
         "geometry/geo_include_extension_test.jl",
         "geometry/geo_arc_function_alias_test.jl",
         "geometry/geo_closest_all_test.jl",
+        "geometry/geo_general_bounds_option_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
