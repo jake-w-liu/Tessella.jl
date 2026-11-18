@@ -50,6 +50,12 @@ be finite `Vector{Float64}` values of equal length and are copied. The public
 [`delaunay2d`](@ref) and [`constrained_delaunay`](@ref) drivers return initialized
 instances; the two-vector constructor creates empty working topology.
 """
+mutable struct _SlotHeap
+    h::Vector{Int32}
+    member::BitVector
+end
+_SlotHeap() = _SlotHeap(Int32[], falses(0))
+
 mutable struct Triangulation
     x::Vector{Float64}          # real point x, indices 1..nreal (GHOST=0 has no coords)
     y::Vector{Float64}
@@ -69,6 +75,9 @@ mutable struct Triangulation
     sorted_segs::Vector{NTuple{2,Int32}}
     sorted_segs_valid::Bool
     bad_scan_from::Int32
+    # Slots that may hold a bad triangle (allocated or reclassified since they
+    # were last verified good); every other slot is known good.
+    bad_pending::_SlotHeap
     # Constraint-box index for `_check_constraint_intersections`: a uniform
     # cell -> constraint-key raster over the point domain. A true crossing or
     # overlap implies the two segments' padded Float64 boxes share a point,
@@ -90,7 +99,7 @@ mutable struct Triangulation
         n=_validate_points(xs,ys,"Triangulation")
         new(copy(xs),copy(ys),Int32[],Int32[],Bool[],Int32[],n,Int32(0),
             zeros(Int32,n),Set{NTuple{2,Int32}}(),Set{NTuple{2,Int32}}(),
-            NTuple{2,Int32}[],false,Int32(1),
+            NTuple{2,Int32}[],false,Int32(1),_SlotHeap(),
             Dict{NTuple{2,Int32},Vector{NTuple{2,Int32}}}(),
             Dict{NTuple{2,Int32},NTuple{4,Float64}}(),
             NTuple{2,Int32}[],(0.0,0.0),0.0,Int32(1),false)
@@ -98,6 +107,48 @@ mutable struct Triangulation
 end
 
 @inline _constrained_edge(T::Triangulation, key) = key in T.seg || key in T.internal
+
+# Min-heap of distinct triangle slots (the refinement scan's pending set).
+function _slotheap_push!(H::_SlotHeap, t::Integer)
+    t = Int32(t)
+    m = H.member
+    if length(m) < t
+        old = length(m); resize!(m, max(Int(t), 2old)); fill!(view(m, old+1:length(m)), false)
+    end
+    @inbounds m[t] && return nothing
+    @inbounds m[t] = true
+    h = H.h; push!(h, t); i = length(h)
+    @inbounds while i > 1
+        p = i >> 1
+        h[p] <= t && break
+        h[i] = h[p]; i = p
+    end
+    @inbounds h[i] = t
+    return nothing
+end
+function _slotheap_popmin!(H::_SlotHeap)
+    h = H.h
+    @inbounds top = h[1]; H.member[top] = false
+    @inbounds last = pop!(h)
+    n = length(h)
+    if n > 0
+        i = 1
+        @inbounds while true
+            c = 2i
+            c > n && break
+            (c < n && h[c+1] < h[c]) && (c += 1)
+            h[c] >= last && break
+            h[i] = h[c]; i = c
+        end
+        @inbounds h[i] = last
+    end
+    return top
+end
+function _slotheap_empty!(H::_SlotHeap)
+    @inbounds for t in H.h; H.member[t] = false; end
+    empty!(H.h)
+    return nothing
+end
 
 @inline _pt(T::Triangulation, i::Integer) = @inbounds (T.x[i], T.y[i])
 @inline _vert(T::Triangulation, t::Integer, k::Integer) = @inbounds T.tv[3*(t-1)+k]
@@ -129,6 +180,7 @@ end
         @inbounds T.alive[t]=true
         _touch_vtri!(T, Int32(t), a, b, c)
         t<T.bad_scan_from && (T.bad_scan_from=Int32(t))
+        _slotheap_push!(T.bad_pending, t)
         return Int32(t)
     else
         length(T.alive)<typemax(Int32) ||
@@ -139,6 +191,7 @@ end
         t = Int32(length(T.alive))
         _touch_vtri!(T, t, a, b, c)
         t<T.bad_scan_from && (T.bad_scan_from=t)
+        _slotheap_push!(T.bad_pending, t)
         return t
     end
 end
@@ -1360,6 +1413,12 @@ the domain boundary to be closed constrained loops (as a meshing domain must be)
 """
 function classify_interior(T::Triangulation)
     _assert_operable(T,"classify_interior")
+    return _classify_interior(T)
+end
+
+# `classify_interior` without the full O(n) structural assertion, for internal
+# callers that maintain the invariants themselves (refinement segment splits).
+function _classify_interior(T::Triangulation)
     isempty(T.seg) && throw(ArgumentError(
         "classify_interior: at least one closed constrained boundary loop is required"))
     ntri = length(T.alive)
@@ -1639,15 +1698,22 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
     _segidx_delete!(T,key)
     _segidx_insert!(T,_skey(a,mid)); _segidx_insert!(T,_skey(mid,b))
     _insert_point!(T, mid; constrained=true)
+    # A rounded midpoint is not exactly on the segment.  At Float64 resolution
+    # (cascading splits at a small input angle) the cavity can then miss a half;
+    # report that here instead of through a later parity/assertion failure.
+    (_edge_between(T,a,mid)[1]!=0 && _edge_between(T,mid,b)[1]!=0) ||
+        throw(ErrorException("refine!: splitting constrained segment ($a,$b) at Float64 " *
+                             "resolution lost a subsegment (an input angle is too small for " *
+                             "the requested quality bound)"))
     # constraints changed → recompute interior (segment splits are comparatively rare)
-    ni = classify_interior(T)
+    ni = _classify_interior(T)
     # Any existing slot whose interior flag changes must be rescanned; new slots
-    # already lowered `bad_scan_from` through `_newtri!`.
+    # are already pending through `_newtri!`.
     shared=min(length(interior),length(ni))
     @inbounds for i in 1:shared
         if interior[i]!=ni[i]
             i<T.bad_scan_from && (T.bad_scan_from=Int32(i))
-            break
+            _slotheap_push!(T.bad_pending, i)
         end
     end
     resize!(interior, length(ni)); @inbounds for i in eachindex(ni); interior[i]=ni[i]; end
@@ -1780,6 +1846,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
     # The quality scan resumes from `bad_scan_from`; every call starts with a
     # complete scan because the criteria may differ from an earlier call.
     T.bad_scan_from=Int32(1)
+    _reset_bad_pending!(T)
     # `gmsh_insertion` mode: triangles whose Steiner candidate was rejected by
     # the LL-distance rules stay permanently out of the queue (upstream
     # `forceRadius(-1)`). Keys are sorted vertex triples so triangulation-slot
@@ -2008,6 +2075,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
     end
     enc = gmsh_insertion ? nothing : _find_encroached(T)
     T.bad_scan_from=Int32(1)
+    _reset_bad_pending!(T)
     bad=queue===nothing ? _find_bad(T,interior,B,area,size,edge_metric,
         size_radius,gmsh_insertion ? skipped : nothing,gsizes) :
         first(_gmsh_queue_select!(queue,T,interior,skipped,gsizes,
@@ -2243,27 +2311,41 @@ function _find_encroached(T::Triangulation)
     return nothing
 end
 
-# First bad triangle in slot order.  Slots below `bad_scan_from` were verified
-# good by an earlier scan and have not been reallocated or reclassified since,
-# and `_needs_refine` depends only on a triangle's own (immutable) vertex
-# coordinates, so resuming the scan there returns exactly the slot a full scan
-# would; the result is identical to scanning from slot 1 while the total cost
-# drops from quadratic to linear in the number of insertions.
+function _reset_bad_pending!(T::Triangulation)
+    _slotheap_empty!(T.bad_pending)
+    for t in 1:length(T.alive); _slotheap_push!(T.bad_pending, t); end
+    return nothing
+end
+
+# First bad triangle in slot order.  Only slots in `bad_pending` can be bad:
+# every other slot was verified good by an earlier scan and has not been
+# reallocated (`_newtri!`) or reclassified (segment splits) since, and
+# `_needs_refine` depends only on a triangle's own (immutable) vertices, so the
+# smallest bad pending slot is exactly the slot a full scan from slot 1 would
+# return.  Slots found good are dropped, so the total scan cost is linear in the
+# number of insertions.  (The former resume-from-lowest-changed-slot scan went
+# quadratic because recycled slots from the freelist are low.)
 function _find_bad(T::Triangulation, interior::Vector{Bool}, B, maxarea, sizefn,edgefn,radiusfn,
                    skipped::Union{Nothing,Set{NTuple{3,Int32}}}=nothing,
                    gsizes=nothing)
-    start=max(Int(T.bad_scan_from),1)
+    pending=T.bad_pending
     nslots=length(T.alive)
-    @inbounds for t in start:nslots
-        (T.alive[t] && t <= length(interior) && interior[t] && !_is_ghost_tri(T,t)) || continue
-        skipped!==nothing && _trikey(T,t) in skipped && continue
-        if _needs_refine(T, t, B, maxarea, sizefn,edgefn,radiusfn,gsizes)
-            T.bad_scan_from=Int32(t)
-            return Int32(t)
+    found=Int32(0)
+    while !isempty(pending.h)
+        t=Int(@inbounds pending.h[1])
+        if t>nslots
+            _slotheap_empty!(pending); break
         end
+        @inbounds if (T.alive[t] && t <= length(interior) && interior[t] && !_is_ghost_tri(T,t)) &&
+                     !(skipped!==nothing && _trikey(T,t) in skipped) &&
+                     _needs_refine(T, t, B, maxarea, sizefn,edgefn,radiusfn,gsizes)
+            found=Int32(t)
+            break
+        end
+        _slotheap_popmin!(pending)
     end
-    T.bad_scan_from=Int32(nslots+1)
-    return Int32(0)
+    T.bad_scan_from=found==0 ? Int32(nslots+1) : found
+    return found
 end
 
 # first subsegment (deterministic order) encroached by coordinate p, or nothing
