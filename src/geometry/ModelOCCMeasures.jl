@@ -1412,8 +1412,12 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
     end
     face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
     torus=count(u->face_kind(u)===:torus,uses)
-    if torus==1 && all(u->face_kind(u)===:torus ||
-                       face_kind(u)===:plane,uses)
+    # A sector solid is the torus face alone (full turn) or with its two
+    # plane caps — a box with a toroidal cavity is torus+planes too, and
+    # must not be taken for the cavity's own sector.
+    if torus==1 && length(uses)<=3 &&
+            all(u->face_kind(u)===:torus ||
+                   face_kind(u)===:plane,uses)
         # A purely torus+plane boundary may be a torus sector — the
         # swept profile's Pappus integrals. V = φ·πr2²·r1; the centroid
         # rides the sector bisector at (r1+r2²/4r1)·sinc(φ/2) from
@@ -1949,7 +1953,7 @@ function _model_occ_solid_moment2(kernel,id)
     end
     face_kind=u->get(kernel.shapes[u[1]].geometry.geometry,:occ,nothing)
     torus_faces=[fid for (fid,_) in uses if face_kind((fid,false))===:torus]
-    if length(torus_faces)==1 &&
+    if length(torus_faces)==1 && length(uses)<=3 &&
             all(u->face_kind(u) in (:torus,:plane),uses)
         trec=kernel.shapes[only(torus_faces)].geometry.geometry
         win=_occ_torus_sector_window(kernel,only(torus_faces),trec)
