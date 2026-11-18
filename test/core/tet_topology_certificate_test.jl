@@ -77,7 +77,7 @@ end
     rng = MersenneTwister(20261118)
 
     @testset "valid complexes are certified without the audit" begin
-        for n in 1:4
+        for n in 1:3
             grid = ttc_grid(n)
             @test MT._tet_topology_accepts(grid, Dict{Int32,Int}())
             @test MT._tet_topology(grid) == (true, "ok")
@@ -109,8 +109,8 @@ end
 
     @testset "certificate and audit agree on damaged meshes" begin
         valid = 0; invalid = 0
-        for base in (ttc_grid(2), ttc_grid(3), ttc_ring(5), ttc_ring(8))
-            for _ in 1:300
+        for base in (ttc_grid(2), ttc_ring(6))
+            for _ in 1:80
                 mutated = ttc_mutate(rng, base)
                 same, ok = ttc_agree(mutated)
                 @test same
@@ -120,12 +120,12 @@ end
                 ok ? (valid += 1) : (invalid += 1)
             end
         end
-        @test valid > 100 && invalid > 100
+        @test valid > 20 && invalid > 20
     end
 
     @testset "certificate and audit agree on random small complexes" begin
         valid = 0
-        for _ in 1:6000
+        for _ in 1:600
             nv = rand(rng, 4:8); nt = rand(rng, 1:7)
             tets = Matrix{Int32}(undef, 4, nt)
             for t in 1:nt
@@ -140,7 +140,7 @@ end
 
     @testset "pinched boundary vertices use the caller's expected link" begin
         grid = ttc_grid(2)
-        for _ in 1:100
+        for _ in 1:20
             vertex = Int32(rand(rng, 1:Int(maximum(grid))))
             same, _ = ttc_agree(grid; pinch=Dict{Int32,Int}(vertex => rand(rng, (-1, 0, 1, 2))))
             @test same

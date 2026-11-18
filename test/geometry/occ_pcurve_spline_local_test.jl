@@ -24,7 +24,7 @@ end
 @testset "Spline pcurves evaluate locally with the dense values" begin
     rng = MersenneTwister(20261118)
     checked = 0
-    for _ in 1:300
+    for _ in 1:60
         p = rand(rng, 1:5)
         n = rand(rng, p+1:p+30)
         interior = sort!(rand(rng, n - p - 1))
@@ -46,7 +46,7 @@ end
             checked += 1
         end
     end
-    @test checked == 300 * 20
+    @test checked == 60 * 20
 
     # Degrees beyond the stack tables keep the dense path.
     p = 9

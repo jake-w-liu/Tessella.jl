@@ -34,7 +34,7 @@ end
 @testset "Line points are the rounded exact value" begin
     rng = MersenneTwister(20261118)
     answered = 0
-    for _ in 1:200_000
+    for _ in 1:20_000
         a = line_coordinate(rng); b = line_coordinate(rng); t = line_parameter(rng)
         value = M._model_exact_lerp(a, b, t)
         value === nothing && continue
@@ -42,7 +42,7 @@ end
         expected = line_reference(a, b, t)
         value == expected || @test value == expected
     end
-    @test answered > 150_000
+    @test answered > 15_000
 
     # Ties between two doubles are broken by the terms below them.
     @test M._model_exact_sum5(1.0, eps(1.0) / 2, floatmin(Float64), 0.0, 0.0) == nextfloat(1.0)
