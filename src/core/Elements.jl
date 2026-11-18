@@ -3285,9 +3285,19 @@ function _binary_count(value::UInt64,maximum::Int,context::AbstractString)
     return Int(value)
 end
 
+# Fixed-width scalar reads detect truncation from the short read itself:
+# querying `filesize`/`position` per scalar costs two system calls each.
+@noinline _binary_truncated(context::AbstractString)=throw(ArgumentError(
+    "read_mixed_msh: truncated binary payload in $context"))
+
 @inline function _binary_u32(io,swap::Bool,context::AbstractString)
-    _binary_available(io,sizeof(UInt32),context)
-    return _binary_u32_unchecked(io,swap)
+    value=try
+        read(io,UInt32)
+    catch err
+        err isa EOFError && _binary_truncated(context)
+        rethrow()
+    end
+    return swap ? bswap(value) : value
 end
 
 @inline function _binary_u32_unchecked(io,swap::Bool)
@@ -3304,8 +3314,12 @@ end
 end
 
 @inline function _binary_u64(io,swap::Bool,context::AbstractString)
-    _binary_available(io,sizeof(UInt64),context)
-    value=read(io,UInt64)
+    value=try
+        read(io,UInt64)
+    catch err
+        err isa EOFError && _binary_truncated(context)
+        rethrow()
+    end
     return swap ? bswap(value) : value
 end
 
@@ -3313,9 +3327,7 @@ end
 # 64-bit writers, 4 bytes on 32-bit writers. `wide` selects the width.
 @inline function _binary_size_t(io,swap::Bool,wide::Bool,context::AbstractString)
     wide && return _binary_u64(io,swap,context)
-    _binary_available(io,sizeof(UInt32),context)
-    value=read(io,UInt32)
-    return UInt64(swap ? bswap(value) : value)
+    return UInt64(_binary_u32(io,swap,context))
 end
 
 # Binary `size_t` emission mirrors `_binary_size_t`: `wide` selects the field
@@ -4851,6 +4863,26 @@ function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
     return nothing
 end
 
+# Element sections translate every connectivity entry through the node-tag map.
+# Real meshes use compact tags, so a dense vector replaces the Dict probe; sparse
+# or huge tags keep the Dict (the vector is never larger than ~4x the node count).
+function _mixed_node_index_vector(acc)
+    map=acc.node_map; n=length(map)
+    n==0 && return nothing
+    hi=maximum(keys(map))
+    hi<=UInt64(4)*UInt64(n)+UInt64(1024) || return nothing
+    index=zeros(Int32,Int(hi)+1)
+    for (tag,row) in map
+        @inbounds index[Int(tag)+1]=row
+    end
+    return index
+end
+
+@inline function _mixed_node_internal(index,map,external::UInt64)
+    index===nothing && return get(map,external,Int32(0))
+    return external<UInt64(length(index)) ? (@inbounds index[Int(external)+1]) : Int32(0)
+end
+
 function _mixed_physical_tag(value::Int,context::AbstractString)
     0<=value<=typemax(Int32) || throw(ArgumentError(
         "read_mixed_msh: $context must be non-negative and fit Int32"))
@@ -4947,7 +4979,7 @@ end
 function _push_mixed_cell_binary!(acc,etype::Int,physical::Int32,entity::Int32,
                                   element_tag::UInt64,external_nodes,limits;
                                   parent_tag::UInt64=UInt64(0),
-                                  reserve_connectivity::Bool=true)
+                                  reserve_connectivity::Bool=true,nodevec=nothing)
     layout=_msh_element_layout(etype,"binary element")
     layout.variable && throw(ArgumentError(
         "read_mixed_msh: binary MSH 2.2 has no record width for variable-connectivity type $etype"))
@@ -4962,7 +4994,7 @@ function _push_mixed_cell_binary!(acc,etype::Int,physical::Int32,entity::Int32,
         raw>0 || throw(ArgumentError(
             "read_mixed_msh: element node tags must be positive"))
         external=UInt64(raw)
-        internal=get(acc.node_map,external,Int32(0))
+        internal=_mixed_node_internal(nodevec,acc.node_map,external)
         internal!=0 || throw(ArgumentError(
             "read_mixed_msh: element references unknown node tag $external"))
         push!(bucket.nodes,internal)
@@ -4983,6 +5015,7 @@ end
 function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
+    nodevec=_mixed_node_index_vector(acc)
     for _ in 1:count
         reader=_MshRecordReader(io)
         element_tag=_msh_record_size_t!(reader,"v2 element tag")
@@ -5060,7 +5093,7 @@ function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false)
         end
         for _ in 1:arity
             external=_msh_record_size_t!(reader,"v2 element node tag")
-            internal=get(acc.node_map,external,Int32(0))
+            internal=_mixed_node_internal(nodevec,acc.node_map,external)
             internal!=0 || throw(ArgumentError(
                 "read_mixed_msh: element references unknown node tag $external"))
             push!(bucket.nodes,internal)
@@ -5080,6 +5113,7 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
     _binary_available(io,_binary_bytes(count,2sizeof(Int32),"v2 binary Elements"),
                       "v2 binary Elements")
     sizehint!(acc.element_tags,length(acc.element_tags)+count)
+    nodevec=_mixed_node_index_vector(acc)
     nread=0
     while nread<count
         etype=Int(_binary_i32(io,swap,"v2 binary element-block type"))
@@ -5160,7 +5194,7 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
             _push_mixed_cell_binary!(
                 acc,etype,physical,elementary,element_tag,
                 @view(data[first_node:last_node]),limits;
-                parent_tag=parent_tag,reserve_connectivity=false)
+                parent_tag=parent_tag,reserve_connectivity=false,nodevec=nodevec)
             offset+=width; nread+=1
         end
     end
@@ -5173,6 +5207,7 @@ end
 
 function _read_mixed_elements_v4!(acc,io,limits)
     reader=_MshTokenReader(io)
+    nodevec=_mixed_node_index_vector(acc)
     nblocks=_msh_int(
         _msh_token!(reader,"v4 Elements header"),"v4 element-block count")
     count=_msh_int(
@@ -5245,7 +5280,7 @@ function _read_mixed_elements_v4!(acc,io,limits)
                 external=_msh_size_t(
                     _msh_token!(reader,"v4 element node tag"),
                     "v4 element node tag")
-                internal=get(acc.node_map,external,Int32(0))
+                internal=_mixed_node_internal(nodevec,acc.node_map,external)
                 internal!=0 || throw(ArgumentError(
                     "read_mixed_msh: element references unknown node tag $external"))
                 push!(bucket.nodes,internal)
@@ -5269,6 +5304,7 @@ function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
         _binary_size_t(io,swap,wide,"v4 binary Elements header"),
         limits.max_blocks,"v4 element-block")
     remaining_elements=limits.max_elements-length(acc.element_tags)
+    nodevec=_mixed_node_index_vector(acc)
     count=_binary_count(
         _binary_size_t(io,swap,wide,"v4 binary Elements header"),
         remaining_elements,"v4 element")
@@ -5353,7 +5389,7 @@ function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
                 external=data[offset+i]
                 external>0 || throw(ArgumentError(
                     "read_mixed_msh: element node tags must be positive"))
-                internal=get(acc.node_map,external,Int32(0))
+                internal=_mixed_node_internal(nodevec,acc.node_map,external)
                 internal!=0 || throw(ArgumentError(
                     "read_mixed_msh: element references unknown node tag $external"))
                 push!(bucket.nodes,internal)
