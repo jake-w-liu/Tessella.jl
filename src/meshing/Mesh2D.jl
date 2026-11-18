@@ -486,6 +486,69 @@ function locate(T::Triangulation, px, py, vid; start::Integer=T.last)
     end
 end
 
+# Walk start from a nearby inserted vertex `hint` (the driver loops keep a bucket
+# grid of inserted vertices).  For a point strictly inside the current hull the
+# SoS walk result is the unique containing triangle whatever the start, so the
+# triangulation is unchanged.  A point outside or on the hull is located by a
+# path-dependent ghost, so it repeats the default walk from `T.last`, keeping the
+# result (and the storage order of every later triangle) identical.
+function _locate_hinted(T::Triangulation, px, py, vid, hint::Integer)
+    s = @inbounds T.vtri[hint]
+    (s != 0 && s <= length(T.alive) && T.alive[s] && _vslot(T, s, hint) != 0) ||
+        return locate(T, px, py, vid)
+    t = locate(T, px, py, vid; start=s)
+    _is_ghost_tri(T, t) && return locate(T, px, py, vid)
+    @inbounds for k in 1:3
+        nb = _nbr(T, t, k)
+        (nb != 0 && _is_ghost_tri(T, nb) && _in_circumcircle(T, nb, vid)) &&
+            return locate(T, px, py, vid)
+    end
+    return t
+end
+
+# Uniform bucket grid remembering the last inserted vertex per cell.
+struct _StartGrid
+    x0::Float64; y0::Float64; inv::Float64; g::Int
+    cell::Vector{Int32}
+end
+function _StartGrid(xs::Vector{Float64}, ys::Vector{Float64})
+    n = length(xs)
+    n == 0 && return _StartGrid(0.0, 0.0, 0.0, 1, zeros(Int32, 1))
+    x0, x1 = extrema(xs); y0, y1 = extrema(ys)
+    span = max(x1 - x0, y1 - y0)
+    g = clamp(ceil(Int, sqrt(n / 2)), 1, 4096)
+    inv = (isfinite(span) && span > 0) ? g / span : 0.0
+    isfinite(inv) || (inv = 0.0)
+    inv == 0.0 && (g = 1)
+    return _StartGrid(x0, y0, inv, g, zeros(Int32, g * g))
+end
+@inline function _gridcell(G::_StartGrid, x::Float64, y::Float64)
+    G.g == 1 && return 0, 0
+    i = (x - G.x0) * G.inv; j = (y - G.y0) * G.inv
+    ci = isfinite(i) ? clamp(unsafe_trunc(Int, min(max(i, 0.0), Float64(G.g - 1))), 0, G.g - 1) : 0
+    cj = isfinite(j) ? clamp(unsafe_trunc(Int, min(max(j, 0.0), Float64(G.g - 1))), 0, G.g - 1) : 0
+    return ci, cj
+end
+@inline function _grid_insert!(G::_StartGrid, x::Float64, y::Float64, v::Int32)
+    ci, cj = _gridcell(G, x, y)
+    @inbounds G.cell[cj * G.g + ci + 1] = v
+    return nothing
+end
+# A recently inserted vertex near (x,y), or 0 (searches up to three rings).
+function _grid_hint(G::_StartGrid, x::Float64, y::Float64)
+    ci, cj = _gridcell(G, x, y); g = G.g
+    @inbounds for r in 0:3
+        for dj in -r:r, di in -r:r
+            (abs(di) == r || abs(dj) == r) || continue
+            i = ci + di; j = cj + dj
+            (0 <= i < g && 0 <= j < g) || continue
+            v = G.cell[j * g + i + 1]
+            v != 0 && return v
+        end
+    end
+    return Int32(0)
+end
+
 function _first_alive(T::Triangulation)
     @inbounds for t in eachindex(T.alive)
         T.alive[t] && return Int32(t)
@@ -514,7 +577,8 @@ function insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false)
 end
 
 function _insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false,
-                        newtris::Union{Nothing,Vector{Int32}}=nothing,workspace=nothing)
+                        newtris::Union{Nothing,Vector{Int32}}=nothing,workspace=nothing,
+                        hint::Integer=0)
     vid isa Bool && throw(ArgumentError("insert_point!: vertex index must not be Bool"))
     1 <= vid <= T.nreal ||
         throw(ArgumentError("insert_point!: vertex $vid is outside 1:$(T.nreal)"))
@@ -524,7 +588,7 @@ function _insert_point!(T::Triangulation,vid::Integer;constrained::Bool=false,
         "insert_point!: triangulation has no initialized non-collinear seed; use delaunay2d"))
     vid = Int32(vid)
     px, py = _pt(T, vid)
-    t0 = locate(T, px, py, vid)
+    t0 = hint == 0 ? locate(T, px, py, vid) : _locate_hinted(T, px, py, vid, hint)
     cavity, boundary = _delaunay_cavity(T, t0, vid, constrained;workspace)
     for t in cavity; _killtri!(T, t); end
     _retriangulate_cavity!(T, boundary, Int32(vid), newtris;workspace)
@@ -1103,8 +1167,11 @@ function delaunay2d(xs::Vector{Float64}, ys::Vector{Float64}; rng_seed::Integer=
         workspace=(cavity=Int32[],incav=Set{Int32}(),
             boundary=Tuple{Int32,Int32,Int32}[],stack=Int32[],
             spoke=Dict{Int32,Tuple{Int32,Int32}}())
+        grid=_StartGrid(T.x,T.y)
+        for v in placed; _grid_insert!(grid,T.x[v],T.y[v],v); end
         for v in order
-            _insert_point!(T,v;workspace)
+            _insert_point!(T,v;workspace,hint=_grid_hint(grid,T.x[v],T.y[v]))
+            _grid_insert!(grid,T.x[v],T.y[v],v)
         end
     else
         for v in order
@@ -1261,7 +1328,15 @@ function constrained_delaunay(xs::Vector{Float64},ys::Vector{Float64},
     placedset = Set{Int32}(placed)
     order = Int32[i for i in 1:T.nreal if !(Int32(i) in placedset)]
     _shuffle_det!(order, seed)
-    for v in order; _insert_point!(T, v); end
+    workspace=(cavity=Int32[],incav=Set{Int32}(),
+        boundary=Tuple{Int32,Int32,Int32}[],stack=Int32[],
+        spoke=Dict{Int32,Tuple{Int32,Int32}}())
+    grid=_StartGrid(T.x,T.y)
+    for v in placed; _grid_insert!(grid,T.x[v],T.y[v],v); end
+    for v in order
+        _insert_point!(T,v;workspace,hint=_grid_hint(grid,T.x[v],T.y[v]))
+        _grid_insert!(grid,T.x[v],T.y[v],v)
+    end
     for (i,j) in boundaries
         _insert_segment!(T,i,j)
     end
