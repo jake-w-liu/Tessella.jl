@@ -33,7 +33,11 @@ function _native_view_writer_mesh(slot,caller)
     owners=[assembly.nodes[row].owner for row in rows]
     parameters=[Model._model_mesh_projected_parameter(assembly.nodes[row].owner,
         assembly.nodes[row].parameter) for row in rows]
-    families=unique(assembly.cells[i].msh for i in cells)
+    # Gmsh numbers MSH2 elements type by type (points, lines, triangles,
+    # quadrangles, tetrahedra, hexahedra, prisms, pyramids) across all entities,
+    # not entity by entity, so the block order follows the type rank.
+    families=sort!(unique(assembly.cells[i].msh for i in cells);
+        by=msh->(last(_dim01_cell_order((msh=msh,owner=(0,0)))),msh))
     blocks=ElementBlock[];block_owners=Vector{Int32}[];element_tags=Vector{UInt64}[]
     for msh in families
         selected=[i for i in cells if assembly.cells[i].msh==msh]

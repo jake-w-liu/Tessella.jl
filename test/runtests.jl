@@ -201,6 +201,7 @@ include("functional/fixtures.jl")
         "interfaces/api_geo_view_transport_test.jl",
         "interfaces/cli_meshadapt_view_frontend_test.jl",
         "interfaces/msh_import_identity_test.jl",
+        "interfaces/msh2_type_order_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
