@@ -49,7 +49,9 @@ using .Oracles
     # exact zero decided by expansions, without allocation
     a = (0.0, 0.0, 0.0); b = (1.0, 0.0, 0.0); c = (0.0, 1.0, 0.0); d = (1.0, 1.0, 0.0); e = (0.0, 0.0, 1.0)
     @test insphere(a, b, c, d, e) == 0
-    @test _is_alloc(a, b, c, d, e) == 0
+    # allocation is only meaningful for compiled code (the suite runs --compile=min)
+    Base.JLOptions().compile_enabled != 3 && @test _is_alloc(a, b, c, d, e) == 0
     @test incircle((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)) == 0
-    @test _ic_alloc((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)) == 0
+    Base.JLOptions().compile_enabled != 3 &&
+        @test _ic_alloc((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)) == 0
 end

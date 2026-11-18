@@ -37,7 +37,9 @@ import Tessella.Predicates as P
     # degenerate orient2_sos / orient3_sos allocate nothing
     a = (0.0, 0.0, 0.0); b = (1.0, 0.0, 0.0); cc = (0.0, 1.0, 0.0); d = (0.25, 0.5, 0.0)
     orient3_sos(a, b, cc, d, 4, 2, 7, 1)
-    @test _o3sos_alloc(a, b, cc, d) == 0
+    # allocation is only meaningful for compiled code (the suite runs --compile=min)
+    Base.JLOptions().compile_enabled != 3 && @test _o3sos_alloc(a, b, cc, d) == 0
     orient2_sos((0.0, 0.0), (1.0, 1.0), (2.0, 2.0), 3, 1, 2)
-    @test _o2sos_alloc((0.0, 0.0), (1.0, 1.0), (2.0, 2.0)) == 0
+    Base.JLOptions().compile_enabled != 3 &&
+        @test _o2sos_alloc((0.0, 0.0), (1.0, 1.0), (2.0, 2.0)) == 0
 end
