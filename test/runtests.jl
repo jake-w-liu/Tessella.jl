@@ -233,6 +233,7 @@ include("functional/fixtures.jl")
         "geometry/geo_define_constant_options_test.jl",
         "geometry/geo_multiline_control_test.jl",
         "geometry/geo_occ_mass_selector_test.jl",
+        "geometry/geo_field_model_list_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

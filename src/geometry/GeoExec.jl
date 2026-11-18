@@ -884,7 +884,8 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         throw(ArgumentError("execute_geo: mesh_dim exceeds the platform Int range"))
     end
     dim in 0:3 || throw(ArgumentError("execute_geo: mesh_dim must be in 0:3"))
-    params=read_geo_params(path;_onelab_action=_initial_onelab_action)
+    params=read_geo_params(path;_onelab_action=_initial_onelab_action,
+                           _skip_unavailable_fields=true)
     # A model-file merge supplies an operation-owned detached model and context.
     # Ordinary standalone/open execution still starts with an empty model.
     model=_initial_model===nothing ? GeoModel() : _initial_model

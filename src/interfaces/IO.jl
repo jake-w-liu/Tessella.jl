@@ -8743,8 +8743,21 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         # `newField` no-ops on unknown kinds and duplicate ids — neither
         # changes `maxId()`.
         field.captures[2] in _GEO_FIELD_KINDS || return nothing
-        tag=_geo_allocator_statement_tag(
-            field.captures[1],context,"$caller Field declaration tag")
+        tag=try
+            _geo_allocator_statement_tag(
+                field.captures[1],context,"$caller Field declaration tag")
+        catch err
+            err isa InterruptException && rethrow()
+            (conservative &&
+             (err isa ArgumentError || err isa _GeoSyntaxAbort)) || rethrow()
+            # `Field[#all() + 1]` over a model-dependent list: the scan
+            # cannot know the id, so `newf` becomes unavailable instead of
+            # aborting the whole parameter scan.
+            _geo_allocator_invalidate!(state,
+                "could not evaluate Field tag while tracking allocators: " *
+                _geo_expr_preview(field.captures[1]);geometry=false,fields=true)
+            return nothing
+        end
         tag in state.live_fields || _geo_allocator_record_field!(state,tag)
         return nothing
     end
@@ -10410,7 +10423,8 @@ functions, CSG and Boolean geometry are deliberately not evaluated. Numeric
 field options are normalized to literals; geometric references and string or
 point-dependent field expressions remain source strings.
 """
-function read_geo_params(path;max_file_bytes=typemax(Int),_onelab_action::AbstractString="")
+function read_geo_params(path;max_file_bytes=typemax(Int),_onelab_action::AbstractString="",
+                         _skip_unavailable_fields::Bool=false)
     caller="read_geo_params"
     path isa AbstractString || throw(ArgumentError(
         "$caller: path must be a string"))
@@ -11004,7 +11018,18 @@ function read_geo_params(path;max_file_bytes=typemax(Int),_onelab_action::Abstra
             end
             return nothing
         end
-        _consume_stmt_inner(residual)
+        try
+            _consume_stmt_inner(residual)
+        catch err
+            err isa InterruptException && rethrow()
+            # `Field[#all() + 1]...` / `Background Field = #all() + 1` over a
+            # model-dependent list: the scan cannot evaluate the id. Under
+            # `execute_geo` the executor rebuilds the field map anyway, so it
+            # skips the statement instead of aborting the whole run.
+            (_skip_unavailable_fields && err isa ArgumentError &&
+             occursin("is unavailable",err.msg) &&
+             occursin(r"\bField\b",residual)) || rethrow()
+        end
         return nothing
     end
     function _consume_stmt_inner(line)
