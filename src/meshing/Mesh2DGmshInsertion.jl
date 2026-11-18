@@ -287,6 +287,33 @@ end
         # `sqrt(R'M R)` measures the cell in units of `h`, so weak-direction
         # elongation no longer fires the scalar min-direction bound.
         pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+        if gsizes.trace.cartesian_close
+            # Isotropic background on a warped chart: upstream's default
+            # `MTri3` radius (`radiusNorm == 2`) is the Cartesian
+            # circumradius over the scalar size, exactly as on a plane. A
+            # centroid metric cannot stand in for it on a cell that touches
+            # a pole, where one parameter direction has no world length.
+            wa=_gmsh_surface_world(gsizes.trace,T,a)
+            wb=_gmsh_surface_world(gsizes.trace,T,b)
+            wc=_gmsh_surface_world(gsizes.trace,T,c)
+            # A cell resting on a collapsed boundary row (a pole/apex edge:
+            # two parameter representatives of one world point) has no world
+            # extent and is dropped by the weld, so it is neither refined
+            # nor an active front.
+            ((wa==wb && _constrained_edge(T,_skey(a,b))) ||
+             (wb==wc && _constrained_edge(T,_skey(b,c))) ||
+             (wc==wa && _constrained_edge(T,_skey(c,a)))) && return 0.0
+            background=_gmsh_mean_size3(gsizes.vbgm[a],gsizes.vbgm[b],gsizes.vbgm[c])
+            lc=extend_boundary ? min(background,
+                _gmsh_mean_size3(gsizes.vsize[a],gsizes.vsize[b],gsizes.vsize[c])) : background
+            # Two seam representatives of one world point across the sheet:
+            # `circumCenterXY` reports collinear input with its -99999
+            # sentinel, which queues the cell ahead of every real one.
+            (wa==wb || wb==wc || wc==wa) && return 99999.0*sqrt(2.0)/lc
+            center=_gmsh_circumcenter_xyz(wa,wb,wc)
+            radius=_gmsh_norm3(_gmsh_sub3(wa,center))/lc
+            return isfinite(radius) ? radius : 99999.0*sqrt(2.0)/lc
+        end
         metric=_gmsh_surface_metric(gsizes.trace,pa,pb,pc)
         if extend_boundary
             vs=_gmsh_mean_size3(gsizes.vsize[a],gsizes.vsize[b],gsizes.vsize[c])
@@ -382,6 +409,10 @@ function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
     a,b,c=_gmsh_surface_triangle_nodes(T,t,gsizes.trace)
     metric=_gmsh_surface_metric(gsizes.trace,_pt(T,a),_pt(T,b),_pt(T,c))
     u,v=_edge(T,t,slot)
+    if gsizes.trace isa _GmshSurfaceMetricCarrier && gsizes.trace.cartesian_close
+        return _gmsh_frontal_point_cartesian(T,t,slot,gsizes,extend_boundary,
+                                             a,b,c,u,v)
+    end
     # The carrier's `q` is metric-normalized: `extend_boundary` composes
     # the edge's local scalar bound as the same eigenvalue floor used by
     # the queue radius.
@@ -430,6 +461,38 @@ function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
         return _gmsh_plane_circle_intersection(fast,midpoint,tangent,distance)
     end
     return fast
+end
+
+# `optimalPointFrontal`/`optimalPointFrontalB` for an isotropic background
+# on a warped chart. The step along the Voronoi direction is the world length
+# `L = min(ρ·√3/2, q)`: `ρ` the edge's scalar size, `q` the first-fundamental
+# length from the edge midpoint to the metric circumcentre. The point is then
+# the intersection of the surface with the world circle of radius `L` about
+# the edge's world midpoint, Newton-solved from the parametric guess.
+function _gmsh_frontal_point_cartesian(T,t,slot,gsizes,extend_boundary,a,b,c,u,v)
+    carrier=gsizes.trace
+    pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
+    ground=carrier.ground((pa[1]+pb[1]+pc[1])/3.0,(pa[2]+pb[2]+pc[2])/3.0)
+    center,_=_gmsh_circumcenter_metric(pa,pb,pc,ground)
+    pu=_pt(T,u);pv=_pt(T,v)
+    midpoint=(0.5*(pu[1]+pv[1]),0.5*(pu[2]+pv[2]))
+    dx=center[1]-midpoint[1];dy=center[2]-midpoint[2]
+    direction_norm=sqrt(dx*dx+dy*dy)
+    q=sqrt(dx*ground[1]*dx+2.0*dx*ground[2]*dy+dy*ground[3]*dy)
+    (isfinite(q) && q>0 && direction_norm>0) || return nothing
+    dirx=dx/direction_norm;diry=dy/direction_norm
+    ratio=sqrt(dirx*dirx*ground[1]+2.0*diry*dirx*ground[2]+diry*diry*ground[3])
+    background=0.5*(gsizes.vbgm[u]+gsizes.vbgm[v])
+    lc=extend_boundary ? min(background,
+        0.5*(gsizes.vsize[u]+gsizes.vsize[v])) : background
+    distance=min(lc*sqrt(3.0)*0.5,q)
+    fast=(midpoint[1]+distance*dirx/ratio,midpoint[2]+distance*diry/ratio)
+    (isfinite(fast[1]) && isfinite(fast[2])) || return nothing
+    wa=_gmsh_surface_world(carrier,T,u)
+    wb=_gmsh_surface_world(carrier,T,v)
+    wc=_gmsh_surface_world(carrier,T,_vert(T,t,slot))
+    return _gmsh_surface_circle_intersection(fast,carrier.lift,wa,wb,wc;
+                                             radius=distance)
 end
 
 @inline function _gmsh_contains_surface_point(T,t,point)

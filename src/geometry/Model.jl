@@ -9797,9 +9797,6 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         # selector, which `_model_occ_metric_surface_mesh` implements on the
         # face's own (u,v) chart.
         algorithm=_normal_surface_mesh_algorithm(m,t,caller;metric=true)
-        (size_field===nothing || algorithm in (1,7)) || throw(ArgumentError(
-            "$caller: a background size field on curved Surface[$t] is not " *
-            "implemented"))
         if algorithm in (1,7)
             producer=algorithm==1 ? _model_occ_meshadapt_surface_mesh : _model_occ_metric_surface_mesh
             production=((Base.inferencebarrier(producer)(m,t,caller;
@@ -9835,7 +9832,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
             lower_input,lower_limit=_gmsh_native_surface_lower_input(
                 m,options,_mesh_input,_mesh_node_high_water,caller)
             mesh,owners,params,_=((Base.inferencebarrier(_model_occ_curved_surface_mesh_tracked)(
-                m,t,caller;initial_only=algorithm==3,_mesh1d_options=options))::Tuple{Mesh, Vector{Tuple{Int, Int32}}, Vector{Union{Nothing, Vector{Float64}}}, NamedTuple})
+                m,t,caller;initial_only=algorithm==3,sized_algorithm=algorithm,
+                size_field,_mesh1d_options=options))::Tuple{Mesh, Vector{Tuple{Int, Int32}}, Vector{Union{Nothing, Vector{Float64}}}, NamedTuple})
             diag=validate(mesh)
             diag.ok || throw(ErrorException(
                 "$caller: invalid mesh — "*join(diag.messages,"; ")))
@@ -9848,7 +9846,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
                 lower_input,lower_limit,caller))
         end
         mesh=((Base.inferencebarrier(_model_occ_curved_surface_mesh)(m,t,caller;
-            initial_only=algorithm==3,_mesh1d_options=options))::Mesh)
+            initial_only=algorithm==3,sized_algorithm=algorithm,size_field,
+            _mesh1d_options=options))::Mesh)
         diag=validate(mesh)
         diag.ok || throw(ErrorException(
             "$caller: invalid mesh — "*join(diag.messages,"; ")))
@@ -10404,7 +10403,9 @@ function _model_volume_surface_mesh(m::GeoModel,surface::Int,
             _mesh1d_options=get(kwargs,:_mesh1d_options,nothing),
             _boundary_regrade=get(kwargs,:_boundary_regrade,true)).mesh
         return _model_occ_curved_surface_mesh(m,surface,caller;
-                                            initial_only=algorithm==3)
+            initial_only=algorithm==3,sized_algorithm=algorithm,
+            size_field=get(kwargs,:size_field,nothing),
+            _mesh1d_options=get(kwargs,:_mesh1d_options,nothing))
     end
     return mesh_model_surface(m,surface;kwargs...)
 end

@@ -278,19 +278,33 @@ end
     return nothing
 end
 
-function _gmsh_surface_circle_intersection(fast,lift,wa,wb,wc)
+function _gmsh_surface_circle_intersection(fast,lift,wa,wb,wc;radius=nothing)
     middle=((wa[1]+wb[1])*0.5,(wa[2]+wb[2])*0.5,(wa[3]+wb[3])*0.5)
     e=_gmsh_sub3(wb,wa)
     g=_gmsh_sub3(wc,middle)
     n1=_gmsh_cross3(e,g)
     n1n=_gmsh_norm3(n1)
+    if n1n<1e-12 && radius!==nothing
+        # The seed cell has no world plane (its third row is a second
+        # parameter representative of an edge endpoint — a seam or pole
+        # image). The frontal circle still lies in the edge's perpendicular
+        # bisector plane; orient it toward the parametric guess instead.
+        g=_gmsh_sub3(lift(fast[1],fast[2]),middle)
+        n1=_gmsh_cross3(e,g)
+        n1n=_gmsh_norm3(n1)
+    end
     n1n<1e-12 && return fast
     n1=(n1[1]/n1n,n1[2]/n1n,n1[3]/n1n)
     n2=_gmsh_normalize3(_gmsh_cross3(n1,e))
     # The circle's world radius is the fast point's own world distance to the
     # edge midpoint — exactly the `L` optimalPointFrontal returned upstream.
-    wf=lift(fast[1],fast[2])
-    d=_gmsh_norm3(_gmsh_sub3(wf,middle))
+    # A caller that already holds `L` as a world length passes it as `radius`.
+    d=if radius===nothing
+        wf=lift(fast[1],fast[2])
+        _gmsh_norm3(_gmsh_sub3(wf,middle))
+    else
+        Float64(radius)
+    end
     (isfinite(d) && d>0) || return fast
     x=Float64[fast[1],fast[2],0.0]
     residual=zeros(3);perturbed=similar(residual);step=similar(residual)

@@ -6963,6 +6963,8 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                                         caller::AbstractString;
                                         initial_only::Bool=false,
                                         raw_preimage::Bool=false,
+                                        sized_algorithm::Int=0,
+                                        size_field=nothing,
                                         _mesh1d_options=nothing)
     sg=get(m.surface_geometry,t,nothing)
     occ=sg===nothing ? nothing : get(sg,:occ,nothing)
@@ -7186,9 +7188,20 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
             emit((u,v),_occ_surface_point(sg,u,v),(2,Int32(t)),[u,v])
         end
     end
+    # Size-driven fill (`sized_algorithm` 5 Delaunay / 6 Frontal-Delaunay):
+    # the boundary-only CDT is refined in the parameter plane under the
+    # patch metric and the resolved background size, the way upstream
+    # `meshGFace` fills an OCC face. A sheet the kernel cannot refine falls
+    # back to the fixed lattice below instead of failing the Surface.
+    sized=nothing
+    if !initial_only && !raw_preimage && sized_algorithm in (5,6) &&
+            uspan>0.0 && vspan>0.0
+        sized=_occ_curved_surface_sized_fill(m,t,sg,xs,ys,segs,lift,
+            _mesh1d_options,size_field,sized_algorithm,caller)
+    end
     # Upstream `ALGO_2D_INITIAL_ONLY` stops at the recovered 1-D boundary
     # mesh, so initial-only suppresses the size-based interior lattice.
-    if !initial_only && uspan>0.0 && vspan>0.0
+    if sized===nothing && !initial_only && uspan>0.0 && vspan>0.0
         # Direction-aware targets: a swept band's boundary mixes long
         # v-direction seams with short u-direction rim chords, so a single
         # mean spacing starves the short direction of lattice columns and
@@ -7252,8 +7265,12 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
             end
         end
     end
-    T=constrained_delaunay(xs,ys,segs)
-    interior=classify_interior(T)
+    if sized===nothing
+        T=constrained_delaunay(xs,ys,segs)
+        interior=classify_interior(T)
+    else
+        T,interior=sized
+    end
     mesh=to_mesh(T;interior)
     # Lift: boundary vertices keep the canonical 3-D they share with the
     # neighbouring faces' curve nodes; interior vertices evaluate the
@@ -7264,12 +7281,17 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     end
     uvcoords=mesh.coords
     coords=Matrix{Float64}(undef,3,nnodes(mesh))
+    face_owned=falses(nnodes(mesh))
     for k in 1:nnodes(mesh)
         u=uvcoords[1,k];v=uvcoords[2,k]
         p3=get(canonical,(u,v),nothing)
-        p3===nothing && (p3=_occ_surface_point(sg,u,v))
+        p3===nothing && (face_owned[k]=true;p3=_occ_surface_point(sg,u,v))
         coords[1,k]=p3[1];coords[2,k]=p3[2];coords[3,k]=p3[3]
     end
+    # Upstream `meshGFace` ends Delaunay/Frontal with `Mesh.Smoothing`
+    # Laplacian passes on the face-owned vertices.
+    sized===nothing || _occ_curved_surface_smooth!(uvcoords,mesh.tris,coords,
+        face_owned,sg,m.meshing.native_smoothing)
     # Degenerate-face collapse: the two uv boundary representatives of a pole
     # or apex (the degenerate edge's endpoints at u=0 and u=a) lift to the same
     # 3-D vertex, so a uv triangle touching both collapses to an edge. Weld
@@ -7622,7 +7644,23 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     # The uv-CCW winding lifts to either side of the face depending on the
     # parametrization's handedness; align the patch with the face's
     # geometric normal like a planar patch follows its `axis`.
-    cell=mesh.tris[:,1]
+    # Decide on a cell whose three welded nodes each have a single parametric
+    # preimage: a seam or pole node keeps only its first representative in
+    # `kept_uv`, so a cell touching one would average parameters from both
+    # sheets and read the normal at an unrelated point of the face.
+    preimages=zeros(Int32,length(kept))
+    for r in remap
+        preimages[r]+=Int32(1)
+    end
+    decision=1
+    for c in axes(mesh.tris,2)
+        if preimages[mesh.tris[1,c]]==1 && preimages[mesh.tris[2,c]]==1 &&
+                preimages[mesh.tris[3,c]]==1
+            decision=c
+            break
+        end
+    end
+    cell=mesh.tris[:,decision]
     um=(kept_uv[cell[1]][1]+kept_uv[cell[2]][1]+kept_uv[cell[3]][1])/3
     vm=(kept_uv[cell[1]][2]+kept_uv[cell[2]][2]+kept_uv[cell[3]][2])/3
     nn=_brep_surface_normal(sg,um,vm)

@@ -132,7 +132,7 @@ function _gmsh_native_trace_cavity_accept(T,cavity,boundary,parameter,onmodel,
             cross=_gmsh_cross3(_gmsh_sub3(second,first),_gmsh_sub3(point,first))
             perpendicular=_gmsh_norm3(cross)/d3
         end
-        if trace isa _GmshSurfaceMetricCarrier
+        if trace isa _GmshSurfaceMetricCarrier && !trace.cartesian_close
             # Metric-only carrier: the local `vsize` bound folds into the
             # tensor as the same isotropic size floor the queue radius uses
             # (`min(lc_bgm, lc_vsize)` in metric space — the tensor already
@@ -212,9 +212,18 @@ struct _GmshSurfaceMetricCarrier{L,G,G2}
     # `vs` folds into the UV metric as `G/vs²` (the `I/vs²` pullback), not
     # the dimensionless `I/vs²` eigenvalue floor `_gmsh_metric_floor` uses.
     ground::G2
+    # `insertVertexB` measures its close-point bounds on the actual Cartesian
+    # vertices. An isotropic background on a warped chart keeps that world
+    # test (`true`): a metric read at the cell centroid overestimates the
+    # distance to a collapsed pole/apex row, whose parameter representatives
+    # lie far apart while their world points coincide. Tensor backgrounds
+    # keep the metric-normalized bounds (`false`).
+    cartesian_close::Bool
 end
 @inline _GmshSurfaceMetricCarrier(world,lift,metric)=
-    _GmshSurfaceMetricCarrier(world,lift,metric,nothing)
+    _GmshSurfaceMetricCarrier(world,lift,metric,nothing,false)
+@inline _GmshSurfaceMetricCarrier(world,lift,metric,ground)=
+    _GmshSurfaceMetricCarrier(world,lift,metric,ground,false)
 @inline _gmsh_surface_triangle_nodes(T,t,::_GmshSurfaceMetricCarrier)=
     (_vert(T,t,1),_vert(T,t,2),_vert(T,t,3))
 @inline _gmsh_surface_incoming_slots(T,t,::_GmshSurfaceMetricCarrier)=(2,3,1)

@@ -681,3 +681,232 @@ function _model_ruled_surface_mesh(m::GeoModel,t::Int,forced,
         "$caller: Surface[$t] produced no cells"))
     return mesh,embedded
 end
+
+# ── Parametric OCC face fill (Cylinder/Sphere/Cone/Torus/tensor patches) ─────
+#
+# Upstream `meshGFace` runs Delaunay/Frontal-Delaunay on an OCC face in its
+# `(u,v)` parameter plane under the first fundamental form, with the same
+# `BGM_MeshSize` background every other entity sees. The fill below is the
+# OCC-face counterpart of `_model_ruled_surface_mesh`: the unwrapped boundary
+# PSLG of `_model_occ_curved_surface_mesh_tracked` is refined by the native
+# insertion kernel with the metric-only carrier armed on every triangle,
+# `metric(u,v) = G(u,v)/h²` (`G = JᵀJ` from `_occ_surface_d1`, `h` the resolved
+# background at the lifted point). Seam columns and collapsed pole rows stay
+# ordinary boundary chains of the parametric sheet; the caller's weld folds
+# them back onto the closed surface.
+
+# `BGM_MeshSize(GFace, u, v, x, y, z)` with the parameters already known —
+# `_ModelAlgorithmBackgroundSize` step for step, except that the curvature
+# term reads `(u,v)` directly instead of inverting the world point (which is
+# both the dominant cost and ambiguous on a periodic seam).
+struct _OCCSurfaceParamBackgroundSize{G}
+    model::GeoModel
+    tag::Int
+    geometry::G
+    options::_ModelMesh1DOptions
+    field::Union{Nothing,AbstractSizeField}
+    caller::String
+end
+
+function (background::_OCCSurfaceParamBackgroundSize)(u,v)
+    options=background.options
+    tag=background.tag
+    x,y,z=_occ_surface_point(background.geometry,Float64(u),Float64(v))
+    entity=(2,tag)
+    value=if options.inner_field!==nothing
+        field_value(options.inner_field,x,y,z,entity)
+    elseif background.field!==nothing
+        size_at(background.field,x,y,z,entity)
+    else
+        GMSH_MAX_SIZE
+    end
+    if options.from_curvature>0
+        defined,cmax,cmin,_,_=_occ_surface_curvatures(background.geometry,
+            Float64(u),Float64(v))
+        curvature=defined ? max(abs(cmax),abs(cmin)) : 1e-12
+        curvature>0 &&
+            (value=min(value,2π/curvature/options.from_curvature))
+    end
+    options.callback===nothing || (value=_apply_size_callback(
+        options.callback,2,tag,x,y,z,value,background.caller))
+    value=value<options.ctx_lc ? value : options.ctx_lc
+    value=max(value,options.lc_min)
+    value=min(value,options.lc_max)
+    if value<=0
+        _model_mesh_error(options,
+            "Wrong mesh element size lc = $value on entity (2,$tag)")
+        value=options.ctx_lc
+    end
+    return value*options.lc_factor
+end
+
+@inline function _occ_surface_ground(geometry,u::Float64,v::Float64)
+    _,du,dv=_occ_surface_d1(geometry,u,v)
+    return (Mesh2D._gmsh_dot3(du,du),Mesh2D._gmsh_dot3(du,dv),
+            Mesh2D._gmsh_dot3(dv,dv))
+end
+
+# Refine the constrained Delaunay triangulation `T` of the unwrapped boundary
+# PSLG `(xs,ys,segs)` of OCC Surface `t`. `world[k]` is the canonical lifted
+# position of PSLG vertex `k`. Returns the interior mask of the refined `T`.
+# An anisotropic background selection is honoured through its strongest
+# direction (`field_value`), like the scalar `vbgm` records of the planar arm.
+function _occ_curved_surface_refine!(m::GeoModel,t::Int,geometry,T,
+        xs::Vector{Float64},ys::Vector{Float64},segs,world_of,options,
+        size_field,algorithm::Int,caller::AbstractString)
+    interior=Vector{Bool}(collect(classify_interior(T)))
+    lift=(u,v)->_occ_surface_point(geometry,Float64(u),Float64(v))
+    background=_OCCSurfaceParamBackgroundSize(m,t,geometry,options,size_field,
+                                               String(caller))
+    world=Vector{NTuple{3,Float64}}(undef,Int(T.nreal))
+    @inbounds for row in 1:Int(T.nreal)
+        stored=get(world_of,_surface_size_key(T.x[row],T.y[row]),nothing)
+        world[row]=stored===nothing ? lift(T.x[row],T.y[row]) : stored
+    end
+    metric=function(u,v)
+        h=background(u,v)
+        g=_occ_surface_ground(geometry,Float64(u),Float64(v))
+        inv2=1.0/(h*h)
+        return (inv2*g[1],inv2*g[2],inv2*g[3])
+    end
+    ground=(u,v)->_occ_surface_ground(geometry,Float64(u),Float64(v))
+    trace=Mesh2D._GmshSurfaceMetricCarrier(world,lift,metric,ground,true)
+    sizes=_ruled_vertex_sizes(T,xs,ys,segs,Float64[],Int[],world;interior)
+    extend=_resolved_extend_from_boundary(m,2,t)
+    return refine!(T;min_angle_deg=0,gmsh_insertion=true,
+        gmsh_algorithm=algorithm==5 ? :delaunay : :frontal,
+        gmsh_extend_boundary=extend>0 || extend==-2,
+        vertex_sizes=sizes,vertex_bgm=copy(sizes),bgm_size=background,
+        model_vertices=Int32[],_gmsh_surface_trace=trace,
+        maxsteps=typemax(Int))
+end
+
+# Constrained Delaunay of the unwrapped sheet plus the sized refinement.
+# Returns `(T, interior)`, or `nothing` (with a warning) when the kernel
+# rejects the sheet, so the caller keeps its fixed-lattice fill.
+function _occ_curved_surface_sized_fill(m::GeoModel,t::Int,geometry,
+        xs::Vector{Float64},ys::Vector{Float64},segs,lift,options,size_field,
+        algorithm::Int,caller::AbstractString)
+    options=_model_algorithm_size_options(m,options,caller)
+    world_of=Dict{NTuple{2,Float64},NTuple{3,Float64}}()
+    for k in eachindex(lift)
+        get!(world_of,_surface_size_key(xs[k],ys[k]),lift[k])
+    end
+    try
+        T=constrained_delaunay(xs,ys,segs)
+        interior=_occ_curved_surface_refine!(m,t,geometry,T,xs,ys,segs,
+            world_of,options,size_field,algorithm,caller)
+        return T,interior
+    catch err
+        err isa InterruptException && rethrow()
+        (err isa ArgumentError || err isa ErrorException ||
+         err isa DomainError) || rethrow()
+        _model_mesh_warn(options,"Surface $t: parametric " *
+            (algorithm==5 ? "Delaunay" : "Frontal-Delaunay") *
+            " refinement failed (" * sprint(showerror,err) *
+            "); using the fixed parametric lattice")
+        return nothing
+    end
+end
+
+# `qmTriangle::eta` on world rows: 1 − |60° − min angle|/60°. A cell collapsed
+# by a pole/apex row (two rows on one world point) has no angle and is skipped.
+@inline function _occ_smooth_eta(world,a,b,c)
+    ax=world[1,a];ay=world[2,a];az=world[3,a]
+    bx=world[1,b];by=world[2,b];bz=world[3,b]
+    cx=world[1,c];cy=world[2,c];cz=world[3,c]
+    lab=hypot(bx-ax,by-ay,bz-az);lbc=hypot(cx-bx,cy-by,cz-bz)
+    lca=hypot(ax-cx,ay-cy,az-cz)
+    (lab>0 && lbc>0 && lca>0) || return 1.0
+    ca=((bx-ax)*(cx-ax)+(by-ay)*(cy-ay)+(bz-az)*(cz-az))/(lab*lca)
+    cb=((ax-bx)*(cx-bx)+(ay-by)*(cy-by)+(az-bz)*(cz-bz))/(lab*lbc)
+    cc=((ax-cx)*(bx-cx)+(ay-cy)*(by-cy)+(az-cz)*(bz-cz))/(lca*lbc)
+    amin=acosd(clamp(max(ca,cb,cc),-1.0,1.0))
+    return 1.0-abs(60.0-amin)/60.0
+end
+
+# Upstream `laplaceSmoothing` (`_relocate`) on the parametric sheet of an OCC
+# face: every face-owned vertex moves toward the average of its neighbours'
+# parameters weighted by the first-fundamental length of the unit direction
+# at the neighbour, in up to five damped trials. A trial is kept only when
+# `_isItAGoodIdeaToMoveThatVertex` holds: the incident cells' parametric
+# area does not grow (no inversion) and their worst world `eta` does not drop.
+# `uv` (2×n) and `world` (3×n) are updated in place; `movable[v]` selects the
+# face-owned rows.
+function _occ_curved_surface_smooth!(uv::AbstractMatrix{Float64},
+        tris::AbstractMatrix{Int32},world::Matrix{Float64},movable,geometry,
+        passes::Int)
+    passes>0 || return nothing
+    n=size(uv,2)
+    offset=zeros(Int,n+1)
+    @inbounds for c in axes(tris,2),k in 1:3
+        offset[tris[k,c]+1]+=1
+    end
+    @inbounds for v in 1:n
+        offset[v+1]+=offset[v]
+    end
+    incident=Vector{Int32}(undef,offset[n+1])
+    cursor=copy(offset)
+    @inbounds for c in axes(tris,2),k in 1:3
+        v=tris[k,c]
+        cursor[v]+=1
+        incident[cursor[v]]=Int32(c)
+    end
+    neighbours=Int32[]
+    @inline uvarea(a,b,c)=0.5*abs((uv[1,b]-uv[1,a])*(uv[2,c]-uv[2,a])-
+                                  (uv[1,c]-uv[1,a])*(uv[2,b]-uv[2,a]))
+    function star(v)
+        area=0.0;quality=1.0
+        @inbounds for i in offset[v]+1:offset[v+1]
+            c=incident[i]
+            a=tris[1,c];b=tris[2,c];d=tris[3,c]
+            area+=uvarea(a,b,d)
+            quality=min(quality,_occ_smooth_eta(world,a,b,d))
+        end
+        return area,quality
+    end
+    @inbounds for _ in 1:passes,v in 1:n
+        movable[v] || continue
+        offset[v+1]>offset[v] || continue
+        empty!(neighbours)
+        for i in offset[v]+1:offset[v+1]
+            c=incident[i]
+            for k in 1:3
+                w=tris[k,c]
+                (w==v || w in neighbours) || push!(neighbours,w)
+            end
+        end
+        bu=uv[1,v];bv=uv[2,v]
+        su=0.0;sv=0.0;total=0.0
+        for w in neighbours
+            du=uv[1,w]-bu;dv=uv[2,w]-bv
+            norm=hypot(du,dv)
+            norm>0 || continue
+            du/=norm;dv/=norm
+            g=_occ_surface_ground(geometry,uv[1,w],uv[2,w])
+            weight=sqrt(max(g[1]*du*du+2.0*g[2]*du*dv+g[3]*dv*dv,0.0))
+            su+=uv[1,w]*weight;sv+=uv[2,w]*weight;total+=weight
+        end
+        (total>0 && isfinite(total)) || continue
+        au=su/total;av=sv/total
+        factor=1.0
+        for _ in 1:5
+            tu=au*factor+bu*(1.0-factor);tv=av*factor+bv*(1.0-factor)
+            old_area,old_quality=star(v)
+            pu=uv[1,v];pv=uv[2,v]
+            px=world[1,v];py=world[2,v];pz=world[3,v]
+            point=_occ_surface_point(geometry,tu,tv)
+            if isfinite(point[1]) && isfinite(point[2]) && isfinite(point[3])
+                uv[1,v]=tu;uv[2,v]=tv
+                world[1,v]=point[1];world[2,v]=point[2];world[3,v]=point[3]
+                new_area,new_quality=star(v)
+                if (1.0+1e-10)*old_area<new_area || new_quality<old_quality
+                    uv[1,v]=pu;uv[2,v]=pv
+                    world[1,v]=px;world[2,v]=py;world[3,v]=pz
+                end
+            end
+            factor/=1.4
+        end
+    end
+    return nothing
+end

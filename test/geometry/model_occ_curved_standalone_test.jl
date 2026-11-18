@@ -11,9 +11,10 @@
 # Mesh.Algorithm admission. Boundary nodes keep their canonical
 # `_periodic_curve_point` coordinates so neighbouring faces still weld
 # bitwise; no boundary writeback is needed (or possible — a seam-welded
-# patch has no conventional edge chain). uv-space embedding, recombination,
-# smoothing and background size fields have no analogue in the lifted
-# construction and reject loudly. Faces bounded by degenerate pole/apex
+# patch has no conventional edge chain). uv-space embedding, recombination
+# and per-Surface smoothing have no analogue in the lifted construction and
+# reject loudly; a background size field drives the sized fill (see
+# `api_occ_curved_sized_fill_test.jl`). Faces bounded by degenerate pole/apex
 # edges mesh through a collapsed-row pole fan — see
 # `model_occ_pole_fan_test.jl`.
 

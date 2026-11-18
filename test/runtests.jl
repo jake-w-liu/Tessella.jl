@@ -207,6 +207,8 @@ include("functional/fixtures.jl")
         "structured/transfinite_elliptic_smoothing_test.jl",
         "interfaces/api_transfinite_automatic_chords_test.jl",
         "fields/restrict_include_boundary_test.jl",
+        "interfaces/api_occ_box_surface_native_test.jl",
+        "interfaces/api_occ_curved_sized_fill_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
