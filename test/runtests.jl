@@ -244,6 +244,7 @@ include("functional/fixtures.jl")
         "geometry/geo_color_option_read_test.jl",
         "geometry/geo_field_string_expr_test.jl",
         "interfaces/cli_embedded_multi_surface_test.jl",
+        "core/predicates_underflow_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

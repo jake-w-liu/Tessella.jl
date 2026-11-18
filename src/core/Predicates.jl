@@ -50,6 +50,18 @@ const ISPERRBOUND_A  = (16.0 + 224.0 * EPS) * EPS
 
 @inline _isign(x)::Int = x > 0 ? 1 : (x < 0 ? -1 : 0)
 @inline _normal_errbound(x::Float64) = isfinite(x)&&x>=floatmin(Float64)
+# Shewchuk's A-stage bounds assume an unbounded exponent range.  With gradual
+# underflow every multiplication may additionally lose up to half the smallest
+# subnormal (2^-1075) in absolute terms, and an underflowed partial product is
+# later MULTIPLIED by the remaining factors (a z-difference, a lift), so its lost
+# bits can dominate a determinant whose computed value and permanent are both
+# comfortably normal (e.g. orient3 with |Δz|≈1e300 and |Δx·Δy|≈1e-400).  Each
+# A-stage bound therefore adds `_UNDERFLOW_PAD` times an upper bound (≥ 1) on the
+# factor that multiplies each partial product.  The pad only needs to cover a few
+# multiples of 2^-1075; it is taken as floatmin(Float64) = 2^-1022 so that the pad
+# arithmetic itself never produces a subnormal (subnormal operands make x86 float
+# operations ~10x slower), and it only matters for determinants near 2^-1022.
+const _UNDERFLOW_PAD = floatmin(Float64)
 
 include("PredicatesAdaptive.jl") # stages B–D: exact expansions for orient2/orient3
 
@@ -161,7 +173,7 @@ function orient2(a, b, c)::Int
         # certify collinearity; the exact dyadic fallback must decide the sign.
         return _orient2_exact(ax, ay, bx, by, cx, cy)
     end
-    errbound = CCWERRBOUND_A * detsum
+    errbound = CCWERRBOUND_A * detsum + _UNDERFLOW_PAD
     (_normal_errbound(errbound)&&(det>=errbound||-det>=errbound)) && return _isign(det)
 
     # Stages B–D: exact Float64 expansions (no allocation); the BigInt path
@@ -227,7 +239,8 @@ function orient3(a, b, c, d)::Int
     permanent = (abs(bdxcdy) + abs(cdxbdy)) * abs(adz) +
                 (abs(cdxady) + abs(adxcdy)) * abs(bdz) +
                 (abs(adxbdy) + abs(bdxady)) * abs(cdz)
-    errbound = O3DERRBOUND_A * permanent
+    errbound = O3DERRBOUND_A * permanent +
+               _UNDERFLOW_PAD * ((abs(adz) + abs(bdz)) + (abs(cdz) + 1.0))
     (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
     # Stages B–D: exact Float64 expansions (no allocation); the BigInt path
@@ -249,7 +262,7 @@ function _orient3_value(a,b,c,d)
     value=adz*(p1-p2)+bdz*(p3-p4)+cdz*(p5-p6)
     permanent=(abs(p1)+abs(p2))*abs(adz)+(abs(p3)+abs(p4))*abs(bdz)+
               (abs(p5)+abs(p6))*abs(cdz)
-    error=O3DERRBOUND_A*permanent
+    error=O3DERRBOUND_A*permanent+_UNDERFLOW_PAD*((abs(adz)+abs(bdz))+(abs(cdz)+1.0))
     (isfinite(error)&&error>=floatmin(Float64)&&(value>error||-value>error)) && return value
     adaptive=_orient3_adaptive(a...,b...,c...,d...,permanent,Val(true))
     adaptive===nothing || return adaptive
@@ -306,10 +319,14 @@ function incircle(a, b, c, d)::Int
           blift * (cdxady - adxcdy) +
           clift * (adxbdy - bdxady)
 
-    permanent = (abs(bdxcdy) + abs(cdxbdy)) * alift +
-                (abs(cdxady) + abs(adxcdy)) * blift +
-                (abs(adxbdy) + abs(bdxady)) * clift
-    errbound = ICCERRBOUND_A * permanent
+    ka = abs(bdxcdy) + abs(cdxbdy)
+    kb = abs(cdxady) + abs(adxcdy)
+    kc = abs(adxbdy) + abs(bdxady)
+    permanent = ka * alift + kb * blift + kc * clift
+    # Underflow pad: a lost bit of a 2x2 minor is scaled by its lift, a lost bit
+    # of a lift by its minor.
+    errbound = ICCERRBOUND_A * permanent +
+               _UNDERFLOW_PAD * (((alift + blift) + (clift + 1.0)) + ((ka + kb) + kc))
     (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
     return _incircle_exact(ax, ay, bx, by, cx, cy, dx, dy)
@@ -381,16 +398,21 @@ function insphere(a, b, c, d, e)::Int
     dexaey = abs(dex * aey); aexdey = abs(aex * dey)
     aexcey = abs(aex * cey); cexaey = abs(cex * aey)
     bexdey = abs(bex * dey); dexbey = abs(dex * bey)
-    permanent =
-        ((cexdey + dexcey) * bezplus + (dexbey + bexdey) * cezplus +
-         (bexcey + cexbey) * dezplus) * alift +
-        ((dexaey + aexdey) * cezplus + (aexcey + cexaey) * dezplus +
-         (cexdey + dexcey) * aezplus) * blift +
-        ((aexbey + bexaey) * dezplus + (bexdey + dexbey) * aezplus +
-         (dexaey + aexdey) * bezplus) * clift +
-        ((bexcey + cexbey) * aezplus + (cexaey + aexcey) * bezplus +
-         (aexbey + bexaey) * cezplus) * dlift
-    errbound = ISPERRBOUND_A * permanent
+    ka = (cexdey + dexcey) * bezplus + (dexbey + bexdey) * cezplus +
+         (bexcey + cexbey) * dezplus
+    kb = (dexaey + aexdey) * cezplus + (aexcey + cexaey) * dezplus +
+         (cexdey + dexcey) * aezplus
+    kc = (aexbey + bexaey) * dezplus + (bexdey + dexbey) * aezplus +
+         (dexaey + aexdey) * bezplus
+    kd = (bexcey + cexbey) * aezplus + (cexaey + aexcey) * bezplus +
+         (aexbey + bexaey) * cezplus
+    permanent = ka * alift + kb * blift + kc * clift + kd * dlift
+    # Underflow pad: lost bits of a 2x2 minor are scaled by a z-difference and a
+    # lift, of a 3x3 minor by a lift, of a lift by its 3x3 minor.
+    liftsum = (alift + blift) + (clift + dlift)
+    zsum = (aezplus + bezplus) + (cezplus + dezplus)
+    errbound = ISPERRBOUND_A * permanent +
+               _UNDERFLOW_PAD * ((zsum + 1.0) * liftsum + (((ka + kb) + (kc + kd)) + 1.0))
     (_normal_errbound(errbound)&&(det>errbound||-det>errbound)) && return _isign(det)
 
     return _insphere_exact(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, ex, ey, ez)
