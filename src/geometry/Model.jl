@@ -8323,6 +8323,56 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
     return slot,points,tris,ids
 end
 
+# Upstream `findTransfiniteCorners(GRegion*)` without explicit corners: the
+# bottom corners are the first bounding face's corners — its explicit
+# `Transfinite Surface` corners, else `GEdgeLoop` order (first curve taken
+# with sign +1, then chained by connectivity) — and each top corner is the
+# other end of the one remaining region curve at that bottom corner. The
+# (i,j,k) tab, hence the tetrahedron split, follows this order. Returns
+# `nothing` when the order is not a usable right-handed cube labelling; the
+# caller then keeps its canonical fallback.
+function _transfinite_volume_gmsh_corners(m::GeoModel,boundaries,neighbors)
+    isempty(boundaries) && return nothing
+    face=abs(first(boundaries))
+    loops=m.surfaces[face]
+    length(loops)==1 || return nothing
+    edges=Int[abs(c) for c in m.loops[only(loops)]]
+    length(edges)==4 || return nothing
+    spec=get(m.meshing.transfinite_surfaces,face,nothing)
+    bottom=if spec!==nothing && length(spec.corners)==4
+        copy(spec.corners)
+    else
+        a,b=m.curves[edges[1]]
+        found=[a,b]
+        rest=edges[2:end]
+        while length(found)<4
+            k=findfirst(e->found[end] in m.curves[e],rest)
+            k===nothing && return nothing
+            x,y=m.curves[rest[k]]
+            deleteat!(rest,k)
+            push!(found,x==found[end] ? y : x)
+        end
+        found
+    end
+    allunique(bottom) || return nothing
+    face_points=Set{Int}()
+    for e in edges
+        union!(face_points,m.curves[e])
+    end
+    top=Int[]
+    for c in bottom
+        haskey(neighbors,c) || return nothing
+        up=setdiff(neighbors[c],face_points)
+        length(up)==1 || return nothing
+        push!(top,only(up))
+    end
+    s=(bottom...,top...)
+    allunique(s) || return nothing
+    orient3(m.points[s[1]],m.points[s[2]],m.points[s[4]],m.points[s[5]])<0 ||
+        return nothing
+    return s
+end
+
 function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
     _mesh_input=nothing,_geometry_points=nothing,_return_bindings=false)
     get(m.embeds,(3,t),NTuple{2,Int}[]) |> isempty || throw(ArgumentError(
@@ -8363,7 +8413,11 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
         "$caller: transfinite Volume[$t] requires 12 boundary Curves; " *
         "found $(length(edge_curve))"))
     stored=m.meshing.transfinite_volumes[t]
-    ordered=if isempty(stored)
+    gmsh_order=isempty(stored) ?
+        _transfinite_volume_gmsh_corners(m,boundaries,neighbors) : nothing
+    ordered=if gmsh_order!==nothing
+        gmsh_order
+    elseif isempty(stored)
         s0=corners[1]
         near=sort!(collect(neighbors[s0]))
         length(near)==3 || throw(ArgumentError(
