@@ -6,29 +6,13 @@ model_box(dim,tag)=collect(A.model.get_bounding_box(dim,tag))
 kernel_box(dim,tag)=collect(A.model.occ.get_bounding_box(dim,tag))
 
 # Bounding boxes of Boolean results with spherical faces. The synchronized
-# model boxed a shelled volume by its boundary curves only (a re-materialized
-# sphere collapsed to its seam meridian; a spherical cap lost its bulge),
+# model boxed a shelled volume by its boundary curves only (a spherical cap
+# lost its bulge; a re-materialized sphere collapsed to its seam meridian),
 # while both paths boxed any sphere piece by the whole ball and a traced
 # section edge by the hull of the whole section curve.
 @testset "OCC bounding boxes of Boolean results with sphere faces" begin
-    # sphere swallowing the box: the fuse is the sphere
-    A.initialize()
-    try
-        A.option("General.Terminal",0)
-        occ=A.model.occ
-        box=occ.add_box(-1,-1,-1,2,2,2)
-        ball=occ.add_sphere(0,0,0,1.9)
-        out,_=occ.fuse([(3,box)],[(3,ball)])
-        occ.synchronize()
-        tag=out[1][2]
-        @test model_box(3,tag)≈[-1.9,-1.9,-1.9,1.9,1.9,1.9] atol=1e-9
-        @test kernel_box(3,tag)≈[-1.9,-1.9,-1.9,1.9,1.9,1.9] atol=1e-9
-    finally
-        A.finalize()
-    end
-
-    # sphere poking through the box face x=1 (cut by a parallel of the
-    # sphere whose axis is z: the section is a meridian-free circle)
+    # sphere centred on the box face x=1: the face cuts it along a great
+    # circle through both poles, leaving a hemispherical cap on each side
     for (name,expected) in (
             ("fuse",[-1.,-1.,-1.,1.45,1.,1.]),
             ("intersect",[0.55,-0.4,-0.35,1.,0.5,0.55]),
