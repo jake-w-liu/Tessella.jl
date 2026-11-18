@@ -7348,6 +7348,15 @@ function _geo_list_reference_values(raw::AbstractString,
         member_splice.captures[1]=="-" && (vals=-vals)
         return vals
     end
+    # `l~{i}()`/`l~{i}[]` — a `String__Index` with `~{FExpr}` suffixes splices
+    # like the plain name it resolves to (examples/boolean/twist.geo).
+    tilde=match(
+        r"^(-?)\s*([A-Za-z_][A-Za-z0-9_]*\s*~\s*\{.*\})\s*(\[\s*\]|\(\s*\))\s*$",
+        source)
+    if tilde!==nothing
+        resolved=_geo_symbol_name(tilde.captures[2],context,caller)
+        source=tilde.captures[1]*resolved*tilde.captures[3]
+    end
     whole=match(
         r"^(-?)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*\]\s*$",source)
     # `x()` — `String__Index LP RP` splices the whole symbol payload,

@@ -3122,6 +3122,35 @@ function _geo_arc_endcurve_ok!(m::GeoModel,context::_GeoNumericContext,
     return ok
 end
 
+# `OCC_Internals::addWire`: the signs are ignored, each edge (in the given
+# order) joins the wire at whichever open end it touches and takes the
+# orientation that continues the chain; the first curve fixes the direction
+# and a negative first tag reverses the finished wire. Returns `(loop, ok)`;
+# `ok=false` when an edge does not touch the wire or the wire stays open.
+function _geo_occ_orient_loop(m::GeoModel,ids::Vector{Int})
+    isempty(ids) && return (Int[],false)
+    t0=abs(first(ids))
+    chain=Int[t0]
+    s,e=m.curves[t0]
+    for id in ids[2:end]
+        t=abs(id);a,b=m.curves[t]
+        if a==e
+            push!(chain,t);e=b
+        elseif b==e
+            push!(chain,-t);e=a
+        elseif b==s
+            pushfirst!(chain,t);s=a
+        elseif a==s
+            pushfirst!(chain,-t);s=b
+        else
+            return (Int[],false)
+        end
+    end
+    s==e || return (Int[],false)
+    first(ids)<0 && (chain=reverse!(-chain))
+    return (chain,true)
+end
+
 # `SortEdgesInLoop` (`reorient=false`) — chains signed curve tags by oriented
 # end→start connectivity, starting a new subloop with the next remaining
 # curve each time the chain closes on itself. A dead-end reports through
@@ -8162,6 +8191,30 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                          :curve,"ellipse",tag,zero_literal,allocator_state) &&
             return
         t=Base.inferencebarrier(_geo_entity_tag)(m,1,tag,caller,zero_literal)
+        if occ
+            # `OCC_Internals::addEllipseArc(start, center, major, end)` — the
+            # arc carries its OCC conic record like the point-form Circle.
+            for point in points
+                if !haskey(m.points,point)
+                    _geo_msg_error!(context,"Unknown OpenCASCADE point with tag $point")
+                    _geo_yyerror!(context,"Could not add ellipse")
+                    return
+                end
+            end
+            geometry,error,warning=Base.inferencebarrier(
+                Model._model_occ_ellipse_arc_geometry)(
+                m.points[points[1]],m.points[points[2]],m.points[points[3]],
+                m.points[points[4]])
+            if error!==nothing
+                _geo_msg_error!(context,error)
+                _geo_yyerror!(context,"Could not add ellipse")
+                return
+            end
+            warning===nothing || _geo_msg_warn!(context,warning)
+            Base.inferencebarrier(_geo_store_curve!)(m,t,points;kind=:ellipse,
+                control_points=true,geometry)
+            return
+        end
         (found,ok)=Base.inferencebarrier(_geo_curve_found_points!)(m,context,points,t)
         n=Base.inferencebarrier(_arc_stored_normal)(normal,caller)
         ok=Base.inferencebarrier(_geo_arc_endcurve_ok!)(m,context,found,n,t;
@@ -8312,6 +8365,13 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         if all(id->haskey(m.curves,abs(id)),curves)
             # `SortEdgesInLoop` stores the chained prefix even on a dead-end.
             (ordered,ok)=Base.inferencebarrier(_geo_sort_loop_partial)(m,curves)
+            if !ok && allocator_state!==nothing &&
+               allocator_state.factory===:opencascade
+                # OCC `addWire` ignores the curve signs: `MakeWire` orients
+                # each connected edge itself (twist.geo's ellipse loop).
+                (occ_ordered,occ_ok)=_geo_occ_orient_loop(m,curves)
+                occ_ok && ((ordered,ok)=(occ_ordered,true))
+            end
             m.loops[t]=ordered
             ok || (_geo_msg_error!(context,"Curve loop $t is wrong");
                    _geo_yyerror!(context,"Could not add curve loop"))
