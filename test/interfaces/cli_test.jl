@@ -410,7 +410,7 @@ Physical Volume("domain", 72) = {1};
         point_mesh_size=read_msh(point_mesh_size_output).mesh
         @test validate(point_mesh_size).ok
         @test mesh_crc(point_mesh_size).sha==
-              "8a67d9438df20ec8bbf33536ec089b59c458e61d9902bc8c93e0e2f27aaa8c22"
+              "132a95502bc83280cca1771f2440076d1d8d9bb59199c3b979b638991a8cff58"
 
         points_of_input=joinpath(directory,"point-mesh-size-points-of.geo")
         points_of_output=joinpath(directory,"point-mesh-size-points-of.msh")
