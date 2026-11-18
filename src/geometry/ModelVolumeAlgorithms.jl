@@ -268,13 +268,16 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
     extra=interior_points===nothing ? NTuple{3,Float64}[] : interior_points
     failures=String[]
     function certify(mesh)
-        passed,why=_certify_surface_fill(surface,mesh)
-        # A fill bounded by the surface triangles themselves has the actual
-        # constructor facet incidence by definition.
-        passed && node_order!==nothing && !_fill_boundary_is_surface(surface,mesh) &&
-            !_model_native_boundary_facets_match(surface,mesh) &&
+        # Actual constructor facets must be the boundary cell for cell. That
+        # is a property of the incidence alone, so it is settled first: a
+        # fill that fails it (the hull of a non-convex Region, say) is
+        # refused without the geometric gate, whose cost grows with the
+        # square of the surface size.
+        if node_order!==nothing && !_fill_boundary_is_surface(surface,mesh) &&
+                !_model_native_boundary_facets_match(surface,mesh)
             return false,"actual PLC constructor facet incidence differs"
-        return passed,why
+        end
+        return _certify_surface_fill(surface,mesh)
     end
     # General boundaries: recover the surface inside a tetrahedralization of
     # its own vertices. The result has exactly the surface triangles as its
