@@ -2211,21 +2211,21 @@ function _extrude_occ_transform!(m::GeoModel, dim::Int, tag::Int, spec, caller)
         g=_occ_geometry(m,tag)
         g===nothing && return nothing
         m.curve_geometry[tag]=_transform_occ_curve_record(
-            m,tag,g,_extrude_affine(spec),caller,"Curve[$tag]")
+            m,tag,g,_extrude_affine(spec,caller),caller,"Curve[$tag]")
     else
         g=get(m.surface_geometry,tag,nothing)
         (g===nothing || !hasproperty(g,:occ)) && return nothing
         m.surface_geometry[tag]=_transform_occ_surface_record(
-            g,_extrude_affine(spec),caller,"Surface[$tag]")
+            g,_extrude_affine(spec,caller),caller,"Surface[$tag]")
     end
     return nothing
 end
 
 # The `_AffineTransform` equivalent of the extrusion's copy transform —
 # only OCC geometry records read it (chapeau points use `_extrude_move`).
-_extrude_affine(spec) = spec.type===:translate ?
-    _affine_translation(spec.T) : spec.rot
+_extrude_affine(spec, caller) = spec.type===:translate ?
+    _affine_translation(spec.T,caller) : spec.rot
 
 _extrude_occ_surface_transform(g, spec, caller, what) =
     (g===nothing || !hasproperty(g,:occ)) ? g :
-    _transform_occ_surface_record(g,_extrude_affine(spec),caller,what)
+    _transform_occ_surface_record(g,_extrude_affine(spec,caller),caller,what)

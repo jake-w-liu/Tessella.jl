@@ -45,4 +45,17 @@ Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
     @test bl.counts[3] == 110
     @test bl.counts[5] == 75
 
+    # OCC-factory `.geo` translation extrusion with Layers used to throw a
+    # MethodError (`_affine_translation` missing its caller argument).
+    # Gmsh 4.15.2: 150 nodes, 112 quadrangles, 80 hexahedra.
+    oc = _xgeo_mesh("""
+        SetFactory("OpenCASCADE");
+        Rectangle(1)={0,0,0,1,0.5};
+        Transfinite Curve{:}=5; Transfinite Surface{1}; Recombine Surface{1};
+        Extrude {0,0,0.7} { Surface{1}; Layers{{2,3},{0.4,1}}; Recombine; }
+        """, 3)
+    @test oc.nodes == 150
+    @test oc.counts[3] == 112
+    @test oc.counts[5] == 80
+
 end
