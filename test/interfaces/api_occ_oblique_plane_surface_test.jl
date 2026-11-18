@@ -92,6 +92,14 @@ end
         warped[3]=(1.0,1.0,1e-9)
         @test_throws ArgumentError M._model_surface_projection(
             warped,[1,2,3,4],1,"test")
+        # The lifted corner may be the one that spans the widest triangle
+        # with the anchor (here with the diagonal corner): it lies on that
+        # triangle's plane by construction, so every other corner has to be
+        # measured against it too. This wire is a ruled patch, not a plane.
+        lifted=NTuple{3,Float64}[(0.0,0.0,0.0),(1.0,0.0,0.0),(1.0,1.0,0.0),
+                                 (0.0,1.0,0.5)]
+        @test_throws ArgumentError M._model_surface_projection(
+            lifted,[1,2,3,4],1,"test")
         # Exactly coplanar input keeps its first distinct point as basis.
         square=NTuple{3,Float64}[(0.0,0.0,0.5),(1.0,0.0,0.5),(1.0,1.0,0.5),
                                  (0.0,1.0,0.5)]

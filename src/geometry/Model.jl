@@ -5860,9 +5860,16 @@ function _model_surface_projection(
     # origin) and to the boundary's own extent, and keep rejecting genuine
     # warp. The offset is measured against a well-conditioned plane, the
     # widest triple reachable from the anchor, rather than the fit triple.
+    # Once one point needs the tolerance, every point is measured against
+    # that plane: the widest triple may contain the very point that failed
+    # the exact predicate (a corner lifted out of a quadrilateral spans the
+    # widest triangle with its diagonal), and it then lies on "its" plane
+    # while the remaining corners do not.
     tolerant=nothing
+    exact=all(coordinate->orient3(anchor,second,third,coordinate)==0,
+              coordinates)
     for (index,coordinate) in pairs(coordinates)
-        orient3(anchor,second,third,coordinate)==0 && continue
+        exact && break
         if tolerant===nothing
             far=anchor;far_distance=0.0;magnitude=0.0;extent=0.0
             for candidate in coordinates
