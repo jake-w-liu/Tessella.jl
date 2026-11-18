@@ -1757,3 +1757,34 @@ function _bl_surface_production(m::GeoModel,t::Int,mesh,
     end
     return _ModelSurfaceProduction(mesh,tags,owners,params,retained,next)
 end
+
+# Entity topology for entity-aware size fields (`Restrict`, `Constant`):
+# upstream `getRestrictEntities` follows the CAD boundary (`IncludeBoundary`)
+# and embedded (`IncludeEmbedded`) relations of the listed entities. Direct
+# links only; the field builder closes them transitively.
+function _model_field_entity_topology(m::GeoModel)
+    boundaries=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
+    for (curve,ends) in m.curves
+        boundaries[(1,curve)]=unique!([(0,ends[1]),(0,ends[2])])
+    end
+    for (surface,loops) in m.surfaces
+        out=Tuple{Int,Int}[]
+        for loop in loops,c in get(m.loops,loop,Int[])
+            (1,abs(c)) in out || push!(out,(1,abs(c)))
+        end
+        boundaries[(2,surface)]=out
+    end
+    for (volume,shells) in m.volumes
+        out=Tuple{Int,Int}[]
+        for shell in shells,s in get(m.surface_loops,shell,Int[])
+            (2,abs(s)) in out || push!(out,(2,abs(s)))
+        end
+        boundaries[(3,volume)]=out
+    end
+    embedded=Dict{Tuple{Int,Int},Vector{Tuple{Int,Int}}}()
+    for (key,children) in m.embeds
+        embedded[(Int(key[1]),Int(key[2]))]=
+            Tuple{Int,Int}[(Int(c[1]),Int(c[2])) for c in children]
+    end
+    return boundaries,embedded
+end

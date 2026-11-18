@@ -206,6 +206,7 @@ include("functional/fixtures.jl")
         "structured/transfinite_volume_gmsh_corners_test.jl",
         "structured/transfinite_elliptic_smoothing_test.jl",
         "interfaces/api_transfinite_automatic_chords_test.jl",
+        "fields/restrict_include_boundary_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

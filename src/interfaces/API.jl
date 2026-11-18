@@ -10778,10 +10778,14 @@ function _session_size_field_locked(m::GeoModel;raw::Bool=false)
     bbox=bounds===nothing ? nothing :
          (bounds[1],bounds[4],bounds[2],bounds[5],bounds[3],bounds[6])
     entities=(d,name)->_field_entity_mesh(m,d,name)
+    # Restrict/Constant IncludeBoundary/IncludeEmbedded need the CAD links.
+    entity_boundaries,entity_embedded=Model._model_field_entity_topology(m)
     return raw ? _build_geo_field(params,entities,BACKGROUND_FIELD[];
-        model_bbox=bbox,context_fields=context_fields) :
+        model_bbox=bbox,context_fields=context_fields,
+        entity_boundaries,entity_embedded) :
         build_geo_size_field(params,entities;
-            model_bbox=bbox,context_fields=context_fields)
+            model_bbox=bbox,context_fields=context_fields,
+            entity_boundaries,entity_embedded)
 end
 
 function _session_mesh1d_options(m::GeoModel,caller::AbstractString)

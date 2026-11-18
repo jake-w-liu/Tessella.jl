@@ -10231,9 +10231,11 @@ function _geo_mesh_background_field(m::GeoModel,
         err isa InterruptException && rethrow()
         nothing
     end
+    entity_boundaries,entity_embedded=Model._model_field_entity_topology(m)
     return _build_geo_field(
         params,(d,name)->_geo_field_entity_mesh(m,d,name,caller),tag;
         model_bbox=bbox,geometry_tolerance=geometry_tolerance,
+        entity_boundaries,entity_embedded,
         context_fields=(spec,config,entities,params)->
             _geo_mesh_context_fields(m,context,spec,config,entities,params))
 end
@@ -10835,6 +10837,8 @@ function _geo_adapt_field(m,context,field_tag,caller)
             model_bbox=try _model_mesh_bbox(m,caller) catch; nothing end,
             geometry_tolerance=something(
                 _geo_option_number(context,"Geometry",0,"Tolerance"),1e-8),
+            entity_boundaries=Model._model_field_entity_topology(m)[1],
+            entity_embedded=Model._model_field_entity_topology(m)[2],
             context_fields=(spec,config,entities,params)->
                 _geo_mesh_context_fields(m,context,spec,config,entities,params))
         field isa AbstractSizeField || throw(ArgumentError(
