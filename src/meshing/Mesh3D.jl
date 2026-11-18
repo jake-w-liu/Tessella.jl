@@ -561,6 +561,71 @@ function locate3(T::Triangulation3, px, py, pz, vid; start::Integer=0)
     end
 end
 
+# Walk start from a nearby inserted vertex `hint` (delaunay3d keeps a bucket grid
+# of inserted vertices).  For a point strictly inside the current hull the SoS
+# walk result is the unique containing tet whatever the start; any other point
+# (outside the hull, or on a face plane of the found tet, where ghost and SoS
+# decisions are path dependent) repeats the default location, so the
+# triangulation and its storage order are unchanged.
+function _locate3_hinted(T::Triangulation3, px, py, pz, vid, hint::Integer)
+    s = @inbounds T.vtet[hint]
+    ok = s != 0 && s <= length(T.alive) && T.alive[s]
+    ok && (ok = _vert(T,s,1)==hint || _vert(T,s,2)==hint || _vert(T,s,3)==hint || _vert(T,s,4)==hint)
+    ok || return locate3(T, px, py, pz, vid)
+    t = locate3(T, px, py, pz, vid; start=s)
+    _is_ghost_tet(T, t) && return locate3(T, px, py, pz, vid)
+    # Only a point STRICTLY inside a real tet is certainly strictly inside the
+    # hull; anything on a face, edge or vertex plane takes the default walk.
+    p = (px, py, pz)
+    @inbounds for k in 1:4
+        f = _face(T, t, k)
+        orient3(_pt(T,f[1]), _pt(T,f[2]), _pt(T,f[3]), p) == 0 &&
+            return locate3(T, px, py, pz, vid)
+    end
+    return t
+end
+
+# Uniform bucket grid remembering the last inserted vertex per cell.
+struct _StartGrid3
+    o::NTuple{3,Float64}; inv::Float64; g::Int
+    cell::Vector{Int32}
+end
+function _StartGrid3(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64})
+    n = length(xs)
+    n == 0 && return _StartGrid3((0.0,0.0,0.0), 0.0, 1, zeros(Int32, 1))
+    x0,x1 = extrema(xs); y0,y1 = extrema(ys); z0,z1 = extrema(zs)
+    span = max(x1-x0, y1-y0, z1-z0)
+    g = clamp(ceil(Int, cbrt(n / 2)), 1, 256)
+    inv = (isfinite(span) && span > 0) ? g / span : 0.0
+    isfinite(inv) || (inv = 0.0)
+    inv == 0.0 && (g = 1)
+    return _StartGrid3((x0,y0,z0), inv, g, zeros(Int32, g^3))
+end
+@inline function _gridaxis3(G::_StartGrid3, x::Float64, o::Float64)
+    u = (x - o) * G.inv
+    isfinite(u) || return 0
+    return clamp(unsafe_trunc(Int, min(max(u, 0.0), Float64(G.g - 1))), 0, G.g - 1)
+end
+@inline _gridcell3(G::_StartGrid3, x, y, z) =
+    G.g == 1 ? (0,0,0) : (_gridaxis3(G,x,G.o[1]), _gridaxis3(G,y,G.o[2]), _gridaxis3(G,z,G.o[3]))
+@inline function _grid3_insert!(G::_StartGrid3, x, y, z, v::Int32)
+    i,j,k = _gridcell3(G, x, y, z)
+    @inbounds G.cell[(k*G.g + j)*G.g + i + 1] = v
+    return nothing
+end
+# A recently inserted vertex near (x,y,z), or 0 (searches up to two shells).
+function _grid3_hint(G::_StartGrid3, x, y, z)
+    ci,cj,ck = _gridcell3(G, x, y, z); g = G.g
+    @inbounds for r in 0:2, dk in -r:r, dj in -r:r, di in -r:r
+        max(abs(di),abs(dj),abs(dk)) == r || continue
+        i = ci+di; j = cj+dj; k = ck+dk
+        (0 <= i < g && 0 <= j < g && 0 <= k < g) || continue
+        v = G.cell[(k*g + j)*g + i + 1]
+        v != 0 && return v
+    end
+    return Int32(0)
+end
+
 function _first_alive3(T::Triangulation3)
     @inbounds for t in eachindex(T.alive); T.alive[t] && return Int32(t); end
     error("Mesh3D: no live tets")
@@ -589,12 +654,13 @@ function _locate_scan(T::Triangulation3, px, py, pz, vid)
 end
 
 # ── Bowyer–Watson insertion ─────────────────────────────────────────────────────
-function insert_point3!(T::Triangulation3, vid::Integer; newtets::Union{Nothing,Vector{Int32}}=nothing)
+function insert_point3!(T::Triangulation3, vid::Integer; newtets::Union{Nothing,Vector{Int32}}=nothing,
+                        hint::Integer=0)
     1 <= vid <= T.nreal ||
         throw(ArgumentError("insert_point3!: vertex $vid is outside 1:$(T.nreal)"))
     T.vtet[vid] == 0 || throw(ArgumentError("insert_point3!: vertex $vid is already inserted"))
     px,py,pz = _pt(T, vid)
-    t0 = locate3(T, px, py, pz, vid)
+    t0 = hint == 0 ? locate3(T, px, py, pz, vid) : _locate3_hinted(T, px, py, pz, vid, hint)
     # Epoch-stamped marks replace a per-insertion Set: a slot is in the cavity
     # iff its mark equals the current epoch.  Marks grow with tet storage and
     # are cleared only when the epoch counter wraps.
@@ -638,7 +704,7 @@ function _retriangulate3!(T::Triangulation3, boundary, vid::Int32, newtets)
     # face containing vid is a "spoke" shared with a sibling new tet; siblings are
     # matched by their non-vid edge (which may include GHOST). Uniform handling ⇒
     # correct hull extension when vid lands outside the current hull.
-    spoke = T.spoke; empty!(spoke)
+    spoke = _spoke_table(3 * length(boundary))
     anyt = Int32(0)
     for (f1,f2,f3,nb) in boundary
         hasG = _is_ghost_v(f1) || _is_ghost_v(f2) || _is_ghost_v(f3)
@@ -666,11 +732,76 @@ function _retriangulate3!(T::Triangulation3, boundary, vid::Int32, newtets)
             k == vslot && continue
             fk = _face(T, t, k)
             e1, e2 = _non(fk, vid)
-            _link_ghost_spoke!(T, spoke, _edgekey(e1, e2), t, k)
+            _link_spoke_table!(T, spoke, _edgekey(e1, e2), t, k)
         end
     end
-    isempty(spoke) || error("Mesh3D: cavity boundary not a topological sphere (unmatched face)")
+    open_spokes = spoke.open
+    _clear_spoke_table!(spoke)
+    open_spokes == 0 || error("Mesh3D: cavity boundary not a topological sphere (unmatched face)")
     anyt != 0 && (T.last = anyt)
+    return nothing
+end
+
+# Open-addressing table matching the spoke faces of a Bowyer–Watson star by
+# their non-vid edge (a per-thread replacement for a Dict per insertion; the
+# pairing, hence the result, is identical).
+mutable struct _SpokeTable
+    keys::Vector{UInt64}
+    tet::Vector{Int32}
+    slot::Vector{Int8}
+    used::Vector{Int}
+    nused::Int
+    open::Int
+end
+_SpokeTable() = _SpokeTable(zeros(UInt64, 1024), zeros(Int32, 1024), zeros(Int8, 1024),
+                            zeros(Int, 1024), 0, 0)
+const _SPOKE_TABLES = Vector{_SpokeTable}()
+const _SPOKE_TABLES_LOCK = ReentrantLock()
+
+function _spoke_table(nentries::Int)
+    tid = Threads.threadid()
+    if tid > length(_SPOKE_TABLES)
+        lock(_SPOKE_TABLES_LOCK) do
+            while length(_SPOKE_TABLES) < tid; push!(_SPOKE_TABLES, _SpokeTable()); end
+        end
+    end
+    S = @inbounds _SPOKE_TABLES[tid]
+    _clear_spoke_table!(S)                    # leftovers of an aborted insertion
+    if 2 * nentries > length(S.keys)          # load factor <= 1/2
+        n = 1024; while n < 2 * nentries; n *= 2; end
+        S.keys = zeros(UInt64, n); S.tet = zeros(Int32, n); S.slot = zeros(Int8, n)
+        S.used = zeros(Int, n)
+    end
+    S.nused = 0; S.open = 0
+    return S
+end
+
+@inline function _link_spoke_table!(T, S::_SpokeTable, key::NTuple{2,Int32}, t::Int32, slot::Int)
+    # keys are stored +1 so that 0 marks an empty bucket (GHOST3 = 0 is a vertex)
+    k = ((UInt64(reinterpret(UInt32, key[1])) << 32) | UInt64(reinterpret(UInt32, key[2]))) + 1
+    mask = length(S.keys) - 1
+    h = Int((k * 0x9E3779B97F4A7C15) >> 40) & mask
+    @inbounds while true
+        stored = S.keys[h+1]
+        if stored == 0
+            S.keys[h+1] = k; S.tet[h+1] = t; S.slot[h+1] = Int8(slot)
+            S.nused += 1; S.used[S.nused] = h + 1; S.open += 1
+            return nothing
+        elseif stored == k && S.tet[h+1] != 0
+            t2 = S.tet[h+1]; s2 = Int(S.slot[h+1])
+            _setn!(T, t, slot, t2); _setn!(T, t2, s2, t)
+            S.tet[h+1] = 0; S.open -= 1          # tombstone keeps probe chains intact
+            return nothing
+        end
+        h = (h + 1) & mask
+    end
+end
+
+@inline function _clear_spoke_table!(S::_SpokeTable)
+    @inbounds for i in 1:S.nused
+        j = S.used[i]; S.keys[j] = 0; S.tet[j] = 0
+    end
+    S.nused = 0
     return nothing
 end
 
@@ -727,7 +858,12 @@ function delaunay3d(xs::Vector{Float64}, ys::Vector{Float64}, zs::Vector{Float64
     ps = Set{Int32}(placed)
     order = Int32[i for i in 1:T.nreal if !(Int32(i) in ps)]
     _shuffle3!(order, UInt64(seed))
-    for v in order; insert_point3!(T, v); end
+    grid = _StartGrid3(T.x, T.y, T.z)
+    for v in placed; _grid3_insert!(grid, T.x[v], T.y[v], T.z[v], v); end
+    for v in order
+        insert_point3!(T, v; hint=_grid3_hint(grid, T.x[v], T.y[v], T.z[v]))
+        _grid3_insert!(grid, T.x[v], T.y[v], T.z[v], v)
+    end
     return T
 end
 
