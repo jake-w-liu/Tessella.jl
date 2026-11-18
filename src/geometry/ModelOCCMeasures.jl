@@ -420,7 +420,6 @@ function _model_occ_cyl_face_div(kernel,fid;want_vmoment=false)
     I1=Ic=Is=Iv=0.0
     for (wi,wire_id) in enumerate(shape.children)
         uses=kernel.shapes[wire_id].geometry.uses
-        raw=_model_occ_wire_shoelace(kernel,rec,uses)[1]
         j1=jc=js=jv=0.0
         u_prev=nothing; uv_first=nothing; uv_last=nothing
         for (eid,rev) in uses
@@ -469,7 +468,13 @@ function _model_occ_cyl_face_div(kernel,fid;want_vmoment=false)
             va,vb=uv_last[2],uv_first[2]
             jv+=-du0*(va*va+va*vb+vb*vb)/6
         end
-        w=(wi==1 ? 1.0 : -1.0)*(raw>=0 ? 1.0 : -1.0)
+        # Orientation from the wire's own period-unwrapped lift: ∮u dv over
+        # the chord-closed contour is its signed uv area. The plane shoelace
+        # (`_model_occ_wire_shoelace`) reads un-unwrapped `.fwd` pcurves, so
+        # on a seam rectangle whose lower rim is not at v=0 — a wall clipped
+        # between two planes — it returned the wrong sign and the patch
+        # entered the divergence sum negated.
+        w=(wi==1 ? 1.0 : -1.0)*(j1>=0 ? 1.0 : -1.0)
         I1+=w*j1; Ic+=w*jc; Is+=w*js; want_vmoment && (Iv+=w*jv)
     end
     return I1,Ic,Is,Iv
@@ -524,7 +529,6 @@ function _model_occ_cyl_face_integrals(kernel,fid)
     totals=Dict(name=>0.0 for name in _OCC_CYL_INTEGRALS)
     for (wi,wire_id) in enumerate(shape.children)
         uses=kernel.shapes[wire_id].geometry.uses
-        raw=_model_occ_wire_shoelace(kernel,rec,uses)[1]
         local_acc=Dict(name=>0.0 for name in _OCC_CYL_INTEGRALS)
         u_prev=nothing;uv_first=nothing;uv_last=nothing
         for (eid,rev) in uses
@@ -575,7 +579,8 @@ function _model_occ_cyl_face_integrals(kernel,fid)
                 (uv_first[1]!=uv_last[1] || uv_first[2]!=uv_last[2])
             _occ_cyl_chord_integrals!(local_acc,uv_last,uv_first)
         end
-        w=(wi==1 ? 1.0 : -1.0)*(raw>=0 ? 1.0 : -1.0)
+        # signed uv area of the unwrapped contour — see `_model_occ_cyl_face_div`
+        w=(wi==1 ? 1.0 : -1.0)*(local_acc[:I1]>=0 ? 1.0 : -1.0)
         for (index,name) in enumerate(_OCC_CYL_INTEGRALS)
             totals[name]+=w*local_acc[name]
         end

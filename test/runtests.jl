@@ -106,6 +106,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_boolean_sphere_pole_test.jl",
         "interfaces/api_occ_rotated_plane_mesh_test.jl",
         "interfaces/api_occ_boolean_face_measures_test.jl",
+        "interfaces/api_occ_boolean_clipped_cylinder_test.jl",
         "interfaces/api_onelab_run_test.jl",
         "interfaces/api_onelab_typed_test.jl",
         "interfaces/api_onelab_metadata_test.jl",
