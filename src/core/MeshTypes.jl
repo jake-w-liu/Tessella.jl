@@ -636,6 +636,182 @@ end
 # rows; the link must still be connected with a circular boundary.
 function _tet_topology(tets::AbstractMatrix{<:Integer};
                        pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
+    # A valid complex is certified by the global tables below; anything they
+    # do not accept goes through the vertex-by-vertex audit, which decides
+    # and names the defect.
+    tets isa Matrix{Int32} && _tet_topology_accepts(tets, pinch_link_chi) &&
+        return (true, "ok")
+    return _tet_topology_audit(tets; pinch_link_chi=pinch_link_chi)
+end
+
+# Sort `key[lo:hi]` ascending and carry `who` along.
+function _sort_face_bucket!(key::Vector{UInt64}, who::Vector{Int32}, lo::Int, hi::Int)
+    if hi - lo < 96
+        @inbounds for i in lo+1:hi
+            k = key[i]; w = who[i]; j = i - 1
+            while j >= lo && key[j] > k
+                key[j+1] = key[j]; who[j+1] = who[j]; j -= 1
+            end
+            key[j+1] = k; who[j+1] = w
+        end
+    else
+        order = sortperm(@view key[lo:hi])
+        key[lo:hi] = key[lo:hi][order]
+        who[lo:hi] = who[lo:hi][order]
+    end
+    return nothing
+end
+
+# True only when `_tet_topology_audit` accepts `tets`. The audit examines the
+# link of every vertex; each of its conditions is a statement about the faces
+# and edges of the whole complex, which one face table and one edge table
+# decide for all vertices at once:
+#
+#   link edge incidence <= 2      every face lies in at most two tetrahedra
+#   connected link                the corners of a vertex are joined through
+#                                 the interior faces that contain it
+#   circular link boundary        every edge of a boundary face lies in
+#                                 exactly two boundary faces
+#   Euler characteristic          neighbours - faces + tetrahedra at the
+#                                 vertex: 2 inside, 1 (or the pinch value) on
+#                                 the boundary
+#   no duplicate tetrahedron      the two tetrahedra of an interior face have
+#                                 different opposite vertices
+#
+# A `false` is not a verdict: sparse or non-positive labels and every defect
+# are left to the audit.
+function _tet_topology_accepts(tets::Matrix{Int32},
+                               pinch_link_chi::AbstractDict{Int32,Int})
+    nt = size(tets, 2)
+    (size(tets, 1) == 4 && 0 < nt <= (typemax(Int32) >> 3)) || return false
+    nv = 0
+    @inbounds for t in 1:nt, k in 1:4
+        v = Int(tets[k,t])
+        v > 0 || return false
+        v > nv && (nv = v)
+    end
+    nv <= 8nt + 1024 || return false
+
+    # Bucket sizes: faces by their smallest vertex, edges by their smaller
+    # endpoint. With the vertices of a tetrahedron sorted s1<s2<s3<s4, three
+    # faces start at s1 and one at s2; three edges start at s1, two at s2 and
+    # one at s3.
+    degree = zeros(Int32, nv)
+    face_end = zeros(Int32, nv + 2)
+    edge_end = zeros(Int32, nv + 2)
+    @inbounds for t in 1:nt
+        a = tets[1,t]; b = tets[2,t]; c = tets[3,t]; d = tets[4,t]
+        (a==b || a==c || a==d || b==c || b==d || c==d) && return false
+        s = _sort4(a, b, c, d)
+        degree[a] += Int32(1); degree[b] += Int32(1)
+        degree[c] += Int32(1); degree[d] += Int32(1)
+        face_end[s[1]+2] += Int32(3); face_end[s[2]+2] += Int32(1)
+        edge_end[s[1]+2] += Int32(3); edge_end[s[2]+2] += Int32(2)
+        edge_end[s[3]+2] += Int32(1)
+    end
+    @inbounds for v in 1:nv
+        face_end[v+2] += face_end[v+1]
+        edge_end[v+2] += edge_end[v+1]
+    end
+    # After the fill, bucket `v` spans `end[v]+1 : end[v+1]`.
+    nf = 4nt
+    key = Vector{UInt64}(undef, nf)      # (middle, largest) vertex of a face
+    who = Vector{Int32}(undef, nf)       # 4(t-1) + slot of the opposite vertex
+    other = Vector{Int32}(undef, 6nt)    # larger endpoint of an edge
+    @inbounds for t in 1:nt
+        a = tets[1,t]; b = tets[2,t]; c = tets[3,t]; d = tets[4,t]
+        base = Int32(4(t-1))
+        for (slot, face) in ((1, (b,c,d)), (2, (a,c,d)), (3, (a,b,d)), (4, (a,b,c)))
+            low, middle, high = _sort3(face...)
+            position = (face_end[low+1] += Int32(1))
+            key[position] = (UInt64(middle) << 32) | UInt64(high)
+            who[position] = base + Int32(slot)
+        end
+        s = _sort4(a, b, c, d)
+        position = Int(edge_end[s[1]+1])
+        other[position+1] = s[2]; other[position+2] = s[3]; other[position+3] = s[4]
+        edge_end[s[1]+1] += Int32(3)
+        position = Int(edge_end[s[2]+1])
+        other[position+1] = s[3]; other[position+2] = s[4]
+        edge_end[s[2]+1] += Int32(2)
+        other[(edge_end[s[3]+1] += Int32(1))] = s[4]
+    end
+
+    parent = Vector{Int32}(undef, nf)    # union-find over the corners 4(t-1)+slot
+    @inbounds for i in 1:nf; parent[i] = Int32(i); end
+    faces = zeros(Int32, nv)             # distinct faces at a vertex
+    on_boundary = falses(nv)
+    boundary_edges = UInt64[]
+    @inbounds for low in 1:nv
+        first = Int(face_end[low]) + 1; last = Int(face_end[low+1])
+        first > last && continue
+        _sort_face_bucket!(key, who, first, last)
+        i = first
+        while i <= last
+            k = key[i]
+            j = i + 1
+            while j <= last && key[j] == k; j += 1; end
+            j - i > 2 && return false
+            middle = Int32(k >> 32); high = Int32(k & 0xffffffff)
+            faces[low] += Int32(1); faces[middle] += Int32(1); faces[high] += Int32(1)
+            if j - i == 2
+                w1 = Int(who[i]); w2 = Int(who[i+1])
+                t1 = (w1 - 1) >> 2 + 1; t2 = (w2 - 1) >> 2 + 1
+                tets[(w1-1)&3+1, t1] == tets[(w2-1)&3+1, t2] && return false
+                for v in (Int32(low), middle, high)
+                    c1 = tets[1,t1]==v ? 1 : tets[2,t1]==v ? 2 : tets[3,t1]==v ? 3 : 4
+                    c2 = tets[1,t2]==v ? 1 : tets[2,t2]==v ? 2 : tets[3,t2]==v ? 3 : 4
+                    _uf_union!(parent, Int32(4(t1-1)+c1), Int32(4(t2-1)+c2))
+                end
+            else
+                on_boundary[low] = true; on_boundary[middle] = true; on_boundary[high] = true
+                push!(boundary_edges, (UInt64(low) << 32) | UInt64(middle),
+                      (UInt64(low) << 32) | UInt64(high), (UInt64(middle) << 32) | UInt64(high))
+            end
+            i = j
+        end
+    end
+    isempty(boundary_edges) && return false
+    sort!(boundary_edges)
+    i = 1
+    @inbounds while i <= length(boundary_edges)
+        j = i + 1
+        while j <= length(boundary_edges) && boundary_edges[j] == boundary_edges[i]; j += 1; end
+        j - i == 2 || return false
+        i = j
+    end
+
+    root = zeros(Int32, nv)
+    @inbounds for t in 1:nt, slot in 1:4
+        v = tets[slot,t]
+        r = _uf_find!(parent, Int32(4(t-1)+slot))
+        if root[v] == 0
+            root[v] = r
+        elseif root[v] != r
+            return false
+        end
+    end
+
+    neighbours = zeros(Int32, nv)        # distinct edges at a vertex
+    stamp = zeros(Int32, nv)
+    @inbounds for low in 1:nv
+        for i in Int(edge_end[low])+1:Int(edge_end[low+1])
+            high = other[i]
+            stamp[high] == low && continue
+            stamp[high] = Int32(low)
+            neighbours[low] += Int32(1); neighbours[high] += Int32(1)
+        end
+    end
+    @inbounds for v in 1:nv
+        degree[v] == 0 && continue
+        expected = on_boundary[v] ? get(pinch_link_chi, Int32(v), 1) : 2
+        neighbours[v] - faces[v] + degree[v] == expected || return false
+    end
+    return true
+end
+
+function _tet_topology_audit(tets::AbstractMatrix{<:Integer};
+                             pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
     nt = size(tets, 2)
     nt == 0 && return (false, "tet complex is empty")
     nt <= typemax(Int32) ||
