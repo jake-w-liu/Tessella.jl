@@ -1659,7 +1659,12 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
                  _gmsh_surface_trace=nothing,
                  vertex_sizes=nothing, vertex_bgm=nothing, bgm_size=nothing,
                  model_vertices=nothing,
-                 maxsteps::Integer=300_000)
+                 # The native Delaunay/Frontal queue terminates on its own:
+                 # every pop inserts a vertex or retires its triangle for
+                 # good. A step cap there only truncates large meshes (a
+                 # plane beyond ~6e5 triangles); the Ruppert loop keeps one.
+                 maxsteps::Integer=gmsh_algorithm===:legacy ? 300_000 :
+                                                             typemax(Int))
     _assert_operable(T,"refine!")
     angle = _mesh2_float(min_angle_deg,"min_angle_deg")
     (isfinite(angle) && 0 <= angle < 60) ||

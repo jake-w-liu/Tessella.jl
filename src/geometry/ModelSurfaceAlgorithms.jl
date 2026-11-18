@@ -777,8 +777,7 @@ function _occ_curved_surface_refine!(m::GeoModel,t::Int,geometry,T,
         gmsh_algorithm=algorithm==5 ? :delaunay : :frontal,
         gmsh_extend_boundary=extend>0 || extend==-2,
         vertex_sizes=sizes,vertex_bgm=copy(sizes),bgm_size=background,
-        model_vertices=Int32[],_gmsh_surface_trace=trace,
-        maxsteps=typemax(Int))
+        model_vertices=Int32[],_gmsh_surface_trace=trace)
 end
 
 # Constrained Delaunay of the unwrapped sheet plus the sized refinement.
