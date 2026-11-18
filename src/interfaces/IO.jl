@@ -2661,6 +2661,8 @@ const _GEO_NUMERIC_FUNCTIONS=Set((
     "Acos","Asin","Atan","Ceil","Cos","Cosh","Exp","Fabs","Abs",
     "Floor","Log","Log10","Round","Sqrt","Sin","Sinh","Step","Tan",
     "Tanh","Atan2","Fmod","Modulo","Hypot","Max","Min"))
+const _GEO_FUNCTION_ALIASES=Dict("ArcCos"=>"Acos","ArcSin"=>"Asin",
+    "ArcTan"=>"Atan","ArcTan2"=>"Atan2")
 # Fixed-arity binary numeric functions (`tX LP FExpr ',' FExpr RP`).
 const _GEO_BINARY_FUNCTIONS=Set(("Atan2","Fmod","Modulo","Hypot","Max","Min"))
 # Stateful FExpr functions taking only numeric arguments.
@@ -3787,6 +3789,9 @@ function _geo_lex_token!(parser::_GeoExprParser)
             i=nextind(source,i)
         end
         text=String(source[start:prevind(source,i)])
+        # `ArcCos`/`ArcSin`/`ArcTan`/`ArcTan2` lex to the same tokens as
+        # `Acos`/`Asin`/`Atan`/`Atan2` upstream (Gmsh.l).
+        text=get(_GEO_FUNCTION_ALIASES,text,text)
         _GeoExprToken(:identifier,text,0.0,start)
     else
         kind=if c=='+'
