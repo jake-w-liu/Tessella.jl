@@ -6079,6 +6079,17 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                     empty!(uses)
                 end
                 isempty(uses) && (touched[i]=true;continue)
+                # a face bounding a cell that another operand occupies is a
+                # foreign wall inside that operand's solid — e.g. a tool fully
+                # contained in the object bounds a cavity of the object's
+                # result piece. The container is then modified even though
+                # none of its own faces is cut, so it must not be taken for
+                # an unmodified (pseudo) operand that keeps its old shell.
+                for (mask,_) in uses, k in 1:N
+                    (k==i || (mask&_brep_bit(k))==0) && continue
+                    (k in same_p || k in opp_p) && continue
+                    touched[k]=true
+                end
                 wires=[ [ (key=arcs[k].key,fwd=fwd,pc=arcs[k].pc,
                            t0=arcs[k].t0,t1=arcs[k].t1,crv=arcs[k].crv,
                            vt0=arcs[k].vt0,vt1=arcs[k].vt1,neg=arcs[k].neg)
