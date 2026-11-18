@@ -239,6 +239,7 @@ include("functional/fixtures.jl")
         "geometry/geo_occ_center_arc_params_test.jl",
         "interfaces/cli_save_all_physical_test.jl",
         "geometry/geo_extend_field_options_test.jl",
+        "interfaces/cli_unrolled_details_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

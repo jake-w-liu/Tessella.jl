@@ -62,6 +62,9 @@ function write_geo_unrolled(io::IO,m::GeoModel)
     for tag in sort!(collect(keys(m.points)))
         x,y,z=m.points[tag]
         size=get(m.point_size,tag,_UNROLLED_UNSET_SIZE)
+        # A point declared without a size stores 0 here; upstream keeps
+        # `MAX_LC` for it and writes 1e+22.
+        size==0 && (size=_UNROLLED_UNSET_SIZE)
         n=_clvar!(clmap,clnames,size)
         push!(point_lines,"Point($tag) = {$(_gnum(x)), $(_gnum(y)), " *
             "$(_gnum(z)), cl__$n};")
@@ -82,7 +85,9 @@ function write_geo_unrolled(io::IO,m::GeoModel)
         tf=get(m.meshing.transfinite_curves,tag,nothing)
         if tf!==nothing
             kindname=tf.kind==:bump ? "Bump" : "Progression"
-            println(io,"Transfinite Curve {$tag} = $(tf.num_nodes) " *
+            # `typeTransfinite < 0` (a `{-tag}` declaration) writes `-tag`.
+            signed=getproperty(tf,:reversed)===true ? -tag : tag
+            println(io,"Transfinite Curve {$signed} = $(tf.num_nodes) " *
                 "Using $kindname $(_gnum(tf.coef));")
         end
     end
@@ -109,7 +114,8 @@ function write_geo_unrolled(io::IO,m::GeoModel)
             println(io,"Recombine Surface {$tag};")
         end
         for (edim,etag) in get(m.embeds,(2,tag),NTuple{2,Int}[])
-            println(io,"$(_DIM_NAMES[edim+1]) {$etag} In Surface {$tag};")
+            # `GFace::writeGEO` spells embedded curves `Line {..}`.
+            println(io,"$(edim==1 ? "Line" : _DIM_NAMES[edim+1]) {$etag} In Surface {$tag};")
         end
     end
     for tag in sort!(collect(keys(m.loops)))
@@ -129,7 +135,7 @@ function write_geo_unrolled(io::IO,m::GeoModel)
         corners===nothing || isempty(corners) ||
             println(io,"Transfinite Volume {$tag} = {$(join(corners,","))};")
         for (edim,etag) in get(m.embeds,(3,tag),NTuple{2,Int}[])
-            println(io,"$(_DIM_NAMES[edim+1]) {$etag} In Volume {$tag};")
+            println(io,"$(edim==1 ? "Line" : _DIM_NAMES[edim+1]) {$etag} In Volume {$tag};")
         end
     end
     for tag in sort!(collect(keys(m.surface_loops)))
