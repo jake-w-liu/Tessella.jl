@@ -776,6 +776,11 @@ end
 # `Geom2d_BSplineCurve` on a trimmed surface — a clamped non-rational
 # B-spline sampled from the edge's surface projection. `cps` are uv poles.
 function _occ_spl2d_eval(knots,p,cps,t)
+    0<=p<=7 && return _occ_spl2d_local(knots,Int(p),cps,t,0)
+    return _occ_spl2d_eval_dense(knots,p,cps,t)
+end
+
+function _occ_spl2d_eval_dense(knots,p,cps,t)
     n=length(cps)
     u=clamp(t,knots[1],knots[end])
     s=clamp(searchsortedlast(knots,u),p+1,length(knots)-p-1)
@@ -785,6 +790,61 @@ function _occ_spl2d_eval(knots,p,cps,t)
         b=row[i]
         b==0.0 && continue
         U+=b*cps[i][1]; V+=b*cps[i][2]
+    end
+    return (U,V)
+end
+
+# Pole `i` of the `order`-th derivative of the spline, by the recurrence of
+# `_occ_spl2d_derive` applied to the stored poles.
+@inline function _occ_spl2d_pole(knots,p::Int,cps,i::Int,order::Int)
+    order==0 && return @inbounds cps[i]
+    if order==1
+        den=knots[i+p+1]-knots[i+1]
+        f=den>0.0 ? p/den : 0.0
+        return (f*(cps[i+1][1]-cps[i][1]),f*(cps[i+1][2]-cps[i][2]))
+    end
+    den=knots[i+p+1]-knots[i+2]
+    f=den>0.0 ? (p-1)/den : 0.0
+    a=_occ_spl2d_pole(knots,p,cps,i,1);b=_occ_spl2d_pole(knots,p,cps,i+1,1)
+    return (f*(b[1]-a[1]),f*(b[2]-a[2]))
+end
+
+# The spline (`order` 0) or its first or second derivative at `t`, evaluated
+# on the few poles of the knot span. A section curve of a Boolean carries
+# hundreds of poles and is evaluated for every point of its curve mesh;
+# building the derived splines and a full basis row for each of those calls
+# made its 1-D mesh cost seconds. The arithmetic is that of
+# `_occ_spl2d_eval_dense` on `_occ_spl2d_derive`'s output, operation for
+# operation, so the values are identical: the derived spline has degree
+# `p-order`, the knots `knots[1+order:end-order]` and `order` fewer poles.
+function _occ_spl2d_local(knots,p::Int,cps,t,order::Int)
+    q=p-order
+    n=length(cps)-order
+    count=length(knots)-2order
+    u=clamp(t,knots[1+order],knots[end-order])
+    s=clamp(searchsortedlast(@view(knots[1+order:end-order]),u),q+1,count-q-1)
+    left=ntuple(_->0.0,8);right=left
+    N=Base.setindex(left,1.0,1)
+    @inbounds for j in 1:q
+        left=Base.setindex(left,u-knots[s-j+1+order],j)
+        right=Base.setindex(right,knots[s+j+order]-u,j)
+        saved=0.0
+        for r in 0:j-1
+            den=right[r+1]+left[j-r]
+            tmp=den>0.0 ? N[r+1]/den : 0.0
+            N=Base.setindex(N,saved+right[r+1]*tmp,r+1)
+            saved=left[j-r]*tmp
+        end
+        N=Base.setindex(N,saved,j+1)
+    end
+    U=V=0.0
+    for r in 0:q
+        i=s-q+r
+        1<=i<=n || continue
+        b=N[r+1]
+        b==0.0 && continue
+        pole=_occ_spl2d_pole(knots,p,cps,i,order)
+        U+=b*pole[1]; V+=b*pole[2]
     end
     return (U,V)
 end
@@ -819,6 +879,7 @@ function _occ_pcurve_d1(pc,t::Float64)
     elseif hasproperty(pc,:spl2d)
         knots,p,cps=pc.spl2d
         uv=_occ_spl2d_eval(knots,p,cps,t)
+        1<=p<=7 && return uv,_occ_spl2d_local(knots,Int(p),cps,t,1)
         k2,p2,cps2=_occ_spl2d_derive(knots,p,cps)
         return uv,_occ_spl2d_eval(k2,p2,cps2,t)
     else
@@ -873,6 +934,11 @@ function _occ_pcurve_d2(pc,t::Float64)
     elseif hasproperty(pc,:spl2d)
         knots,p,cps=pc.spl2d
         uv=_occ_spl2d_eval(knots,p,cps,t)
+        if 1<=p<=7
+            d1=_occ_spl2d_local(knots,Int(p),cps,t,1)
+            d2=p>1 && length(cps)>2 ? _occ_spl2d_local(knots,Int(p),cps,t,2) : (0.0,0.0)
+            return uv,d1,d2
+        end
         k1,p1,cps1=_occ_spl2d_derive(knots,p,cps)
         d1=_occ_spl2d_eval(k1,p1,cps1,t)
         if p1>0 && length(cps1)>1
