@@ -253,6 +253,7 @@ include("functional/fixtures.jl")
         "meshing/mesh3d_hinted_locate_test.jl",
         "meshing/mesh2d_refine_scan_test.jl",
         "meshing/mesh_planar_step_budget_test.jl",
+        "interfaces/api_occ_curved_coarse_closed_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

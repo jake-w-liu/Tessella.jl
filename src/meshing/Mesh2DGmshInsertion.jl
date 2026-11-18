@@ -310,6 +310,13 @@ end
             # `circumCenterXY` reports collinear input with its -99999
             # sentinel, which queues the cell ahead of every real one.
             (wa==wb || wb==wc || wc==wa) && return 99999.0*sqrt(2.0)/lc
+            # A cell whose parameter edge runs more than half a turn around
+            # the surface has a small flat world image however large the
+            # region it covers (the far side of a sphere seen from one seam
+            # column): its Cartesian circumradius says nothing about it, so
+            # it is queued like the collinear cells whatever the size.
+            _gmsh_cell_wrapped(gsizes.trace,pa,pb,pc,wa,wb,wc) &&
+                return 99999.0*sqrt(2.0)/lc
             center=_gmsh_circumcenter_xyz(wa,wb,wc)
             radius=_gmsh_norm3(_gmsh_sub3(wa,center))/lc
             return isfinite(radius) ? radius : 99999.0*sqrt(2.0)/lc
@@ -329,6 +336,39 @@ end
     center=_gmsh_circumcenter_xyz(first,_gmsh_flat_xyz(_pt(T,b)),
                                 _gmsh_flat_xyz(_pt(T,c)))
     return _gmsh_norm3(_gmsh_sub3(first,center))/lc
+end
+
+# Wrapped-edge test of the Cartesian mode. The parameter segment `pa`–`pb`
+# lifts to a surface path; its chord `wa`–`wb` represents that path only while
+# the lifted parameter midpoint stays within half a chord of the chord's own
+# midpoint — a geodesic arc reaches that bound at a half turn. Only edges
+# spanning more than a quarter of the chart are examined, so a resolved mesh
+# pays nothing. At a collapsed endpoint (pole/apex: one parameter direction
+# has no world length there) that parameter is free and follows the other
+# endpoint, i.e. the path is the meridian actually drawn on the surface.
+function _gmsh_edge_wrapped(carrier,pa,pb,wa,wb)
+    bounds=carrier.bounds
+    (abs(pa[1]-pb[1])>0.25*(bounds[2]-bounds[1]) ||
+     abs(pa[2]-pb[2])>0.25*(bounds[4]-bounds[3])) || return false
+    ua=pa[1];va=pa[2];ub=pb[1];vb=pb[2]
+    ga=carrier.ground(pa[1],pa[2]);gb=carrier.ground(pb[1],pb[2])
+    ga[1]<=1e-10*ga[3] && (ua=pb[1])
+    ga[3]<=1e-10*ga[1] && (va=pb[2])
+    gb[1]<=1e-10*gb[3] && (ub=pa[1])
+    gb[3]<=1e-10*gb[1] && (vb=pa[2])
+    middle=carrier.lift(0.5*(ua+ub),0.5*(va+vb))
+    dx=middle[1]-0.5*(wa[1]+wb[1]);dy=middle[2]-0.5*(wa[2]+wb[2])
+    dz=middle[3]-0.5*(wa[3]+wb[3])
+    chord=_gmsh_sub3(wb,wa)
+    return dx*dx+dy*dy+dz*dz>0.25*_gmsh_dot3(chord,chord)
+end
+
+@inline function _gmsh_cell_wrapped(carrier,pa,pb,pc,wa,wb,wc)
+    (isfinite(carrier.bounds[2]-carrier.bounds[1]) ||
+     isfinite(carrier.bounds[4]-carrier.bounds[3])) || return false
+    return _gmsh_edge_wrapped(carrier,pa,pb,wa,wb) ||
+           _gmsh_edge_wrapped(carrier,pb,pc,wb,wc) ||
+           _gmsh_edge_wrapped(carrier,pc,pa,wc,wa)
 end
 
 # Gmsh scans the incoming edges (c,a), (a,b), (b,c). Tessella neighbours
@@ -472,27 +512,61 @@ end
 function _gmsh_frontal_point_cartesian(T,t,slot,gsizes,extend_boundary,a,b,c,u,v)
     carrier=gsizes.trace
     pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
-    ground=carrier.ground((pa[1]+pb[1]+pc[1])/3.0,(pa[2]+pb[2]+pc[2])/3.0)
-    center,_=_gmsh_circumcenter_metric(pa,pb,pc,ground)
-    pu=_pt(T,u);pv=_pt(T,v)
+    pu=_pt(T,u);pv=_pt(T,v);po=_pt(T,_vert(T,t,slot))
     midpoint=(0.5*(pu[1]+pv[1]),0.5*(pu[2]+pv[2]))
-    dx=center[1]-midpoint[1];dy=center[2]-midpoint[2]
-    direction_norm=sqrt(dx*dx+dy*dy)
-    q=sqrt(dx*ground[1]*dx+2.0*dx*ground[2]*dy+dy*ground[3]*dy)
-    (isfinite(q) && q>0 && direction_norm>0) || return nothing
-    dirx=dx/direction_norm;diry=dy/direction_norm
-    ratio=sqrt(dirx*dirx*ground[1]+2.0*diry*dirx*ground[2]+diry*diry*ground[3])
+    centroid=((pa[1]+pb[1]+pc[1])/3.0,(pa[2]+pb[2]+pc[2])/3.0)
     background=0.5*(gsizes.vbgm[u]+gsizes.vbgm[v])
     lc=extend_boundary ? min(background,
         0.5*(gsizes.vsize[u]+gsizes.vsize[v])) : background
-    distance=min(lc*sqrt(3.0)*0.5,q)
-    fast=(midpoint[1]+distance*dirx/ratio,midpoint[2]+distance*diry/ratio)
-    (isfinite(fast[1]) && isfinite(fast[2])) || return nothing
     wa=_gmsh_surface_world(carrier,T,u)
     wb=_gmsh_surface_world(carrier,T,v)
     wc=_gmsh_surface_world(carrier,T,_vert(T,t,slot))
-    return _gmsh_surface_circle_intersection(fast,carrier.lift,wa,wb,wc;
-                                             radius=distance)
+    # A cell joining two seam representatives of one world point keeps the
+    # ordinary construction (its frontal circle is oriented by the guess).
+    if wa==wb || wb==wc || wc==wa ||
+            !_gmsh_cell_wrapped(carrier,pu,pv,po,wa,wb,wc)
+        ground=carrier.ground(centroid[1],centroid[2])
+        center,_=_gmsh_circumcenter_metric(pa,pb,pc,ground)
+        dx=center[1]-midpoint[1];dy=center[2]-midpoint[2]
+        direction_norm=sqrt(dx*dx+dy*dy)
+        q=sqrt(dx*ground[1]*dx+2.0*dx*ground[2]*dy+dy*ground[3]*dy)
+        (isfinite(q) && q>0 && direction_norm>0) || return nothing
+        dirx=dx/direction_norm;diry=dy/direction_norm
+        ratio=sqrt(dirx*dirx*ground[1]+2.0*diry*dirx*ground[2]+
+                   diry*diry*ground[3])
+        distance=min(lc*sqrt(3.0)*0.5,q)
+        fast=(midpoint[1]+distance*dirx/ratio,midpoint[2]+distance*diry/ratio)
+        point=_gmsh_surface_circle_intersection(fast,carrier.lift,wa,wb,wc;
+                                                radius=distance)
+        # A solve that settled on a parameter alias outside the chart has
+        # failed like upstream's "non optimal point": keep the fast guess.
+        (_gmsh_carrier_inside(carrier,point) ||
+         !_gmsh_carrier_inside(carrier,fast)) && return (point[1],point[2])
+        return fast
+    end
+    # A cell that wraps around the surface has no usable centroid metric or
+    # circumcentre. The front still advances from its active edge: step the
+    # world length `ρ·√3/2` from the edge midpoint along the parameter
+    # direction that the first fundamental form at that midpoint makes
+    # orthogonal to the edge, toward the opposite vertex, and solve the same
+    # world circle from there.
+    ground=carrier.ground(midpoint[1],midpoint[2])
+    ex=pv[1]-pu[1];ey=pv[2]-pu[2]
+    dx=-(ground[2]*ex+ground[3]*ey);dy=ground[1]*ex+ground[2]*ey
+    dx*(po[1]-midpoint[1])+dy*(po[2]-midpoint[2])<0 && (dx=-dx;dy=-dy)
+    extent=sqrt(dx*ground[1]*dx+2.0*dx*ground[2]*dy+dy*ground[3]*dy)
+    if isfinite(extent) && extent>0
+        distance=lc*sqrt(3.0)*0.5
+        guess=(midpoint[1]+distance*dx/extent,midpoint[2]+distance*dy/extent)
+        if _gmsh_carrier_inside(carrier,guess)
+            point=_gmsh_surface_circle_intersection(guess,carrier.lift,
+                wa,wb,wc;radius=distance)
+            _gmsh_carrier_inside(carrier,point) && return (point[1],point[2])
+            return guess
+        end
+    end
+    # Splitting the cell at its parameter centroid always makes progress.
+    return centroid
 end
 
 @inline function _gmsh_contains_surface_point(T,t,point)

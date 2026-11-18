@@ -6997,13 +6997,74 @@ end
 # surfaces `u` unwraps along the traversal so the domain is an ordinary PSLG
 # for `constrained_delaunay`. Interior vertices evaluate through
 # `_occ_surface_point`; boundary vertices keep their canonical coordinates.
+# Welded-boundary certificate of a lifted parametric sheet. Every welded edge
+# is shared by two cells, except an edge carrying exactly one boundary
+# segment of the parameter domain (a real rim), which has one. A seam edge
+# carries two boundary segments — its two sheets — and closes like an
+# interior edge; segments of a collapsed pole/apex row weld away. `false`
+# means the sheet does not close: cells dropped as duplicates or collapsed
+# where the fill left the seam or a pole under-resolved.
+function _occ_weld_boundary_consistent(cells,remap,uxs,uys,xs,ys,segs)
+    row=Dict{NTuple{2,Float64},Int}()
+    for k in eachindex(uxs)
+        get!(row,(uxs[k],uys[k]),k)
+    end
+    expected=Dict{NTuple{2,Int32},Int}()
+    for (i,j) in segs
+        ki=get(row,(xs[i],ys[i]),0);kj=get(row,(xs[j],ys[j]),0)
+        # An unmapped boundary vertex is not this certificate's finding.
+        (ki==0 || kj==0) && return true
+        wi=remap[ki];wj=remap[kj]
+        wi==wj && continue
+        key=wi<wj ? (wi,wj) : (wj,wi)
+        expected[key]=get(expected,key,0)+1
+    end
+    incidence=Dict{NTuple{2,Int32},Int}()
+    for tri in cells,(x,y) in ((tri[1],tri[2]),(tri[2],tri[3]),(tri[3],tri[1]))
+        key=x<y ? (x,y) : (y,x)
+        incidence[key]=get(incidence,key,0)+1
+    end
+    for (key,count) in incidence
+        count==(get(expected,key,0)==1 ? 1 : 2) || return false
+    end
+    for key in keys(expected)
+        haskey(incidence,key) || return false
+    end
+    return true
+end
+
 function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                                         caller::AbstractString;
                                         initial_only::Bool=false,
                                         raw_preimage::Bool=false,
                                         sized_algorithm::Int=0,
                                         size_field=nothing,
-                                        _mesh1d_options=nothing)
+                                        _mesh1d_options=nothing,
+                                        _sized_strict::Bool=false)
+    if sized_algorithm in (5,6) && !initial_only && !raw_preimage &&
+            !_sized_strict
+        # The sized fill must hand back a sheet that closes on its boundary.
+        # If it does not — or its weld repair gives up — the Surface is
+        # produced by the fixed lattice instead, never left open.
+        attempt=try
+            _model_occ_curved_surface_mesh_tracked(m,t,caller;initial_only,
+                raw_preimage,sized_algorithm,size_field,_mesh1d_options,
+                _sized_strict=true)
+        catch err
+            err isa InterruptException && rethrow()
+            (err isa ArgumentError || err isa ErrorException) || rethrow()
+            err
+        end
+        attempt isa Exception || return attempt
+        # Input the builder rejects is rejected again here, by the same check.
+        fallback=_model_occ_curved_surface_mesh_tracked(m,t,caller;
+            initial_only,raw_preimage,sized_algorithm=0,size_field,
+            _mesh1d_options)
+        _model_mesh_warn(_model_algorithm_size_options(m,_mesh1d_options,caller),
+            "Surface $t: sized parametric fill was not accepted (" *
+            sprint(showerror,attempt) * "); using the fixed parametric lattice")
+        return fallback
+    end
     sg=get(m.surface_geometry,t,nothing)
     occ=sg===nothing ? nothing : get(sg,:occ,nothing)
     (occ in (:cylinder,:sphere,:cone,:torus,:tensor_bspline,:tensor_bezier) ||
@@ -7619,6 +7680,11 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
                 t for (i,t) in enumerate(tris_uv) if !(i in inc)]
             append!(tris_uv,newt)
         end
+    end
+    if sized!==nothing && _sized_strict
+        _occ_weld_boundary_consistent(cells,remap,uxs,uys,xs,ys,segs) ||
+            throw(ArgumentError("$caller: Surface[$t] sized parametric " *
+                "fill does not close on its boundary"))
     end
     post=Dict{NTuple{2,Int32},Int}()
     for tri in cells, (x,y) in ((tri[1],tri[2]),(tri[2],tri[3]),(tri[3],tri[1]))

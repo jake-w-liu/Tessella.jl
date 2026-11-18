@@ -219,11 +219,25 @@ struct _GmshSurfaceMetricCarrier{L,G,G2}
     # lie far apart while their world points coincide. Tensor backgrounds
     # keep the metric-normalized bounds (`false`).
     cartesian_close::Bool
+    # Parameter box `(umin, umax, vmin, vmax)` of the chart for the Cartesian
+    # mode: the wrapped-cell test (`_gmsh_cell_wrapped`) and the admission of
+    # a Newton-solved frontal point. An unbounded box disables both.
+    bounds::NTuple{4,Float64}
 end
+const _GMSH_CARRIER_UNBOUNDED=(-Inf,Inf,-Inf,Inf)
 @inline _GmshSurfaceMetricCarrier(world,lift,metric)=
-    _GmshSurfaceMetricCarrier(world,lift,metric,nothing,false)
+    _GmshSurfaceMetricCarrier(world,lift,metric,nothing,false,
+                              _GMSH_CARRIER_UNBOUNDED)
 @inline _GmshSurfaceMetricCarrier(world,lift,metric,ground)=
-    _GmshSurfaceMetricCarrier(world,lift,metric,ground,false)
+    _GmshSurfaceMetricCarrier(world,lift,metric,ground,false,
+                              _GMSH_CARRIER_UNBOUNDED)
+@inline _GmshSurfaceMetricCarrier(world,lift,metric,ground,cartesian_close::Bool)=
+    _GmshSurfaceMetricCarrier(world,lift,metric,ground,cartesian_close,
+                              _GMSH_CARRIER_UNBOUNDED)
+@inline _gmsh_carrier_inside(carrier::_GmshSurfaceMetricCarrier,point)=
+    isfinite(point[1]) && isfinite(point[2]) &&
+    carrier.bounds[1]<=point[1]<=carrier.bounds[2] &&
+    carrier.bounds[3]<=point[2]<=carrier.bounds[4]
 @inline _gmsh_surface_triangle_nodes(T,t,::_GmshSurfaceMetricCarrier)=
     (_vert(T,t,1),_vert(T,t,2),_vert(T,t,3))
 @inline _gmsh_surface_incoming_slots(T,t,::_GmshSurfaceMetricCarrier)=(2,3,1)

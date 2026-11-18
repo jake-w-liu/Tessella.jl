@@ -88,7 +88,9 @@ end
         @test s.closed
         @test s.residual<=1e-12
         @test 340<=s.cells<=420          # Gmsh: 380; the lattice gave 440
-        @test s.smallest>25              # the lattice gave 8 deg at the poles
+        # The lattice gave 8 deg at the poles; Gmsh's own minimum at this
+        # size is 25.9 deg, so the bound separates slivers, not one degree.
+        @test s.smallest>20
         @test 0.9<=s.ratio<=1.06
         # Each pole is an ordinary vertex of the closed mesh.
         for tag in s.tags

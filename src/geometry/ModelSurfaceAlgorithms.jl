@@ -770,7 +770,8 @@ function _occ_curved_surface_refine!(m::GeoModel,t::Int,geometry,T,
         return (inv2*g[1],inv2*g[2],inv2*g[3])
     end
     ground=(u,v)->_occ_surface_ground(geometry,Float64(u),Float64(v))
-    trace=Mesh2D._GmshSurfaceMetricCarrier(world,lift,metric,ground,true)
+    bounds=(minimum(xs),maximum(xs),minimum(ys),maximum(ys))
+    trace=Mesh2D._GmshSurfaceMetricCarrier(world,lift,metric,ground,true,bounds)
     sizes=_ruled_vertex_sizes(T,xs,ys,segs,Float64[],Int[],world;interior)
     extend=_resolved_extend_from_boundary(m,2,t)
     return refine!(T;min_angle_deg=0,gmsh_insertion=true,
