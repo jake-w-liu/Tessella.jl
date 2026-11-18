@@ -489,19 +489,21 @@ end
 # Walk start from a nearby inserted vertex `hint` (the driver loops keep a bucket
 # grid of inserted vertices).  For a point strictly inside the current hull the
 # SoS walk result is the unique containing triangle whatever the start, so the
-# triangulation is unchanged.  A point outside or on the hull is located by a
-# path-dependent ghost, so it repeats the default walk from `T.last`, keeping the
-# result (and the storage order of every later triangle) identical.
+# triangulation is unchanged.  Any other point (outside the hull, or on an edge
+# line of the found triangle, where ghost and SoS decisions are path dependent)
+# repeats the default walk from `T.last`, keeping the result (and the storage
+# order of every later triangle) identical.
 function _locate_hinted(T::Triangulation, px, py, vid, hint::Integer)
     s = @inbounds T.vtri[hint]
     (s != 0 && s <= length(T.alive) && T.alive[s] && _vslot(T, s, hint) != 0) ||
         return locate(T, px, py, vid)
     t = locate(T, px, py, vid; start=s)
     _is_ghost_tri(T, t) && return locate(T, px, py, vid)
+    # Only a point STRICTLY inside a real triangle is certainly strictly inside
+    # the hull; a point on an edge line takes the default walk.
     @inbounds for k in 1:3
-        nb = _nbr(T, t, k)
-        (nb != 0 && _is_ghost_tri(T, nb) && _in_circumcircle(T, nb, vid)) &&
-            return locate(T, px, py, vid)
+        a, b = _edge(T, t, k)
+        orient2(_pt(T, a), _pt(T, b), (px, py)) == 0 && return locate(T, px, py, vid)
     end
     return t
 end
