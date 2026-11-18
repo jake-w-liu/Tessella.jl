@@ -485,7 +485,7 @@ function _model_surface_constructor_input(production,actual::MixedMesh,
 end
 
 function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthority,inputs;
-        caller="Surface constructor input")
+        caller="Surface constructor input",only=nothing)
     bound=Dict{Tuple{Int,Int32},MixedMesh}()
     for (owner,constructor) in inputs
         owner[1]==2 && haskey(authority.products,owner) || throw(ArgumentError(
@@ -494,10 +494,14 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
         # creation time; re-validate against the same producer view so unused
         # owned rows cannot change the actual node set comparison. The
         # first-order view keeps an order-elevated product boundable through
-        # its retained corner skeleton.
-        actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
-            producer_order=true,first_order=true)
-        _model_surface_constructor_binding(actual,constructor,caller)
+        # its retained corner skeleton. With `only`, just that owner's input
+        # is validated: a caller that binds one Surface at a time validates
+        # all of them once it is done, rather than all of them every time.
+        if only===nothing || owner==only
+            actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
+                producer_order=true,first_order=true)
+            _model_surface_constructor_binding(actual,constructor,caller)
+        end
         bound[owner]=constructor
     end
     return _ModelMeshAuthority(authority.mesh,authority.products,authority.done,

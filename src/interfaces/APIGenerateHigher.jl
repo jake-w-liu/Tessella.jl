@@ -1834,7 +1834,8 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
         emitted,source_nodes,geometry_cells,native_orphan_births,curve_births,
         parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
         periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
-        metric_surface,constructor_inputs,size_field,native_recombine_events)
+        metric_surface,constructor_inputs,size_field,native_recombine_events,
+        unvalidated_inputs=nothing)
             alternate=produced isa Model._ModelSurfaceGeometryProduction ? produced.geometry : nothing
             source_binding=produced isa Model._ModelSurfaceGeometryProduction ? produced.production :
                 produced isa Model._ModelSurfaceProduction ? produced : nothing
@@ -1932,8 +1933,17 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                             source_binding,actual_product,assembly.caller)
                     end
                 end
-                input=Model._model_mesh_with_surface_constructor_inputs(input,constructor_inputs;
-                    caller=assembly.caller)
+                # Only this Surface's input is new. A caller that passes
+                # `unvalidated_inputs` validates every input once, against
+                # its final authority; otherwise all are validated here.
+                if unvalidated_inputs===nothing
+                    input=Model._model_mesh_with_surface_constructor_inputs(input,constructor_inputs;
+                        caller=assembly.caller)
+                else
+                    input=Model._model_mesh_with_surface_constructor_inputs(input,constructor_inputs;
+                        caller=assembly.caller,only=(2,Int32(tag)))
+                    unvalidated_inputs[]=true
+                end
                 if tag in unmerged_nonew_sources
                     scope=Model._extrude_nonew_scope(m,assembly.caller;size_field=size_field,
                         _working_model=true,_mesh_input=input)
@@ -1988,6 +1998,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     end
     constructor_inputs=surface_constructor_inputs===nothing ?
         Dict{Tuple{Int,Int32},MixedMesh}() : surface_constructor_inputs
+    unvalidated_inputs=Ref(false)
     # These Faces have already lost their old cells from the detached assembly.
     # Kept Faces retain their owned constructor vectors; fresh Faces publish
     # new vectors as their actual cell events arrive in this phase.
@@ -2081,7 +2092,8 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 emitted,source_nodes,geometry_cells,native_orphan_births,curve_births,
                 parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
                 periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
-                metric_surface,constructor_inputs,size_field,native_recombine_events))::
+                metric_surface,constructor_inputs,size_field,native_recombine_events,
+                unvalidated_inputs))::
                 Tuple{Model._ModelMeshAuthority,Union{Nothing,Model._ExtrudeNoNewScope}}
         end
         # State this unit left behind that a later detached produce still
@@ -2136,6 +2148,10 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             end
         end
     end
+    # Each merge validated its own constructor input only; a later merge must
+    # not have changed an earlier Surface's product.
+    unvalidated_inputs[] && (input=Model._model_mesh_with_surface_constructor_inputs(
+        input,constructor_inputs;caller=assembly.caller))
     return input,scope,retained,volume_forward
 end
 
