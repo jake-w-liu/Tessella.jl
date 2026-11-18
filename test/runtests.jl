@@ -202,6 +202,7 @@ include("functional/fixtures.jl")
         "interfaces/cli_meshadapt_view_frontend_test.jl",
         "interfaces/msh_import_identity_test.jl",
         "interfaces/msh2_type_order_test.jl",
+        "geometry/extrude_gmsh_parity_regressions_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

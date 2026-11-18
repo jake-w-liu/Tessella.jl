@@ -756,7 +756,8 @@ function _extrude_bl_face_cells(srcmesh)
 end
 
 # `MElement::getFace(0).normal()` — unit normal of a triangle/quadrangle
-# element (diagonal cross for the quad). `nothing` when degenerate.
+# element. Upstream `MFace::normal` uses `normal3points` on the first three
+# vertices for quadrangles too. `nothing` when degenerate.
 function _extrude_bl_cell_normal(a,b,c)
     ux,uy,uz=b[1]-a[1],b[2]-a[2],b[3]-a[3]
     vx,vy,vz=c[1]-a[1],c[2]-a[2],c[3]-a[3]
@@ -766,7 +767,7 @@ function _extrude_bl_cell_normal(a,b,c)
     return (nx/L,ny/L,nz/L)
 end
 _extrude_bl_quad_normal(a,b,c,d)=
-    _extrude_bl_cell_normal(a,c,b,d)
+    _extrude_bl_cell_normal(a,b,c)
 
 # `GetAveEdgeLength` — mean of the element's edge lengths.
 function _extrude_bl_ave_edge_length(pts)
