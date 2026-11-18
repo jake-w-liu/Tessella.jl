@@ -329,10 +329,38 @@ function _model_curve_l1(m::GeoModel,curve::Integer,u::Float64,t0::Float64,
     return (1-alpha)*lc1 + alpha*lc2
 end
 
-# `LC_MVertex_CURV` for an edge: `2π/(κ·ne)` from the curve's own curvature.
-# The upstream `max_surf_curvature` term needs adjacent-face curvature, which
-# Tessella's built-in surface evaluation does not provide — plane faces
-# contribute zero, matching this truncation.
+# Upstream `max_surf_curvature(ge,u)`: the largest `GFace::curvatureMax` of
+# the faces bounded by the edge, each read at the edge's own trace on the
+# face (`reparamOnFace`). Parametric OCC faces carry that trace as the edge
+# pcurve; plane faces and built-in surfaces (no surface curvature evaluator)
+# contribute zero. Without this term a straight seam or trim line of a
+# cylinder, or a torus seam circle, ignores `Mesh.MeshSizeFromCurvature`
+# although the face it bounds does not.
+function _model_curve_max_surface_curvature(m::GeoModel,curve::Integer,u::Float64)
+    value=0.0
+    for face in _model_curve_faces(m,Int(curve))
+        geometry=get(m.surface_geometry,face,nothing)
+        (geometry===nothing || !hasproperty(geometry,:occ) ||
+         geometry.occ===:plane || !hasproperty(geometry,:pcurves)) && continue
+        entry=get(geometry.pcurves,Int(curve),nothing)
+        entry===nothing && continue
+        curvature=try
+            su,sv=_occ_pcurve_d0(entry.fwd,u)
+            defined,cmax,cmin,_,_=_occ_surface_curvatures(geometry,
+                Float64(su),Float64(sv))
+            # `OCCFace::curvatureMax`: 1e-12 where the curvature is undefined.
+            defined ? max(abs(cmax),abs(cmin)) : 1e-12
+        catch err
+            err isa InterruptException && rethrow()
+            0.0
+        end
+        (isfinite(curvature) && curvature>value) && (value=curvature)
+    end
+    return value
+end
+
+# `LC_MVertex_CURV` for an edge: `2π/(κ·ne)` with `κ` the larger of the
+# curve's own curvature and `max_surf_curvature` of its adjacent faces.
 function _model_curve_l2(m::GeoModel,curve::Integer,u::Float64,ne::Float64;
                          _native_producer::Bool=false,_native_geometry=nothing)
     ne>0 || return GMSH_MAX_SIZE
@@ -345,11 +373,13 @@ function _model_curve_l2(m::GeoModel,curve::Integer,u::Float64,ne::Float64;
     else
         only(model_curvature(m,1,curve,[u]))
     end
+    curvature=max(curvature,_model_curve_max_surface_curvature(m,curve,u))
     return curvature>0 ? 2π/curvature/ne : GMSH_MAX_SIZE
 end
 
 # `LC_MVertex_CURV` for a vertex: max incident-edge curvature at the
-# endpoint touching the vertex (`max_edge_curvature`).
+# endpoint touching the vertex (`max_edge_curvature`), each edge joined by
+# the `max_surf_curvature` of its faces at that endpoint.
 function _model_vertex_l2(m::GeoModel,point::Int,ne::Float64;
                           _native_producer::Bool=false)
     ne>0 || return GMSH_MAX_SIZE
@@ -373,12 +403,16 @@ function _model_vertex_l2(m::GeoModel,point::Int,ne::Float64;
             c=adapter===nothing ? only(model_curvature(m,1,curve,[parameter])) :
                 _model_native_curve_curvature(m,adapter,parameter,"_model_vertex_l2")
             c>curvature && (curvature=c)
+            c=_model_curve_max_surface_curvature(m,curve,parameter)
+            c>curvature && (curvature=c)
         else
             a==point &&
-                (c=only(model_curvature(m,1,curve,[lo]));
+                (c=max(only(model_curvature(m,1,curve,[lo])),
+                       _model_curve_max_surface_curvature(m,curve,lo));
                  c>curvature && (curvature=c))
             b==point &&
-                (c=only(model_curvature(m,1,curve,[hi]));
+                (c=max(only(model_curvature(m,1,curve,[hi])),
+                       _model_curve_max_surface_curvature(m,curve,hi));
                  c>curvature && (curvature=c))
         end
     end
