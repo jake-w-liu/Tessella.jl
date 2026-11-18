@@ -1,41 +1,55 @@
 module OCCSectionCurveMeasureChecks
 using Test,Tessella
 const A=Tessella.API
+const M=Tessella.Model
 
 # A box face cutting a sphere off-center leaves a section circle that is
 # neither a parallel nor a meridian of the sphere, so it is stored as a traced
-# curve S(pc(t)). Its length quadrature never converged: the panels ignored
-# the trace's own knots, and the centroid component normal to the cutting
-# plane — pure evaluation noise — was held to a tolerance below rounding.
-# `occ.get_mass(1, …)` threw "quadrature did not converge".
+# curve S(pc(t)) — e.g. `occ.cut(box(-1,-1,-1,2,2,2), sphere(.8,.55,.35,.6))`.
+# `occ.get_mass(1, …)` on such an edge threw "OCC curve: quadrature did not
+# converge": the centroid component normal to the cutting plane is pure
+# evaluation noise and was held to a tolerance below rounding. The same curve
+# is built here directly (a dense Hermite trace of the circle x=1/2 on the
+# unit sphere) so the check does not have to run the section tracer.
 @testset "OCC length of traced Boolean section curves" begin
     A.initialize()
-    try
+    face=try
         A.option("General.Terminal",0)
-        occ=A.model.occ
-        box=occ.add_box(-1,-1,-1,2,2,2)
-        ball=occ.add_sphere(0.8,0.55,0.35,0.6)
-        out,_=occ.intersect([(3,box)],[(3,ball)])
-        @test length(out)==1
-        occ.synchronize()
-        lengths=Float64[occ.get_mass(1,t) for (_,t) in A.model.get_entities(1)]
-        @test all(isfinite,lengths)
-        # the cap circles on x=1 and y=1: radii from the plane offsets
-        rx=sqrt(0.6^2-0.2^2);ry=sqrt(0.6^2-0.45^2)
-        # they cross at the two points of the edge x=y=1 inside the sphere,
-        # so each plane keeps the arc on the box side of the other plane
-        arc(r,d)=2r*acos(clamp(d/r,-1,1))
-        expected=(2π*rx-arc(rx,0.45))+(2π*ry-arc(ry,0.2))
-        # traced pieces only: box edges are Lines, sphere seam pieces Circles
-        curved=sum(l for (l,(_,t)) in zip(lengths,A.model.get_entities(1))
-                   if !(A.model.get_type(1,t) in ("Line","Circle")))
-        @test curved≈expected rtol=1e-6
-        for (_,t) in A.model.get_entities(1)
-            center=collect(occ.get_center_of_mass(1,t))
-            @test all(isfinite,center)
-        end
+        A.model.occ.add_sphere(0,0,0,1)
+        kernel=A.CURRENT[].occ_kernel
+        kernel.shapes[kernel.bindings[(2,1)]].geometry.geometry
     finally
         A.finalize()
     end
+    ρ=sqrt(0.75)
+    θs=collect(range(0.3,1.2,length=121))
+    uv=NTuple{2,Float64}[(atan(ρ*cos(θ),0.5),asin(ρ*sin(θ))) for θ in θs]
+    duv=NTuple{2,Float64}[(-0.5ρ*sin(θ)/(0.25+ρ^2*cos(θ)^2),
+                           ρ*cos(θ)/sqrt(1-ρ^2*sin(θ)^2)) for θ in θs]
+    knots,degree,poles=M._hermite_bspline_2d(θs,uv,duv)
+    seeds=NTuple{3,Float64}[M._occ_surface_point(face,q...) for q in uv]
+    polyline=M.NURBS.NURBSCurve(1,vcat(θs[1],θs,θs[end]),seeds)
+    curve=M._ModelOCCSectionCurve(:bspline,face,
+                                  (spl2d=(knots,degree,poles),),polyline)
+    record=(occ=:copied_curve,curve=curve,t0=θs[1],t1=θs[end])
+
+    # panels cut at the trace's own knots
+    cuts=M._model_occ_curve_panels(curve,θs[1],θs[end])
+    @test cuts==θs[2:end-1]
+    @test M._model_occ_curve_panels(curve,θs[1],θs[2])==Float64[]
+
+    stats=M._model_occ_curve_stats(record)
+    @test stats.area≈ρ*0.9 rtol=1e-9
+    centroid=stats.origin.+stats.centroid
+    chord=2sin(0.45)/0.9          # arc centroid radius factor
+    @test collect(centroid)≈[0.5,ρ*chord*cos(0.75),ρ*chord*sin(0.75)] atol=1e-8
+
+    # the box follows the edge's own range, not the whole curve's hull
+    half=(occ=:copied_curve,curve=curve,t0=θs[1],t1=θs[61])
+    box=M._model_occ_copied_curve_bbox(half)
+    @test box[2]≈ρ*cos(θs[61]) atol=1e-9
+    @test box[5]≈ρ*cos(θs[1]) atol=1e-9
+    @test box[3]≈ρ*sin(θs[1]) atol=1e-9
+    @test box[6]≈ρ*sin(θs[61]) atol=1e-9
 end
 end
