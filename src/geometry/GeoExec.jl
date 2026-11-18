@@ -2218,15 +2218,28 @@ function _geo_selector_mass(m::GeoModel,name::String,dim::Int,tail::String,
     startswith(tail,"{") || _geo_selector_abort(tail)
     (body,rest)=_geo_balanced_group(tail,caller)
     isempty(rest) || _geo_selector_abort(rest)
-    _geo_eval_numeric(body,context,"$caller $name tag")
+    value=_geo_eval_numeric(body,context,"$caller $name tag")
     if allocator_state!==nothing && allocator_state.factory==:opencascade &&
             allocator_state.occ_active
-        # Upstream would call `getOCCInternals()->getMass` here — real mass
-        # data Tessella cannot produce, so it is a hard error rather than a
-        # zeroed placeholder.
-        throw(ArgumentError(
-            "$caller: $name requires OpenCASCADE mass properties, which " *
-            "Tessella does not implement"))
+        # `getOCCInternals()->getMass/getCenterOfMass/getMatrixOfInertia` —
+        # an unknown entity is a `Msg::Error` and leaves the zeroed result.
+        tag=trunc(Int,value)
+        try
+            kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
+            Base.inferencebarrier(_geo_occ_bind_entities!)(m,[(dim,tag)],kernel,caller)
+            name=="Mass" &&
+                return [Base.inferencebarrier(Model._model_occ_get_mass)(m,dim,tag)]
+            name=="CenterOfMass" && return collect(Float64,
+                Base.inferencebarrier(Model._model_occ_get_center_of_mass)(m,dim,tag))
+            return collect(Float64,
+                Base.inferencebarrier(Model._model_occ_get_matrix_of_inertia)(m,dim,tag))
+        catch err
+            err isa InterruptException && rethrow()
+            err isa ArgumentError || rethrow()
+            _geo_msg_error!(context,err.msg)
+            return name=="Mass" ? [0.0] :
+                name=="CenterOfMass" ? [0.0,0.0,0.0] : Float64[]
+        end
     end
     _geo_yyerror!(context,
         "$name only available with OpenCASCADE geometry kernel")
