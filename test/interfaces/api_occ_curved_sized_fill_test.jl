@@ -100,6 +100,27 @@ end
         end
     end
 
+    @testset "sphere pole fans at ordinary sizes (h=$h)" for h in (0.2,0.15,0.1)
+        # The wrapped-cell rule added for sizes larger than the model once
+        # also acted on the open sector of a growing pole fan and left two
+        # slivers at the south pole: minimum angle 6.8, 6.3 and 9.6 deg at
+        # these sizes (Gmsh 4.15.2: 29.0, 27.8, 26.6). It now runs only as a
+        # second pass when wrapped cells are left, so a resolved sphere
+        # never sees it.
+        generate(()->A.model.occ.add_sphere(0,0,0,1);h=h)
+        s=try
+            shell_statistics((x,y,z)->h,(x,y,z)->abs(hypot(x,y,z)-1))
+        finally
+            A.finalize()
+        end
+        @test s.closed
+        @test s.smallest>20
+        for tag in s.tags
+            abs(abs(s.point(tag)[3])-1)<=1e-12 || continue
+            @test 4<=count(edge->edge[1]==tag,keys(s.directed))<=7
+        end
+    end
+
     @testset "torus (doubly periodic chart)" begin
         generate(()->A.model.occ.add_torus(0,0,0,1.5,0.5);h=0.3)
         s=try

@@ -154,12 +154,19 @@ end
     mesh=M.mesh_model_volume(m,1)
     @test MT.ntets(mesh)>0
     @test MT.validate(mesh).ok
-    # Boundary nodes sit on the sphere; the single interior Steiner vertex
-    # is the only node off the radius.
-    on=sum(abs(sqrt(mesh.coords[1,j]^2+mesh.coords[2,j]^2+
-                    mesh.coords[3,j]^2)-1.0)<=1e-9 for j in
-           axes(mesh.coords,2))
-    @test on>=MT.nnodes(mesh)-1
+    # Every node of the tetrahedral boundary sits on the sphere and every
+    # other node lies strictly inside it. (This used to demand at most one
+    # node off the radius, i.e. a single interior Steiner vertex — a count
+    # that belongs to the volume mesher and one particular surface mesh,
+    # not to the pole fan: with 59 boundary nodes the fill places five.)
+    radius(j)=sqrt(mesh.coords[1,j]^2+mesh.coords[2,j]^2+mesh.coords[3,j]^2)
+    boundary=Set{Int}()
+    for face in first(MT.boundary_faces(mesh.tets)),node in face
+        push!(boundary,Int(node))
+    end
+    @test !isempty(boundary)
+    @test all(j->abs(radius(j)-1.0)<=1e-9,boundary)
+    @test all(j->j in boundary || radius(j)<1.0-1e-9,axes(mesh.coords,2))
 end
 
 @testset "degenerate pole edges emit no Line cells" begin

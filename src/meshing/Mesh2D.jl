@@ -1932,6 +1932,13 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             _gmsh_queue_select!(queue,T,interior,skipped,gsizes,
                                 gmsh_algorithm,gmsh_extend_boundary)
         if t==0
+            if queue!==nothing && _gmsh_surface_second_pass!(
+                    _gmsh_surface_trace,T,interior,skipped)
+                queue=_gmsh_queue_init(T,interior,skipped,gsizes,
+                    gmsh_algorithm,gmsh_extend_boundary,
+                    queue.vertex_numbers,queue.vertex_high_water)
+                continue
+            end
             _assert_operable(T,"refine! result")
             return _gmsh_surface_insertion_result(interior,queue,return_vertex_numbers)
         end

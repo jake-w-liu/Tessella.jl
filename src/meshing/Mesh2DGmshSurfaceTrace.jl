@@ -223,17 +223,26 @@ struct _GmshSurfaceMetricCarrier{L,G,G2}
     # mode: the wrapped-cell test (`_gmsh_cell_wrapped`) and the admission of
     # a Newton-solved frontal point. An unbounded box disables both.
     bounds::NTuple{4,Float64}
+    # Second-pass switch of the Cartesian mode. The insertion first runs on
+    # the Cartesian radius alone; only if cells that wrap around the surface
+    # are left when its queue empties (`_gmsh_surface_second_pass!`) is the
+    # wrapped rule armed and the queue rebuilt. A resolved mesh never sees it.
+    wrap::Base.RefValue{Bool}
 end
 const _GMSH_CARRIER_UNBOUNDED=(-Inf,Inf,-Inf,Inf)
 @inline _GmshSurfaceMetricCarrier(world,lift,metric)=
     _GmshSurfaceMetricCarrier(world,lift,metric,nothing,false,
-                              _GMSH_CARRIER_UNBOUNDED)
+                              _GMSH_CARRIER_UNBOUNDED,Ref(false))
 @inline _GmshSurfaceMetricCarrier(world,lift,metric,ground)=
     _GmshSurfaceMetricCarrier(world,lift,metric,ground,false,
-                              _GMSH_CARRIER_UNBOUNDED)
+                              _GMSH_CARRIER_UNBOUNDED,Ref(false))
 @inline _GmshSurfaceMetricCarrier(world,lift,metric,ground,cartesian_close::Bool)=
     _GmshSurfaceMetricCarrier(world,lift,metric,ground,cartesian_close,
-                              _GMSH_CARRIER_UNBOUNDED)
+                              _GMSH_CARRIER_UNBOUNDED,Ref(false))
+@inline _GmshSurfaceMetricCarrier(world,lift,metric,ground,cartesian_close::Bool,
+                                  bounds::NTuple{4,Float64})=
+    _GmshSurfaceMetricCarrier(world,lift,metric,ground,cartesian_close,
+                              bounds,Ref(false))
 @inline _gmsh_carrier_inside(carrier::_GmshSurfaceMetricCarrier,point)=
     isfinite(point[1]) && isfinite(point[2]) &&
     carrier.bounds[1]<=point[1]<=carrier.bounds[2] &&
