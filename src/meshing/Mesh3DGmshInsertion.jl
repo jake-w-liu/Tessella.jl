@@ -361,9 +361,18 @@ function _gmsh3_containing_weights(T,point)
     return nothing
 end
 
-function _gmsh3_compatible(T,point,lc,protected_faces,protected_edges)
-    shell_vertices=Set{Int32}()
-    shell_edges=Dict{NTuple{2,Int32},Int}()
+# Reusable containers of `_gmsh3_compatible`: one cavity shell is examined
+# per insertion, so its vertex and edge tables are emptied rather than rebuilt.
+struct _GmshShellScratch
+    vertices::Set{Int32}
+    edges::Dict{NTuple{2,Int32},Int}
+end
+_GmshShellScratch()=_GmshShellScratch(Set{Int32}(),Dict{NTuple{2,Int32},Int}())
+
+function _gmsh3_compatible(T,point,lc,protected_faces,protected_edges,
+                           scratch::_GmshShellScratch=_GmshShellScratch())
+    shell_vertices=scratch.vertices;shell_edges=scratch.edges
+    empty!(shell_vertices);empty!(shell_edges)
     for (a,b,c,_) in T.boundary
         for node in (a,b,c)
             push!(shell_vertices,node)
@@ -385,15 +394,18 @@ function _gmsh3_compatible(T,point,lc,protected_faces,protected_edges)
         (_sort3t(face...) in protected_faces && nb!=0 &&
          T.mark[nb]==T.epoch) && return false
     end
-    for edge in protected_edges
-        touched=false
-        for t in T.cavity
-            vertices=ntuple(k->_vert(T,t,k),4)
-            if edge[1] in vertices && edge[2] in vertices
-                touched=true;break
-            end
+    # A protected edge of a cavity cell must survive on the shell. The cavity
+    # holds a few dozen cells while a model protects every curve segment, so
+    # the cells' own edges are looked up rather than every protected edge
+    # tested against every cell.
+    isempty(protected_edges) && return true
+    for t in T.cavity
+        vertices=(_vert(T,t,1),_vert(T,t,2),_vert(T,t,3),_vert(T,t,4))
+        for i in 1:3,j in i+1:4
+            u=vertices[i];v=vertices[j]
+            ((u,v) in protected_edges || (v,u) in protected_edges) || continue
+            haskey(shell_edges,_edgekey(u,v)) || return false
         end
-        touched && !haskey(shell_edges,_edgekey(edge...)) && return false
     end
     return true
 end
@@ -427,6 +439,7 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
         ntuple(slot->mesh.tets[slot,column],4) for column in axes(mesh.tets,2)] : nothing
     sizes,background=_gmsh3_initial_sizes(T,mesh,exterior,minimize_boundary,embedded_sizes;native_arithmetic=native_storage_order)
     queue=_GmshTetQueue();skipped=Set{NTuple{4,Int32}}()
+    shell_scratch=_GmshShellScratch()
     for t in eachindex(T.alive)
         _gmsh3_queue_tet!(queue,T,t,sizes,background,extend_boundary,skipped,numbers,storage)
     end
@@ -470,7 +483,7 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
             "$caller: candidate element number allocation overflows"))
         first_number=number
         number+=candidates
-        if !_gmsh3_compatible(T,point,lc,protected_faces,protected_edges)
+        if !_gmsh3_compatible(T,point,lc,protected_faces,protected_edges,shell_scratch)
             push!(skipped,entry.key);continue
         end
         T.nreal<max_nodes || throw(ArgumentError("$caller: node limit reached"))
