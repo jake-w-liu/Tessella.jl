@@ -342,6 +342,17 @@ function _grade_planar_constraints(xs::Vector{Float64},ys::Vector{Float64},segme
     return outx,outy,outsegments
 end
 
+# refine!'s default step budget (300k Steiner points) caps a max_area-driven
+# mesh near 600k triangles; scale it with the bounding-box area / max_area.
+function _planar_refine_steps(xs::AbstractVector{Float64}, ys::AbstractVector{Float64}, area::Float64)
+    steps = 300_000
+    (isfinite(area) && !isempty(xs)) || return steps
+    bx = extrema(xs); by = extrema(ys)
+    estimate = 4 * (bx[2] - bx[1]) * (by[2] - by[1]) / area
+    isfinite(estimate) && (steps = max(steps, ceil(Int, min(estimate, 1.0e12))))
+    return steps
+end
+
 """
     mesh_planar(xs, ys, segments; min_angle_deg=25.0, max_area=Inf, rng_seed=1,
                 field=nothing, entity=nothing, boundary_entities=nothing,
@@ -398,7 +409,8 @@ function mesh_planar(xs::AbstractVector, ys::AbstractVector,
              (ax,ay,bx,by)->metric_edge_length(field,(ax,ay,0.0),(bx,by,0.0);
                                                     entity=face_entity) : nothing
     interior = refine!(T; min_angle_deg=angle, max_area=area,
-                       size=sizefn,edge_metric=edgefn)
+                       size=sizefn,edge_metric=edgefn,
+                       maxsteps=_planar_refine_steps(mesh_xs,mesh_ys,area))
     m = to_mesh(T; interior=interior)
     size(m.tris, 2) > 0 ||
         throw(ArgumentError("mesh_planar: constrained boundary encloses no triangles"))
