@@ -26,7 +26,7 @@ operators. `If`/`ElseIf`/`Else`/`EndIf` and `For name In {a:b[:c]}` follow the
 built-in kernel (the For range is evaluated once at loop entry and the loop
 variable is left at its first out-of-range value); a bounded
 `While (expr) ... EndWhile` is a Tessella extension — pinned Gmsh has no While
-keyword. Control headers must complete on one line. Numeric
+keyword. Control headers may span several lines. Numeric
 list variables provide zero-based indexing, cardinality, copying, concatenation,
 selection, and checked mutation; entity lists can expand whole variables. Mesh 2/3
 runs through the native [`Model`](@ref) kernel. Boolean results own operation-time
@@ -117,7 +117,8 @@ using ..IO: _geo_string_index_offender, _GEO_STRING_FUNCTIONS,
             _geo_tstring_valid,
             _GEO_BARE_STRING_TOKENS, _GEO_ALL_FUNCTIONS, _GEO_LEXER_KEYWORDS,
             _geo_scan_top_level_comma, _geo_lhs_keyword_check,
-            _geo_control_statement, _GEO_CONTROL_BARE
+            _geo_control_statement, _GEO_CONTROL_BARE,
+            _geo_control_statement_open, _geo_strip_line_comment
 using ..IO: GeoFieldSpec, GeoParams, _GEO_FIELD_KINDS,
             _geo_expression_field_tags
 using ..SizeField: _build_geo_field, AbstractField, AbstractSizeField,
@@ -585,19 +586,37 @@ function _geo_exec_statements(stream::Base.IO)
     # lookahead is the `syntax error` token and stays inside the statement.
     extrude_pending=false
     extrude_pending_committed=false
-    for rawline in eachline(stream;keep=true)
+    lines=collect(eachline(stream;keep=true))
+    li=0
+    while li<length(lines)
+        li+=1
+        rawline=lines[li]
         cur_line+=1
         # `'\n'` vs `'\r\n'`/unterminated decides the reported line
         # (see `line_lfs` above); the terminator itself never reaches buf.
         cur_lf=endswith(rawline,"\n") && !endswith(rawline,"\r\n")
-        raw=rawline
-        endswith(raw,"\n") && (raw=chop(raw))
-        endswith(raw,"\r") && (raw=chop(raw))
+        raw=String(rawline)
+        endswith(raw,"\n") && (raw=String(chop(raw)))
+        endswith(raw,"\r") && (raw=String(chop(raw)))
         push!(line_lfs,cur_lf)
         i=firstindex(raw); last=lastindex(raw)
         while i<=last
             if !block_comment && quote_char=='\0' && !buf_has_content
-                control=_geo_control_statement(raw,i,last)
+                control=_geo_control_statement_open(raw,i,last)
+                # The flex scanner has no line structure: an `If (a &&` header
+                # continues on the following lines (tutorials/t18.geo).
+                while control===:open && li<length(lines)
+                    li+=1;cur_line+=1
+                    next=lines[li]
+                    cur_lf=endswith(next,"\n") && !endswith(next,"\r\n")
+                    endswith(next,"\n") && (next=chop(next))
+                    endswith(next,"\r") && (next=chop(next))
+                    push!(line_lfs,cur_lf)
+                    raw=string(raw," ",_geo_strip_line_comment(next))
+                    last=lastindex(raw)
+                    control=_geo_control_statement_open(raw,i,last)
+                end
+                control===:open && (control=_geo_control_statement(raw,i,last))
                 if control!==nothing
                     take!(buf)
                     empty!(buf_nl)
@@ -770,7 +789,7 @@ numeric functions, and Gmsh's comparison, logical, and ternary operators.
 For range is a single colon term evaluated once at loop entry (the implicit
 two-term increment is +1, so `{5:0}` iterates zero times), the loop variable is
 assigned per iteration and remains at its first out-of-range value, and control
-headers must complete on one line. `While (expr) ... EndWhile` is a bounded
+headers may span several lines. `While (expr) ... EndWhile` is a bounded
 Tessella extension — pinned Gmsh has no While keyword — capped at
 $_MAX_GEO_LOOP_ITERATIONS iterations; total executed statements stay within
 $_MAX_GEO_EXEC_STATEMENTS. `Function name ... Return` registers a zero-argument

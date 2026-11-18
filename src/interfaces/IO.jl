@@ -9727,6 +9727,36 @@ function _geo_control_statement(raw::AbstractString,i::Int,last::Int)
     return (String(rest[1:close]),i+close-1)
 end
 
+# `_geo_control_statement`, returning `:open` while the header's balanced
+# group has not closed on the text seen so far — the caller appends the next
+# source line and retries.
+function _geo_control_statement_open(raw::AbstractString,i::Int,last::Int)
+    try
+        return _geo_control_statement(raw,i,last)
+    catch err
+        err isa ArgumentError &&
+            occursin("control statement must complete on a single line",err.msg) ||
+            rethrow()
+        return :open
+    end
+end
+
+# Drop a trailing `// comment` (outside quotes) from a continuation line.
+function _geo_strip_line_comment(line::AbstractString)
+    q='\0';prev='\0'
+    for (k,c) in pairs(line)
+        if q!='\0'
+            c==q && (q='\0')
+        elseif c=='"' || c=='\''
+            q=c
+        elseif c=='/' && prev=='/'
+            return String(line[firstindex(line):prevind(line,k,2)])
+        end
+        prev=c
+    end
+    return String(line)
+end
+
 function _scan_geo_statements(consume,path::AbstractString)
     open(path,"r") do stream
         _scan_geo_statements(consume,stream)
@@ -9749,14 +9779,27 @@ function _scan_geo_statements(consume,stream::Base.IO)
     # stays inside the statement.
     extrude_pending=false
     extrude_pending_committed=false
-    for raw in eachline(stream)
+    lines=collect(eachline(stream))
+    li=0
+    while li<length(lines)
+        li+=1
+        raw=String(lines[li])
         i=firstindex(raw);lastindex_raw=lastindex(raw)
         while i<=lastindex_raw
             # Control constructs carry no `;` — emit one as its own statement
             # whenever it begins at a statement boundary (matching
             # `_geo_exec_statements`).
             if !block_comment && quote_char=='\0' && !buf_has_content
-                control=_geo_control_statement(raw,i,lastindex_raw)
+                control=_geo_control_statement_open(raw,i,lastindex_raw)
+                # A header may continue on the following lines.
+                while control===:open && li<length(lines)
+                    li+=1
+                    raw=string(raw," ",_geo_strip_line_comment(lines[li]))
+                    lastindex_raw=lastindex(raw)
+                    control=_geo_control_statement_open(raw,i,lastindex_raw)
+                end
+                control===:open &&
+                    (control=_geo_control_statement(raw,i,lastindex_raw))
                 if control!==nothing
                     take!(buffer)
                     consume(control[1])
