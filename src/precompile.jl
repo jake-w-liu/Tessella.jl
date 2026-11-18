@@ -30,6 +30,23 @@ function _precompile_meshing_workload()
             execute_geo(path; mesh_dim=2)
         end
     end
+    # Boundary recovery on a small torus whose quadrilaterals alternate their
+    # diagonal: about half of its edges have to be recovered.
+    let nu = 10, nv = 6
+        id(i, j) = mod(i, nu) * nv + mod(j, nv) + 1
+        coords = Matrix{Float64}(undef, 3, nu * nv)
+        tris = Matrix{Int32}(undef, 3, 2 * nu * nv)
+        column = 0
+        for i in 0:nu-1, j in 0:nv-1
+            u = 2pi * i / nu; v = 2pi * j / nv
+            coords[:, id(i, j)] .= ((2 + 0.6cos(v)) * cos(u), (2 + 0.6cos(v)) * sin(u), 0.6sin(v))
+            a = id(i, j); b = id(i + 1, j); c = id(i + 1, j + 1); d = id(i, j + 1)
+            first, second = iseven(i + j) ? ((a, b, c), (a, c, d)) : ((a, b, d), (b, c, d))
+            tris[:, column+=1] .= first
+            tris[:, column+=1] .= second
+        end
+        BoundaryRecovery.recover_boundary_flips(coords, tris)
+    end
     saved_start = API._SESSION_START_TIME[]
     saved_epoch = API._ONELAB_SESSION_EPOCH[]
     saved_lc = API.NATIVE_CONTEXT_LC[]
@@ -60,6 +77,29 @@ function _precompile_meshing_workload()
             API.mesh.generate(3)
         finally
             API.finalize()
+        end
+        # Curved faces, trimmed faces and a non-convex Region: without them the
+        # first sphere or drilled block of a session spends over a minute
+        # compiling. A failure here must never prevent the package from
+        # loading, so these two are best effort.
+        for build in (
+                () -> API.model.occ.add_sphere(0, 0, 0, 1),
+                () -> begin
+                    block = API.model.occ.add_box(0, 0, 0, 2, 2, 2)
+                    drill = API.model.occ.add_cylinder(1, 1, -1, 0, 0, 4, 0.5)
+                    API.model.occ.cut([(3, block)], [(3, drill)])
+                end)
+            try
+                API.initialize()
+                API.option("General.Terminal", 0)
+                build()
+                API.model.occ.synchronize()
+                API.option("Mesh.MeshSizeMax", 0.5)
+                API.mesh.generate(3)
+            catch
+            finally
+                API.finalize()
+            end
         end
     finally
         API._SESSION_START_TIME[] = saved_start
