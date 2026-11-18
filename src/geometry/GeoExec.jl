@@ -8074,8 +8074,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             # `addCircle` center+radius form (4, 6, 9 or 12 parameters);
             # upstream selects it purely by parameter count.
             (vals,)=_geo_occ_center_params(
-                mm.captures[2],context,caller,(4,6,9,12))
+                mm.captures[2],context,caller,(4,5,6,9,12))
             if vals!==nothing
+                # Five parameters are `{x,y,z,r,angle2}` (angle1 = 0).
+                length(vals)==5 && (vals=[vals[1:4];0.0;vals[5]])
                 kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
                 _geo_dup_entity!(context,
                     haskey(m.curves,trunc(Int,tag)) ||
@@ -8150,8 +8152,10 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             # the OCC `addEllipse` center form (5, 7, 10 or 13 parameters),
             # again selected purely by parameter count upstream.
             (vals,)=_geo_occ_center_params(
-                mm.captures[2],context,caller,(5,7,10,13))
+                mm.captures[2],context,caller,(5,6,7,10,13))
             if vals!==nothing
+                # Six parameters are `{x,y,z,rx,ry,angle2}` (angle1 = 0).
+                length(vals)==6 && (vals=[vals[1:5];0.0;vals[6]])
                 kernel=Base.inferencebarrier(_geo_occ_prepare_kernel!)(m)
                 _geo_dup_entity!(context,
                     haskey(m.curves,trunc(Int,tag)) ||

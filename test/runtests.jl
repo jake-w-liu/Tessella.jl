@@ -236,6 +236,7 @@ include("functional/fixtures.jl")
         "geometry/geo_field_model_list_test.jl",
         "geometry/geo_occ_wire_orientation_test.jl",
         "geometry/geo_tilde_list_splice_test.jl",
+        "geometry/geo_occ_center_arc_params_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
