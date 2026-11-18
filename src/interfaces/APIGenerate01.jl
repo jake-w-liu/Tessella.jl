@@ -1722,8 +1722,17 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
         record.node_tags=copy(data.external_node_tags[positions])
         record.node_coords=mesh.coords[:,positions]
         parameters=data.node_parametric[positions]
-        record.node_params=all(value->value!==nothing && length(value)==dim,parameters) ?
-            (isempty(parameters) ? zeros(dim,0) : hcat(parameters...)) : zeros(0,length(positions))
+        if all(value->value!==nothing && length(value)==dim,parameters)
+            # One column per node, written in place: splatting the vectors
+            # into `hcat` dispatches on their number.
+            node_params=Matrix{Float64}(undef,dim,length(parameters))
+            for (column,value) in enumerate(parameters),row in 1:dim
+                node_params[row,column]=value[row]
+            end
+            record.node_params=node_params
+        else
+            record.node_params=zeros(0,length(positions))
+        end
         if runtime_parameters!==nothing
             record.node_native_params=Dict(data.external_node_tags[position]=>
                 (runtime_parameters[position]===nothing ? Float64[] : copy(runtime_parameters[position]))
@@ -1752,7 +1761,8 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
             record===nothing && continue
             push!(record.element_types,Int32(block.msh))
             push!(record.element_tags,data.external_element_tags[bi][column])
-            push!(record.element_nodes,copy(data.external_node_tags[block.nodes[:,column]]))
+            push!(record.element_nodes,UInt64[data.external_node_tags[block.nodes[slot,column]]
+                for slot in axes(block.nodes,1)])
         end
     end
     for (entity,record) in records

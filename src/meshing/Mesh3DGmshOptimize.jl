@@ -25,6 +25,14 @@ const _GOPT_SWAP_PATTERNS=Dict{Int,Tuple{Tuple,Tuple}}(
     7=>(((1,2,3),(1,3,4),(1,4,5),(1,5,6),(1,6,7),(1,4,7),(4,6,7),(4,5,6),(1,5,7),(5,6,7),(1,4,6),(4,5,7),(1,3,5),(3,4,5),(1,3,7),(3,6,7),(3,5,6),(1,3,6),(3,5,7),(3,4,6),(3,4,7),(1,2,4),(2,3,4),(1,2,5),(2,4,5),(1,2,7),(2,6,7),(2,5,6),(1,2,6),(2,5,7),(2,4,6),(2,4,7),(2,3,5),(2,3,6),(2,3,7)),((1,2,3,4,5),(1,2,6,7,8),(1,2,3,9,10),(1,2,5,8,11),(1,2,6,10,12),(1,4,5,13,14),(1,14,15,16,17),(1,9,10,13,14),(1,5,14,17,18),(1,10,14,15,19),(1,8,15,16,20),(1,5,8,18,20),(1,7,8,15,21),(1,10,12,15,21),(3,4,5,22,23),(6,7,8,22,23),(3,9,10,22,23),(5,8,11,22,23),(6,10,12,22,23),(4,5,23,24,25),(23,25,26,27,28),(9,10,23,24,25),(5,23,25,28,29),(10,23,25,26,30),(8,23,26,27,31),(5,8,23,29,31),(7,8,23,26,32),(10,12,23,26,32),(4,5,14,24,33),(14,26,27,28,33),(9,10,14,24,33),(5,14,28,29,33),(10,14,26,30,33),(14,17,26,27,34),(5,14,17,29,34),(14,16,17,26,35),(10,14,19,26,35),(8,20,26,27,34),(5,8,20,29,34),(8,16,20,26,35),(7,8,21,26,35),(10,12,21,26,35))),
 )
 
+# The same table with concrete element types. The literal above nests tuples
+# of different lengths, so iterating it dispatches dynamically on every step
+# of the innermost swap loop.
+const _GOPT_SWAP_TABLE=Dict{Int,Tuple{Vector{NTuple{3,Int}},Vector{Vector{Int}}}}(
+    size=>(NTuple{3,Int}[triangle for triangle in triangles],
+           Vector{Int}[collect(Int,triangulation) for triangulation in triangulations])
+    for (size,(triangles,triangulations)) in _GOPT_SWAP_PATTERNS)
+
 mutable struct _GmshOptimizeTet
     vertices::NTuple{4,Int32}
     neighbors::Vector{Int32}
@@ -236,7 +244,7 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
     found=_gopt_edge_cavity(state,start,edge)
     found===nothing && return false
     first,last,cavity,outside,ring=found
-    pattern=get(_GOPT_SWAP_PATTERNS,length(ring),nothing)
+    pattern=get(_GOPT_SWAP_TABLE,length(ring),nothing)
     pattern===nothing && return false
     # Embedded entities are hard constraints. Faces/edges carried by a cell
     # outside the cavity survive regardless; an entity whose every carrier is

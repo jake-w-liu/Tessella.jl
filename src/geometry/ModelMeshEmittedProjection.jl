@@ -16,6 +16,25 @@ _emitted_projection_blocks(mesh::Mesh)=((1,mesh.segs,mesh.seg_tag),
 _emitted_projection_blocks(mesh::MixedMesh)=
     ((Int(block.msh),block.nodes,block.tags) for block in mesh.blocks)
 
+# Typed carrier cell key `(msh, rows)` of one column, with the rows optionally
+# translated through `rows`. The common arities build their tuple directly;
+# slicing the column and splatting it allocates twice per cell.
+@inline function _emitted_cell_key(msh::Int,cells::AbstractMatrix,column::Int,rows)
+    arity=size(cells,1)
+    arity==4 && return (msh,(rows[cells[1,column]],rows[cells[2,column]],
+                             rows[cells[3,column]],rows[cells[4,column]]))
+    arity==3 && return (msh,(rows[cells[1,column]],rows[cells[2,column]],rows[cells[3,column]]))
+    arity==2 && return (msh,(rows[cells[1,column]],rows[cells[2,column]]))
+    return (msh,Tuple(rows[cells[:,column]]))
+end
+@inline function _emitted_cell_key(msh::Int,cells::AbstractMatrix,column::Int)
+    arity=size(cells,1)
+    arity==4 && return (msh,(cells[1,column],cells[2,column],cells[3,column],cells[4,column]))
+    arity==3 && return (msh,(cells[1,column],cells[2,column],cells[3,column]))
+    arity==2 && return (msh,(cells[1,column],cells[2,column]))
+    return (msh,Tuple(cells[:,column]))
+end
+
 function _model_mesh_emitted_receipt(authority,parts,part_rows,caller)
     authority.mesh!==nothing && authority.carrier!==nothing || throw(ArgumentError(
         "$caller: emitted receipt requires an actual authority and its carrier"))
@@ -37,19 +56,38 @@ function _model_mesh_emitted_receipt(authority,parts,part_rows,caller)
         all(entry->isempty(entry[2]) || msh_dimension(entry[1])==dimension,
             _emitted_projection_blocks(part)) || throw(ArgumentError(
             "$caller: emitted constructor part contains a foreign cell dimension"))
+        bound_rows=length(rows)
         for (msh,cells,tags) in _emitted_projection_blocks(part),column in axes(cells,2)
-            all(row->0<row<=length(rows),cells[:,column]) || throw(ArgumentError(
-                "$caller: emitted constructor cell references an absent bound vertex"))
-            key=(msh,Tuple(rows[cells[:,column]]))
+            for slot in axes(cells,1)
+                0<cells[slot,column]<=bound_rows || throw(ArgumentError(
+                    "$caller: emitted constructor cell references an absent bound vertex"))
+            end
+            key=_emitted_cell_key(msh,cells,column,rows)
             haskey(owners,key) && throw(ArgumentError("$caller: emitted constructors repeat a typed carrier cell"))
             owners[key]=owner
         end
         bound[owner]=(deepcopy(part),Int32.(rows))
     end
-    carrier_keys=Set((msh,Tuple(cells[:,column])) for (msh,cells,tags) in
-        _emitted_projection_blocks(authority.carrier) for column in axes(cells,2))
-    Set(keys(owners))==carrier_keys || throw(ArgumentError(
-        "$caller: emitted constructors do not partition the current carrier"))
+    # The emitted cells are distinct, so they partition the carrier when it
+    # has as many cells and each of them is an emitted one. A carrier that
+    # repeats a cell fails the count and takes the set comparison.
+    carrier_count=0;covered=true
+    for (msh,cells,tags) in _emitted_projection_blocks(authority.carrier)
+        carrier_count+=size(cells,2)
+        covered || continue
+        for column in axes(cells,2)
+            if !haskey(owners,_emitted_cell_key(msh,cells,column))
+                covered=false
+                break
+            end
+        end
+    end
+    if !(covered && carrier_count==length(owners))
+        carrier_keys=Set((msh,Tuple(cells[:,column])) for (msh,cells,tags) in
+            _emitted_projection_blocks(authority.carrier) for column in axes(cells,2))
+        Set(keys(owners))==carrier_keys || throw(ArgumentError(
+            "$caller: emitted constructors do not partition the current carrier"))
+    end
     return _ModelMeshEmittedReceipt(authority.mesh,authority.carrier,bound,owners,
         copy(authority.carrier_rows),_model_mesh_emitted_state(authority.mesh))
 end
