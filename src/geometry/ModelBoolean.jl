@@ -166,6 +166,11 @@ _brep_vperiod(sg::NamedTuple) =
         0.0
     end
 
+# Chart singularity: a sphere pole is one 3-D point for every longitude, so
+# a 3-D vertex match there says nothing about which uv node a curve ends on.
+_brep_uv_singular(sg::NamedTuple,uv,tol) =
+    sg.occ===:sphere && abs(abs(uv[2])-π/2)<=tol
+
 # ── pcurve evaluation ────────────────────────────────────────────────────────
 
 # `neg2d` pcurve wrapper: evaluated at the edge parameter t as `inner(−t)` —
@@ -1541,6 +1546,13 @@ function _brep_sec_vertex(solids,oi,oj,esA,esB,sec,s,tol,mscale;
             uv=(uw1,vper>0 ? mod(uv[2],vper) : uv[2])
         end
         uvtol=1e-4*max(1.0,hypot(uv[1],uv[2]))
+        # a section running into a sphere pole ends on the pole's degenerate
+        # edge at the section's own longitude. The 3-D nearest wire pierce
+        # there is the seam meridian's end — the same point in space but a
+        # different uv node — so anchoring to it welds the section onto the
+        # seam and the face never splits. Leave this side unanchored: the
+        # endpoint's pcurve eval is exact and splits the degenerate edge.
+        _brep_uv_singular(f.sg,uv,1e-9) && continue
         # per side: the authoritative vertex is this face's own wire-edge
         # pierce — its pcurve eval at the pierce param is bitwise the edge
         # split's node uv, where a projected candidate can sit the STEP
@@ -1636,7 +1648,11 @@ function _brep_anchor_uv(f,myside,a)
     end
     ro=myside==1 ? a.B : a.A
     ro===nothing && return nothing
-    return _brep_surface_uv(f.sg,ro[1])
+    uv=_brep_surface_uv(f.sg,ro[1])
+    # the inverse map picks an arbitrary longitude at a pole — the section
+    # pcurve's own endpoint is the node there
+    _brep_uv_singular(f.sg,uv,1e-9) && return nothing
+    return uv
 end
 
 # did this endpoint anchor on `myside`'s own wire edge? — then the pierce
@@ -2535,6 +2551,9 @@ function _brep_edge_splits(curve,params,t0,t1,tol)
             if t-out[end]<ptol
                 continue
             end
+            # a degenerate (pole/apex) edge has one 3-D image for its whole
+            # parameter range — its cuts are distinct uv nodes
+            curve.kind===:degenerate && (push!(out,t);continue)
             pa=_brep_curve_eval(curve,out[end])
             pb=_brep_curve_eval(curve,t)
             _b3dist(pa,pb)<100tol && continue
@@ -6318,6 +6337,10 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
             local c
             if crv.kind===:degenerate
                 c=_add_occ_degenerate!(m,ptag[va])
+                # a pole edge cut by sections keeps its own longitude span
+                (e.t0==0.0 && e.t1==_OCC_TWO_PI) ||
+                    (m.curve_geometry[c]=merge(m.curve_geometry[c],
+                                               (t0=e.t0,t1=e.t1)))
             elseif crv.kind===:line
                 c=_alloc_tag!(m,1,0,caller)
                 m.curves[c]=(ptag[va],ptag[vb])
@@ -6687,6 +6710,10 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
             local c
             if crv.kind===:degenerate
                 c=_add_occ_degenerate!(m,ptag[va])
+                # a pole edge cut by sections keeps its own longitude span
+                (e.t0==0.0 && e.t1==_OCC_TWO_PI) ||
+                    (m.curve_geometry[c]=merge(m.curve_geometry[c],
+                                               (t0=e.t0,t1=e.t1)))
             elseif crv.kind===:line
                 c=_alloc_tag!(m,1,0,caller)
                 m.curves[c]=(ptag[va],ptag[vb])
