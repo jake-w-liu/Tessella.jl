@@ -9998,7 +9998,8 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         mesh,bl_owners,bl_params=((Base.inferencebarrier(_model_bl_surface_mesh)(
             m,t,bl_specs,forced,param_sizes,plane,caller;
             _periodic_positions=periodic_positions,uv=uv,
-            dropped_curves=bl_dropped))::Tuple{Union{Mesh, MixedMesh}, Vector{Tuple{Int, Int32}}, Vector{Union{Nothing, Vector{Float64}}}})
+            dropped_curves=bl_dropped,size_field,options,
+            algorithm=_surface_mesh_algorithm(m,t)))::Tuple{Union{Mesh, MixedMesh}, Vector{Tuple{Int, Int32}}, Vector{Union{Nothing, Vector{Float64}}}})
         get(m.meshing.reverse,(2,t),false) &&
             (mesh=_reversed_surface_mesh(mesh,caller,t))
         mesh=_model_surface_boundary_writeback!(m,t,mesh,caller)

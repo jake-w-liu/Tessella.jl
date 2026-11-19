@@ -707,7 +707,9 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
                                 plane,caller::AbstractString;
                                 _periodic_positions=nothing,
                                 uv::Bool=false,
-                                dropped_curves::Vector{Set{Int}}=Set{Int}[])
+                                dropped_curves::Vector{Set{Int}}=Set{Int}[],
+                                size_field=nothing,options=nothing,
+                                algorithm::Int=3)
     # `IntersectMetrics`/`AnisoMax` are metric-operator options — upstream
     # reads `iIntersect` only inside the anisotropic `operator()(SMetric3&)`
     # (attractor-metric intersection instead of closest-only) and
@@ -1561,9 +1563,26 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
         # `index` so it lands in the fill's vertex set.
         vertex_id!(index[etag])
     end
+    # Upstream `meshGenerator` keeps inserting vertices after
+    # `modifyInitialMeshForBoundaryLayers`: the shrunken domain is refined by
+    # the surface's own Delaunay/Frontal algorithm under the background size.
+    # Plane faces refine in the isometric metric frame of the ordinary
+    # planar path; the ruled `(u,v)` frame and `Algorithm 3` keep the bare
+    # constrained triangulation.
+    refine_fill=options!==nothing && !uv && algorithm!=3
+    frame=refine_fill ? _surface_metric_frame(plane) : nothing
+    fill_xs,fill_ys=if refine_fill
+        mx=similar(new_xs);my=similar(new_ys)
+        for i in eachindex(new_xs)
+            mx[i],my[i]=_surface_metric_point(frame,new_xs[i],new_ys[i])
+        end
+        mx,my
+    else
+        new_xs,new_ys
+    end
     triangulation=try
         constrained_delaunay(
-            new_xs,new_ys,segs2;internal_segments=internal2)
+            fill_xs,fill_ys,segs2;internal_segments=internal2)
     catch err
         # A strip whose free boundary self-intersects — a convex-corner fan
         # reaching onto the neighbour wall, or an over-thick layer whose
@@ -1579,8 +1598,40 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
         end
         rethrow()
     end
-    fill=to_mesh(
-        triangulation;interior=classify_interior(triangulation))
+    fill_interior=if refine_fill
+        embedded_points=Int[pid for pid in eachindex(fill_xs)
+                            if new_owners[pid][1]==0 &&
+                               (0,Int(new_owners[pid][2])) in embedded]
+        bgm_size=_ModelSurfaceBackgroundSize(frame,
+            _ModelAlgorithmBackgroundSize(m,2,t,options,size_field,caller))
+        _surface_algorithm_refine!(m,triangulation,fill_xs,fill_ys,segs2,
+            Base.fill(NaN,length(fill_xs)),Tuple{Int,Int}[(0,p) for p in embedded_points],
+            Dict{Int,Int}((p,p) for p in embedded_points),bgm_size,algorithm,t,caller)
+    else
+        classify_interior(triangulation)
+    end
+    fill=to_mesh(triangulation;interior=fill_interior)
+    # Fill nodes resolve to their PSLG vertex, or are refinement vertices
+    # lifted from the metric frame and owned by the surface.
+    fill_vid=Vector{Int}(undef,nnodes(fill))
+    metric_index=refine_fill ?
+        Dict{NTuple{2,Float64},Int}((_surface_size_key(fill_xs[i],fill_ys[i]),i)
+                                    for i in eachindex(fill_xs)) : nothing
+    for node in 1:nnodes(fill)
+        fx=fill.coords[1,node];fy=fill.coords[2,node]
+        vid=if refine_fill
+            get(metric_index,_surface_size_key(fx,fy),0)
+        else
+            get(vertex_index,(fx==0 ? 0.0 : fx,fy==0 ? 0.0 : fy),0)
+        end
+        if vid==0
+            refine_fill || throw(ErrorException(
+                "$caller: Surface[$t] fill introduced an unmapped coordinate"))
+            u,v=_surface_metric_unproject(frame,fx,fy)
+            vid=new_vertex!(u,v,_surface_metric_lift(frame,fx,fy))
+        end
+        fill_vid[node]=vid
+    end
     # Merge every vertex class into one coordinate pool: boundary and top
     # vertices first (stable order), then strip interiors.
     pool=Dict{NTuple{3,Float64},Int32}()
@@ -1600,12 +1651,7 @@ function _model_bl_surface_mesh(m::GeoModel,t::Int,
     end
     fill_to_pool=Vector{Int32}(undef,nnodes(fill))
     for node in 1:nnodes(fill)
-        key=(fill.coords[1,node]==0 ? 0.0 : fill.coords[1,node],
-             fill.coords[2,node]==0 ? 0.0 : fill.coords[2,node])
-        vid=get(vertex_index,key,nothing)
-        vid===nothing && throw(ErrorException(
-            "$caller: Surface[$t] fill introduced an unmapped coordinate"))
-        fill_to_pool[node]=new_to_pool[vid]
+        fill_to_pool[node]=new_to_pool[fill_vid[node]]
     end
     snap_tol=1e-9*max(1.0,maximum(xs)-minimum(xs),
                       maximum(ys)-minimum(ys))
