@@ -877,7 +877,10 @@ end
 @testset "assembly errors leave existing import products intact" begin
     good=import_step(joinpath(FIXTURES,"brep_two_boxes.step");fill=false)
     before=E.mixed_crc(good)
-    source=read(joinpath(FIXTURES,"brep_two_boxes.step"),String)
+    # A checkout with core.autocrlf=true delivers the fixture with CRLF; the
+    # edits below match and insert LF line ends, so normalize first. Without
+    # this the CSG_SOLID insertion matched nothing and wrote a valid file.
+    source=replace(read(joinpath(FIXTURES,"brep_two_boxes.step"),String),"\r\n"=>"\n")
     iges=read(joinpath(FIXTURES,"brep_two_blocks.iges"),String)
     msbo=read(joinpath(FIXTURES,"brep_two_msbo_tets.igs"),String)
     mktempdir() do directory

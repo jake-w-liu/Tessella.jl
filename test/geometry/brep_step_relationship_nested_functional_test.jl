@@ -116,7 +116,10 @@ end
 end
 
 @testset "malformed nested graphs, cycles and orphan bindings reject explicitly" begin
-    source=read(joinpath(FIXTURES,"brep_relationship_nested_mm.step"),String)
+    # A checkout with core.autocrlf=true delivers the fixture with CRLF; the
+    # `dropped_cdsr` edit below removes a whole LF-terminated line, so
+    # normalize first (it matched nothing and left a valid file otherwise).
+    source=replace(read(joinpath(FIXTURES,"brep_relationship_nested_mm.step"),String),"\r\n"=>"\n")
     cycle=replace(source,
         "NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','left','',#2002,#5,\$)"=>
         "NEXT_ASSEMBLY_USAGE_OCCURRENCE('1','left','',#5,#2002,\$)")
