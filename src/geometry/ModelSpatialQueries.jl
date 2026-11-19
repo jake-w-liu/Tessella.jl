@@ -347,9 +347,68 @@ function _model_boundary_curves(m::GeoModel,dimension::Int,tag::Int,
     return curves
 end
 
+# Gmsh's `GEntity::bounds` for discrete entities: a Point is its coordinate, any
+# other entity is the box of every vertex of its elements (higher-order nodes
+# included). An entity without elements has an empty box. Imported meshes keep
+# these cells in the mesh authority; entities built through the mesh API only
+# have their own nodes.
+function _model_discrete_boxes(m::GeoModel)
+    boxes=Dict{Tuple{Int,Int},NTuple{6,Float64}}()
+    function absorb!(key,x,y,z)
+        b=get(boxes,key,nothing)
+        boxes[key]=b===nothing ? (x,y,z,x,y,z) :
+            (min(b[1],x),min(b[2],y),min(b[3],z),max(b[4],x),max(b[5],y),max(b[6],z))
+        return nothing
+    end
+    authority=m.meshing.mesh_authority
+    mesh=authority===nothing ? nothing : authority.mesh
+    if mesh isa Elements.MixedMesh && mesh.entity_data!==nothing
+        data=mesh.entity_data
+        coords=mesh.coords
+        for (bi,block) in enumerate(mesh.blocks)
+            block isa ElementBlock || continue
+            dim=Elements.msh_dimension(block.msh)
+            dim==0 && continue
+            owners=data.block_entities[bi]
+            @inbounds for column in axes(block.nodes,2)
+                key=(dim,Int(owners[column]))
+                for row in axes(block.nodes,1)
+                    node=block.nodes[row,column]
+                    absorb!(key,coords[1,node],coords[2,node],coords[3,node])
+                end
+            end
+        end
+        @inbounds for (row,(dim,owner)) in enumerate(data.node_entities)
+            dim==0 && absorb!((0,Int(owner)),coords[1,row],coords[2,row],coords[3,row])
+        end
+    end
+    for (key,record) in m.discrete
+        (key[1]==0 || mesh===nothing) || continue
+        haskey(boxes,key) && continue
+        for column in axes(record.node_coords,2)
+            absorb!(key,record.node_coords[1,column],record.node_coords[2,column],
+                record.node_coords[3,column])
+        end
+    end
+    # A file's `$Entities` block gives each Point its coordinate even when the
+    # point carries no node.
+    for (key,receipt) in m.meshing.imported_entities
+        key[1]==0 && haskey(m.discrete,key) &&
+            (boxes[key]=(receipt.bbox[1],receipt.bbox[2],receipt.bbox[3],
+                receipt.bbox[1],receipt.bbox[2],receipt.bbox[3]))
+    end
+    return boxes
+end
+
 function _model_entity_bounding_box(
-    m::GeoModel,dimension::Int,tag::Int,caller::AbstractString)
+    m::GeoModel,dimension::Int,tag::Int,caller::AbstractString;boxes=nothing)
     entities=_model_entity_dictionary(m,dimension)
+    if !haskey(entities,tag) && haskey(m.discrete,(dimension,tag))
+        table=boxes===nothing ? _model_discrete_boxes(m) : boxes
+        box=get(table,(dimension,tag),nothing)
+        box===nothing && throw(ArgumentError("$caller: Empty bounding box"))
+        return box
+    end
     haskey(entities,tag) || throw(ArgumentError(
         "$caller: unknown entity ($dimension,$tag)"))
     return (Base.inferencebarrier(_model_entity_bounding_box_selected)(m,
@@ -441,7 +500,15 @@ function model_bounding_box(m::GeoModel,dim,tag)
         isempty(entities) && throw(ArgumentError(
             "$caller: the model has no entities"))
         bounds=_MODEL_EMPTY_BOUNDS
+        boxes=isempty(m.discrete) ? nothing : _model_discrete_boxes(m)
         for (dimension,entity_tag) in entities
+            if boxes!==nothing && haskey(m.discrete,(dimension,entity_tag)) &&
+                    !haskey(_model_entity_dictionary(m,dimension),entity_tag)
+                # An entity without elements has an empty box and adds nothing.
+                box=get(boxes,(dimension,entity_tag),nothing)
+                box===nothing || (bounds=_model_bounds_union(bounds,box))
+                continue
+            end
             bounds=_model_bounds_union(bounds,_model_entity_bounding_box(
                 m,dimension,entity_tag,caller))
         end
@@ -492,9 +559,17 @@ function model_entities_in_bounding_box(
     entities=model_entities(m,dimension)
     result=Tuple{Int,Int}[]
     sizehint!(result,length(entities))
+    boxes=isempty(m.discrete) ? nothing : _model_discrete_boxes(m)
     for (entity_dimension,tag) in entities
+        if boxes!==nothing && haskey(m.discrete,(entity_dimension,tag)) &&
+                !haskey(_model_entity_dictionary(m,entity_dimension),tag) &&
+                !haskey(boxes,(entity_dimension,tag))
+            # Gmsh's empty box lies inside every box.
+            push!(result,(entity_dimension,tag))
+            continue
+        end
         bounds=_model_entity_bounding_box(
-            m,entity_dimension,tag,caller)
+            m,entity_dimension,tag,caller;boxes)
         bounds[1]>=box[1] && bounds[2]>=box[2] && bounds[3]>=box[3] &&
         bounds[4]<=box[4] && bounds[5]<=box[5] && bounds[6]<=box[6] &&
             push!(result,(entity_dimension,tag))

@@ -221,6 +221,20 @@ end
         end
     end
 
+    @testset "bounding boxes of loaded entities" begin
+        opened(SEAM) do
+            @test API.model.get_bounding_box(0, 3) == (0.0, 1.0, 0.0, 0.0, 1.0, 0.0)
+            @test API.model.get_bounding_box(2, 1) == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+            # Gmsh: a Curve without elements has an empty box.
+            err = try API.model.get_bounding_box(1, 1); nothing catch e; e end
+            @test err isa ArgumentError && occursin("Empty bounding box", err.msg)
+            @test API.model.get_bounding_box(-1, -1) == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+            @test API.model.get_entities_in_bounding_box(-1, -1, -1, 2, 2, 2, 1) == [(1, 1), (1, 2)]
+            @test API.model.get_entities_in_bounding_box(-1, -1, -1, 2, 2, 2, 0) ==
+                  [(0, 1), (0, 2), (0, 3)]
+        end
+    end
+
 end
 
 end # module

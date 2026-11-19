@@ -681,7 +681,7 @@ function _model_identity_meshing(
         moved=key==(dimension,old_tag) ? (dimension,new_tag) : key
         parent=receipt.parent==(dimension,old_tag) ? (dimension,new_tag) : receipt.parent
         migrated.imported_entities[moved]=(kind=receipt.kind,parent=parent,
-            partitions=copy(receipt.partitions))
+            partitions=copy(receipt.partitions),bbox=receipt.bbox)
     end
     migrated.periodic_uid_history=_model_periodic_uid_retag(
         attributes.periodic_uid_history,dimension,old_tag,new_tag)

@@ -265,8 +265,8 @@ _ModelNativeGeoKernel()=_ModelNativeGeoKernel(
 Base.:(==)(a::_ModelNativeGeoKernel,b::_ModelNativeGeoKernel)=
     all(name->getfield(a,name)==getfield(b,name),fieldnames(_ModelNativeGeoKernel))
 
-const _ModelImportedEntity=NamedTuple{(:kind,:parent,:partitions),
-    Tuple{String,Tuple{Int,Int},Vector{Int}}}
+const _ModelImportedEntity=NamedTuple{(:kind,:parent,:partitions,:bbox),
+    Tuple{String,Tuple{Int,Int},Vector{Int},NTuple{6,Float64}}}
 
 include("ModelPeriodicUIDHistory.jl")
 

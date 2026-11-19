@@ -20,7 +20,8 @@ function _geo_import_entity_receipts!(m,actual;ghost_dimension=nothing)
         end
         parent=ghost ? (-1,-1) : (Int(entity.parent[1]),Int(entity.parent[2]))
         parts=ghost ? Int[ghosts[tag]] : Int.(entity.partitions)
-        m.meshing.imported_entities[key]=(kind=kind,parent=parent,partitions=parts)
+        m.meshing.imported_entities[key]=(kind=kind,parent=parent,partitions=parts,
+            bbox=entity.bbox)
     end
     if partition!==nothing && !isempty(partition.ghost_elements)
         # GModel traverses entities by dimension and tag when it selects the
