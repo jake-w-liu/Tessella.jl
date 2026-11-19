@@ -371,7 +371,8 @@ end
         # `TRAN_QUA` can't interpolate a discrete generatrix upstream; the
         # emitted top row IS the chapeau's boundary — evaluate the producer.
         return _model_curve_part_point(m,tag,parameter,caller)
-    adapter=_model_high_order_curve_geometry(m,tag,caller)
+    adapter=_ruled_cached(()->_model_high_order_curve_geometry(m,tag,caller),
+                          :curve,tag)
     if adapter!==nothing && adapter.kind in (:arc,:spline)
         return _model_high_order_curve_point(adapter,parameter,caller)
     end
@@ -496,7 +497,7 @@ function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
         endpoints=m.curves[abs(signed)]
         m.points[signed>0 ? endpoints[1] : endpoints[2]]
     end
-    center=_ruled_sphere_center(m,tag,gens,caller)
+    center=_ruled_cached(()->_ruled_sphere_center(m,tag,gens,caller),:sphere,tag)
     if length(gens)>=4
         S=(corner(1),corner(2),corner(3),corner(4))
         link=get(m.meshing.extrude_sources,(2,tag),nothing)
@@ -712,6 +713,30 @@ end
 # "Inverse surface mapping could not converge") — unreachable when
 # `on_surface=false`.
 function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
+                          relax::Float64,lc::Float64,test_xyz::Bool,warn,info,
+                          caller::AbstractString,old_ruled::Bool=false;
+                          on_surface::Bool=true)
+    # One inversion evaluates the surface thousands of times on an unchanged
+    # model: keep each generatrix's geometry adapter and the sphere-patch
+    # test for the duration of the call (same objects, same results).
+    haskey(task_local_storage(),:_ruled_eval_cache) &&
+        return _ruled_xyz_to_uv_newton(m,tag,target,relax,lc,test_xyz,warn,
+                                       info,caller,old_ruled;on_surface)
+    return task_local_storage(:_ruled_eval_cache,Dict{Tuple{Symbol,Int},Any}()) do
+        _ruled_xyz_to_uv_newton(m,tag,target,relax,lc,test_xyz,warn,info,
+                                caller,old_ruled;on_surface)
+    end
+end
+
+# The `_ruled_curve_point`/`_ruled_surface_point` lookups served by that
+# scope; outside it they rebuild on every call.
+function _ruled_cached(builder,kind::Symbol,tag::Int)
+    cache=get(task_local_storage(),:_ruled_eval_cache,nothing)
+    cache===nothing && return builder()
+    return get!(builder,cache::Dict{Tuple{Symbol,Int},Any},(kind,tag))
+end
+
+function _ruled_xyz_to_uv_newton(m::GeoModel,tag::Int,target::NTuple{3,Float64},
                           relax::Float64,lc::Float64,test_xyz::Bool,warn,info,
                           caller::AbstractString,old_ruled::Bool=false;
                           on_surface::Bool=true)
