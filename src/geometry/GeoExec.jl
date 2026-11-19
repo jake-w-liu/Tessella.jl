@@ -5468,9 +5468,11 @@ function _geo_exec_extrude_run!(m::GeoModel,entities,params,blmeta,delta,
         # Under `SetFactory("OpenCASCADE")` upstream's parser action calls
         # `OCC_Internals::extrude`/`revolve`: the sweep runs in the OCC kernel
         # with OCC numbering (no GEO chapeau points or axis centres), and the
-        # created shapes are published by the synchronization.
-        return _geo_exec_occ_extrude_run!(m,entities,params,delta,revolve,
-                                          context,caller,allocator_state)
+        # created shapes are published by the synchronization. A profile the
+        # OCC sweep does not cover yet keeps the built-in sweep.
+        tags=_geo_exec_occ_extrude_run!(m,entities,params,delta,revolve,
+                                        context,caller,allocator_state)
+        tags===nothing || return tags
     end
     tags=revolve===nothing ?
         extrude_entities!(m,entities,delta;params=params,
@@ -5491,27 +5493,33 @@ function _geo_exec_extrude_run!(m::GeoModel,entities,params,blmeta,delta,
     return Float64.(tags)
 end
 
+# `Extrude` under the OpenCASCADE factory is `OCC_Internals::extrude`/`revolve`:
+# the sweep is one OCC shape whose new sub-shapes take each dimension's next
+# free tag in exploration order — a rectangle's prism has laterals 2–5 and
+# top 6, where the built-in kernel's shared `newreg` counter gives 13…26 —
+# and the parsed `Layers` record goes to the sweep verbatim. The OCC sweep
+# rejects the profiles it does not cover before it touches the registry;
+# `nothing` then leaves the statement to the built-in sweep.
 function _geo_exec_occ_extrude_run!(m::GeoModel,entities,params,delta,revolve,
                                     context::_GeoNumericContext,
                                     caller::AbstractString,allocator_state)
-    kernel=_geo_occ_prepare_kernel!(m,allocator_state)
-    for (dim,tag) in entities
-        t=abs(tag)
-        dim==0 ? _geo_occ_pipe_vertex!(m,t,kernel,caller) :
-        dim==1 ? _geo_occ_pipe_edge!(m,t,kernel,caller) :
-        dim==2 ? _geo_occ_pipe_face!(m,t,kernel,caller) :
-            _geo_occ_bind_volume!(m,t,kernel,caller)
-    end
     shapes=NTuple{2,Int}[(dim,abs(tag)) for (dim,tag) in entities]
-    out=if revolve===nothing
-        Model._model_occ_extrude(m,shapes,delta[1],delta[2],delta[3];
-            caller,params_override=params)
-    else
-        Model._model_occ_revolve(m,shapes,revolve.origin...,revolve.axis...,
-            revolve.angle;params_override=params)
+    isempty(shapes) && return nothing
+    kernel=_geo_occ_prepare_kernel!(m,allocator_state)
+    out=try
+        _geo_occ_bind_entities!(m,shapes,kernel,caller)
+        if revolve===nothing
+            Model._model_occ_extrude(m,shapes,delta[1],delta[2],delta[3];
+                caller,params_override=params)
+        else
+            Model._model_occ_revolve(m,shapes,revolve.origin...,
+                revolve.axis...,revolve.angle;params_override=params)
+        end
+    catch err
+        err isa ArgumentError || rethrow()
+        return nothing
     end
-    Model._model_occ_synchronize!(m)
-    context.geo_changed=true
+    _geo_occ_finish!(m,context)
     return Float64[Float64(t) for (_,t) in out]
 end
 

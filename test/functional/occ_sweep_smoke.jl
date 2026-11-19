@@ -10,7 +10,7 @@ let api=Tessella.API
         # Topology/measure oracles live in the interface test.
         p=occ.add_point(0.0,0.0,0.0)
         out=occ.extrude([(0,p)],1.0,2.0,3.0)
-        @test length(out)==1 && out[1][1]==1
+        @test length(out)==2 && out[1][1]==0 && out[2][1]==1
         q=occ.add_point(2.0,0.0,0.0)
         e=occ.add_line(p,q)
         out=occ.extrude([(1,e)],0.0,0.0,4.0)

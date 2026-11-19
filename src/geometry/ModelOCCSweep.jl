@@ -152,11 +152,12 @@ _model_occ_sweep_tag_of(sw::_ModelOCCSweep,kernel,id,caller)=
         _model_occ_shape_tag(kernel,id,caller)
     end
 
-# dim-0 input: one new top vertex and the swept line edge. Upstream's
-# reorder gate needs dim>=1, so only the edge is reported.
+# dim-0 input: one new top vertex and the swept line edge, reported as
+# `[top vertex, edge]` (Gmsh 4.15.2: `extrude([(0,1)],…)` → `[(0,2),(1,1)]`;
+# the reorder gate's `dim` is the swept dimension, 1 for a point).
 function _model_occ_extrude_point!(sw::_ModelOCCSweep,kernel,src_id)
     src=_model_occ_sweep_lateral_edge!(sw,kernel,src_id)
-    return sw.tags[src]
+    return sw.tags[sw.vmap[src_id]],sw.tags[src]
 end
 
 # dim-1 input: swept parallelogram face sharing the source edge as its
@@ -165,9 +166,12 @@ end
 function _model_occ_extrude_line!(sw::_ModelOCCSweep,kernel,src_id,caller)
     source=kernel.shapes[src_id]
     a_id,b_id=source.children
-    top=_model_occ_sweep_top_edge!(sw,kernel,src_id,caller)
+    # tag order of the swept face's new edges is OCC's exploration order:
+    # the two swept-vertex edges, then the translated copy (a line swept
+    # from Curve 1 has laterals 2 and 3 and top 4)
     la=_model_occ_sweep_lateral_edge!(sw,kernel,a_id)
     lb=_model_occ_sweep_lateral_edge!(sw,kernel,b_id)
+    top=_model_occ_sweep_top_edge!(sw,kernel,src_id,caller)
     uses=Tuple{UInt64,Bool}[(src_id,false),(lb,false),
                            (top,true),(la,true)]
     shape_of=id->_model_occ_sweep_shape_of(sw,kernel,id)
@@ -217,6 +221,9 @@ function _model_occ_extrude_disk!(m::GeoModel,kernel,sw,face_id,d,caller)
         _ModelOCCShape(0,(point=top_vtx,mesh_size=
             kernel.shapes[src_vid].geometry.mesh_size),UInt64[]))
     rim_id=_model_occ_sweep_id!(sw,kernel)
+    # OCC explores the lateral face's swept-vertex edge before the
+    # translated circle: a disk's prism has seam 2 and top circle 3
+    seam_tag=_model_occ_sweep_tag!(sw,kernel,1)
     rim_tag=_model_occ_sweep_tag!(sw,kernel,1)
     _model_occ_sweep_bind!(sw,1,rim_tag,rim_id,
         _ModelOCCShape(1,(kind=:circle,
@@ -224,7 +231,6 @@ function _model_occ_extrude_disk!(m::GeoModel,kernel,sw,face_id,d,caller)
                       X=Xf,Y=Yf,r=radius,t0=0.0,t1=_OCC_TWO_PI)),
             UInt64[top_vid,top_vid]))
     seam_id=_model_occ_sweep_id!(sw,kernel)
-    seam_tag=_model_occ_sweep_tag!(sw,kernel,1)
     _model_occ_sweep_bind!(sw,1,seam_tag,seam_id,
         _ModelOCCShape(1,(kind=:line,
             geometry=(occ=:line,origin=src_vtx,dir=nd,t0=0.0,t1=h)),
@@ -271,8 +277,8 @@ function _model_occ_extrude_disk!(m::GeoModel,kernel,sw,face_id,d,caller)
     src_axis=face.geometry.geometry.axis
     _model_occ_sweep_bind!(sw,-2,shell_tag,shell_id,
         _ModelOCCShape(-2,(uses=Tuple{UInt64,Bool}[(lat_id,false),
-            (cap_id,false),(face_id,_dot3(src_axis,d)>0)],),
-            UInt64[lat_id,cap_id,face_id]))
+            (face_id,_dot3(src_axis,d)>0),(cap_id,false)],),
+            UInt64[lat_id,face_id,cap_id]))
     solid_id=_model_occ_sweep_id!(sw,kernel)
     solid_tag=_model_occ_sweep_tag!(sw,kernel,3)
     _model_occ_sweep_bind!(sw,3,solid_tag,solid_id,
@@ -319,10 +325,12 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
             a=kernel.shapes[a_id].geometry.point
             b=kernel.shapes[b_id].geometry.point
             tangent=_arc_sub(b,a)
-            top=_model_occ_sweep_top_edge!(sw,kernel,edge_id,caller)
-            push!(cap_wire,(top,rev))
+            # per lateral face, OCC's exploration order: the swept-vertex
+            # edges, then the translated copy
             la=_model_occ_sweep_lateral_edge!(sw,kernel,a_id)
             lb=_model_occ_sweep_lateral_edge!(sw,kernel,b_id)
+            top=_model_occ_sweep_top_edge!(sw,kernel,edge_id,caller)
+            push!(cap_wire,(top,rev))
             # The quad traversal is built on the wire's traversal flag;
             # hole walls traverse opposite so their Newell lands on the
             # cavity's outward (into-material) side directly — `axis`
@@ -335,7 +343,13 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
             lgeo=_model_occ_plane_face_geometry(
                 shape_of,tag_of,[luses],caller)
             udir=_occ_dir(f ? _arc_sub(a,b) : tangent)
-            intended=_occ_crossed(udir,outer_normal)
+            # The wall's outward normal is perpendicular to the edge and to
+            # the sweep, on the profile-outward side; it is the in-plane
+            # edge normal only for a sweep along the profile normal (an
+            # oblique prism was rejected as "inconsistent winding").
+            wall=_occ_crossed(udir,sw.d)
+            intended=_dot3(wall,_occ_crossed(udir,outer_normal))<0 ?
+                _occ3_scale(wall,-1.0) : wall
             # The traversal's own Newell is û_f×d̂ — it lands on the
             # intended side only when d̂ agrees with the profile normal;
             # the mirror traversal corrects the anti-normal sweep.
@@ -385,11 +399,10 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
     _model_occ_sweep_bind!(sw,2,cap_tag,cap_id,
         _ModelOCCShape(2,(kind=:plane,geometry=cap_geometry),
                        cap_wire_ids))
-    shell_uses=Tuple{UInt64,Bool}[(cap_id,false),
-        (src_id,_dot3(src_normal,sw.d)>0)]
-    for (fid,_) in laterals
-        push!(shell_uses,(fid,false))
-    end
+    # shell order as the prism's: laterals, the profile, the cap
+    shell_uses=Tuple{UInt64,Bool}[(fid,false) for (fid,_) in laterals]
+    push!(shell_uses,(src_id,_dot3(src_normal,sw.d)>0))
+    push!(shell_uses,(cap_id,false))
     shell_id=_model_occ_sweep_id!(sw,kernel)
     shell_tag=_model_occ_sweep_tag!(sw,kernel,-2)
     _model_occ_sweep_bind!(sw,-2,shell_tag,shell_id,
@@ -481,6 +494,27 @@ function _model_occ_sweep_transport!(m::GeoModel,kernel,
     for (dim,tag,src) in sw.links
         attach(dim,tag,src)
     end
+    return nothing
+end
+
+# Upstream sweeps each input dimension as its own compound, so shapes are
+# shared within a dimension only: the edge a point sweeps and the lateral
+# edge of a line through that point are two entities
+# (`extrude([(0,p),(1,e)],…)` returns six distinct entities in Gmsh 4.15.2).
+# Park the finished dimension's mesh links and start the next one with empty
+# dedup maps.
+function _model_occ_sweep_next_dim!(sw::_ModelOCCSweep,kernel)
+    tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,sw.caller)
+    for (vid,eid) in sw.lmap
+        push!(sw.links,(1,sw.tags[eid],(0,tag_of(vid))))
+    end
+    for (eid,teid) in sw.emap
+        push!(sw.links,(1,sw.tags[teid],(1,tag_of(eid))))
+    end
+    for (fid,eid) in sw.smap
+        push!(sw.links,(2,sw.tags[fid],(1,tag_of(eid))))
+    end
+    empty!(sw.vmap);empty!(sw.lmap);empty!(sw.emap);empty!(sw.smap)
     return nothing
 end
 
@@ -599,7 +633,8 @@ function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
         for (edim,id,kind) in classified
             edim==dim || continue
             if dim==0
-                push!(out,(1,_model_occ_extrude_point!(sw,kernel,id)))
+                top,body=_model_occ_extrude_point!(sw,kernel,id)
+                push!(out,(0,top));push!(out,(1,body))
             elseif dim==1
                 top,body,laterals=_model_occ_extrude_line!(
                     sw,kernel,id,caller)
@@ -617,6 +652,7 @@ function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
                 end
             end
         end
+        dim<2 && _model_occ_sweep_next_dim!(sw,kernel)
     end
     for (dimension,tag,id,shape) in sw.pending
         _model_occ_bind_shape!(kernel,dimension,tag,id,shape)
@@ -699,6 +735,13 @@ function _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,
     a_id,b_id=source.children
     a=_model_occ_revol_vertex!(sw,kernel,a_id,p,n,Ma,loca,spec)
     b=_model_occ_revol_vertex!(sw,kernel,b_id,p,n,Ma,loca,spec)
+    if a==a_id && b==b_id
+        # an edge on the revolution axis sweeps to itself: the rotated
+        # wall is bounded by the profile's own edge, not by a coincident
+        # copy of it
+        sw.emap[src_id]=src_id
+        return src_id
+    end
     id=_model_occ_sweep_id!(sw,kernel)
     tag=_model_occ_sweep_tag!(sw,kernel,1)
     _model_occ_sweep_bind!(sw,1,tag,id,
@@ -708,6 +751,21 @@ function _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,
             UInt64[a,b]))
     sw.emap[src_id]=id
     return id
+end
+
+# Tag order of the edges a profile edge's swept face introduces is OCC's
+# exploration order: the arcs swept by its start and end vertex, then (on a
+# partial turn) the rotated copy — a rectangle's quarter turn has arcs 5 and
+# 6 and rotated edge 7 on its first wall. Every producer below is memoized,
+# so touching them in that order fixes the tags.
+function _model_occ_revol_edge_order!(sw,kernel,edge_id,p,n,a,Ma,loca,spec,
+                                      caller)
+    for vid in kernel.shapes[edge_id].children
+        _model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
+    end
+    a==_OCC_TWO_PI || _model_occ_revol_top_edge!(
+        sw,kernel,edge_id,p,n,Ma,loca,spec,caller)
+    return nothing
 end
 
 # Rim circle (full turn) or rim arc (partial turn over `[0,a]`) swept by
@@ -974,6 +1032,7 @@ function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     ra,_,_=_model_occ_revol_rh(pa,p,n)
     rb,_,_=_model_occ_revol_rh(pb,p,n)
     full=a==_OCC_TWO_PI
+    _model_occ_revol_edge_order!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     if kind===:annulus
         # Standalone swept-face normal follows the profile's radial
         # direction (upstream's sweep convention): outward radial
@@ -1041,6 +1100,9 @@ function _model_occ_revol_disk!(m::GeoModel,kernel,sw,face_id,p,n,a,
     σ=flips ? -1.0 : 1.0
     v2=flips ? v_s-_OCC_TWO_PI : v_s+_OCC_TWO_PI
     shell_uses=Tuple{UInt64,Bool}[]
+    # the swept (torus) face precedes the rotated cap in OCC's exploration
+    # of the result: a disk's partial turn has torus 2 and end cap 3
+    face_tag=_model_occ_sweep_tag!(sw,kernel,2)
     tpc=Dict{Int,NamedTuple}(
         eq_tag=>(fwd=(lin2d=((0.0,v_s),(1.0,0.0)),),
                  rev=(lin2d=((0.0,v2),(1.0,0.0)),)))
@@ -1111,7 +1173,6 @@ function _model_occ_revol_disk!(m::GeoModel,kernel,sw,face_id,p,n,a,
         _ModelOCCShape(-1,(uses=torus_uses,),
             UInt64[u[1] for u in torus_uses]))
     face_id2=_model_occ_sweep_id!(sw,kernel)
-    face_tag=_model_occ_sweep_tag!(sw,kernel,2)
     _model_occ_sweep_bind!(sw,2,face_tag,face_id2,
         _ModelOCCShape(2,(kind=:torus,
             geometry=(occ=:torus,center=cen,axis=n,X=Xs,Y=Ys,
@@ -1172,6 +1233,8 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
         udir=_occ_dir(rev ? _occ3_scale(tangent,-1.0) : tangent)
         o3=_occ_crossed(udir,face_axis)
         dh=abs(hb-ha)
+        _model_occ_revol_edge_order!(sw,kernel,edge_id,p,n,a,Ma,loca,spec,
+                                     caller)
         full || push!(rot_wire,(_model_occ_revol_top_edge!(
             sw,kernel,edge_id,p,n,Ma,loca,spec,caller),rev))
         if ra<=_OCC_CONFUSION && rb<=_OCC_CONFUSION

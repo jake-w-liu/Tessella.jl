@@ -42,9 +42,9 @@ end
     occ=_occ_setup()
     p=occ.add_point(0.0,0.0,0.0)
     out=occ.extrude([(0,p)],1.0,2.0,3.0)
-    @test length(out)==1
-    @test out[1][1]==1
-    edge_tag=out[1][2]
+    # Gmsh 4.15.2: `extrude([(0,1)],…)` → `[(0,2),(1,1)]` — top vertex, edge
+    @test out==[(0,2),(1,1)]
+    edge_tag=out[2][2]
     kernel=_kernel()
     eid=kernel.bindings[1,edge_tag]
     eg=kernel.shapes[eid].geometry.geometry
@@ -167,22 +167,18 @@ end
     @test collect(top.geometry.geometry.center)≈collect((0.0,0.0,5.0))
 end
 
-@testset "occ.extrude shared topology dedup" begin
+@testset "occ.extrude sweeps each input dimension on its own" begin
     occ=_occ_setup()
     p=occ.add_point(0.0,0.0,0.0)
     q=occ.add_point(1.0,0.0,0.0)
     e=occ.add_line(p,q)
     out=occ.extrude([(0,p),(1,e)],0.0,2.0,0.0)
-    # Point output groups first, then the line's (top, face, laterals);
-    # the shared generatrix is one edge — the line's lateral at `p`
-    # equals the point's swept edge.
-    @test out[1][1]==1
-    shared=out[1][2]
-    @test (1,shared) in out[2:end]
-    kernel=_kernel()
-    # Only one edge record carries vertex p's generatrix: exactly one
-    # duplicate entry in the reported output.
-    @test length(unique(out))==length(out)-1
+    # Point output groups first, then the line's (top, face, laterals).
+    # Each dimension is its own compound upstream: the edge swept by `p`
+    # (Curve 2) and the line's lateral at `p` (Curve 3) are two entities,
+    # and the new edges of the face are numbered laterals first, then the
+    # translated copy. The list is Gmsh 4.15.2's.
+    @test out==[(0,3),(1,2),(1,5),(2,1),(1,3),(1,4)]
 end
 
 @testset "occ.extrude rejection atomicity" begin
