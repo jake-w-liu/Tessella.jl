@@ -243,29 +243,37 @@ function _model_mesh_log_node!(log::_ModelMeshLog,point::NTuple{3,Float64},
     return true
 end
 
-# Append one cell to the block of its MSH type; a first cell of a new type
-# opens a block after the existing ones, as the full grouping does.
-function _model_mesh_log_cell!(log::_ModelMeshLog,msh::Int,owner::Int32,
-                               nodes::Vector{Int32},physical::Int32,tag::UInt64)
-    log.valid || return false
+# Where consecutive cells of one MSH type and owner go. A merged entity
+# appends its cells in a run, so the block, the entity record, its physical
+# projection and the entity's column list are resolved once for the run
+# instead of once per cell.
+struct _ModelMeshLogRun
+    msh::Int
+    owner::Int32
+    key::Tuple{Int,Int32}
+    block::Int
+    width::Int
+    projected::Int32
+    columns::Vector{Int}
+end
+
+# The run for cells of type `msh` owned by entity tag `owner`; a first cell of
+# a new type opens a block after the existing ones, as the full grouping does.
+# `nothing` invalidates the log: the full constructors would reject the cell.
+function _model_mesh_log_run(log::_ModelMeshLog,msh::Int,owner::Int32)
+    log.valid || return nothing
     log.valid=false
-    bi=get(log.block_index,msh,0)
     spec=get(Elements._MSH_CATALOG_LOOKUP,msh,nothing)
-    spec===nothing && return false
+    spec===nothing && return nothing
     width=spec.nnodes;dimension=spec.dim
-    (width>0 && length(nodes)==width) || return false
-    (owner>0 || (owner==0 && haskey(log.entities,(dimension,0)))) || return false
+    width>0 || return nothing
+    (owner>0 || (owner==0 && haskey(log.entities,(dimension,0)))) || return nothing
     key=(dimension,owner)
     entity=get(log.entities,(dimension,Int(owner)),nothing)
-    entity===nothing && !haskey(log.owned,key) && return false
+    entity===nothing && !haskey(log.owned,key) && return nothing
     projected=entity===nothing || isempty(entity.physical_tags) ? Int32(0) :
         first(entity.physical_tags)
-    physical==projected || return false
-    for node in nodes
-        0<node<=log.nodes || return false
-    end
-    tag in log.element_tags && return false
-    log.cells<typemax(Int32) || return false
+    bi=get(log.block_index,msh,0)
     if bi==0
         reserve=1024
         push!(log.types,msh);push!(log.counts,0)
@@ -277,6 +285,28 @@ function _model_mesh_log_cell!(log::_ModelMeshLog,msh::Int,owner::Int32,
         push!(log.cell_bindings,Memory{Union{Nothing,UInt64}}(undef,reserve))
         bi=length(log.types);log.block_index[msh]=bi
     end
+    # The entity's columns in this block. A new list joins the entity's
+    # selection with its first cell, so an unused run leaves no empty entry.
+    columns=Int[]
+    for entry in get(log.selected,key,())
+        entry[1]==bi && (columns=entry[2])
+    end
+    log.valid=true
+    return _ModelMeshLogRun(msh,owner,key,bi,width,projected,columns)
+end
+
+function _model_mesh_log_cell!(log::_ModelMeshLog,run::_ModelMeshLogRun,
+                               nodes::Vector{Int32},physical::Int32,tag::UInt64)
+    log.valid || return false
+    log.valid=false
+    width=run.width;bi=run.block
+    length(nodes)==width || return false
+    physical==run.projected || return false
+    for node in nodes
+        0<node<=log.nodes || return false
+    end
+    tag in log.element_tags && return false
+    log.cells<typemax(Int32) || return false
     column=log.counts[bi]+1
     column>length(log.cell_tags[bi]) && _model_mesh_log_grow_cells!(log,bi,column)
     storage=log.cell_nodes[bi];base=width*(column-1)
@@ -284,25 +314,35 @@ function _model_mesh_log_cell!(log::_ModelMeshLog,msh::Int,owner::Int32,
         storage[base+slot]=nodes[slot]
     end
     log.cell_physical[bi][column]=physical
-    log.cell_owners[bi][column]=owner
-    log.cell_elementary[bi][column]=owner
+    log.cell_owners[bi][column]=run.owner
+    log.cell_elementary[bi][column]=run.owner
     log.cell_tags[bi][column]=tag
     log.cell_bindings[bi][column]=tag
     log.counts[bi]=column
     log.cells+=1
     push!(log.element_tags,tag)
-    selection=get!(()->Tuple{Int,Vector{Int}}[],log.selected,key)
-    position=findfirst(entry->entry[1]>=bi,selection)
-    if position===nothing
-        push!(selection,(bi,Int[column]))
-    elseif selection[position][1]==bi
-        push!(selection[position][2],column)
-    else
-        insert!(selection,position,(bi,Int[column]))
+    if isempty(run.columns)
+        # Entries stay in block order, as the full scan emits them.
+        selection=get!(()->Tuple{Int,Vector{Int}}[],log.selected,run.key)
+        position=findfirst(entry->entry[1]>=bi,selection)
+        if position===nothing
+            push!(selection,(bi,run.columns))
+        else
+            insert!(selection,position,(bi,run.columns))
+        end
     end
-    _model_mesh_log_touch!(log,key)
+    push!(run.columns,column)
+    _model_mesh_log_touch!(log,run.key)
     log.valid=true
     return true
+end
+
+# Append one cell on its own.
+function _model_mesh_log_cell!(log::_ModelMeshLog,msh::Int,owner::Int32,
+                               nodes::Vector{Int32},physical::Int32,tag::UInt64)
+    run=_model_mesh_log_run(log,msh,owner)
+    run===nothing && return false
+    return _model_mesh_log_cell!(log,run,nodes,physical,tag)
 end
 
 function _model_mesh_log_mesh(log::_ModelMeshLog)

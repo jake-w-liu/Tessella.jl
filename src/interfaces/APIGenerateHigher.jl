@@ -1970,10 +1970,14 @@ function _higher_live_advance!(live::_HigherLiveAuthority,assembly,m,done,ranks,
         Model._model_mesh_log_node!(log,node.point,node.owner,node.parameter,node.tag,rank) ||
             return nothing
     end
+    run=nothing
     for position in live.cells+1:length(assembly.cells)
         cell=assembly.cells[position]
-        Model._model_mesh_log_cell!(log,cell.msh,cell.owner[2],cell.nodes,cell.physical,cell.tag) ||
-            return nothing
+        if run===nothing || run.msh!=cell.msh || run.owner!=cell.owner[2]
+            run=Model._model_mesh_log_run(log,cell.msh,cell.owner[2])
+            run===nothing && return nothing
+        end
+        Model._model_mesh_log_cell!(log,run,cell.nodes,cell.physical,cell.tag) || return nothing
     end
     owner=(2,Int32(tag))
     authority=Model._model_mesh_log_authority!(log,done,owner)
@@ -1997,7 +2001,7 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
         parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
         periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
         metric_surface,constructor_inputs,size_field,native_recombine_events,
-        unvalidated_inputs=nothing,live=nothing,lines=nothing)
+        unvalidated_inputs=nothing,live=nothing,lines=nothing,validated=nothing)
             alternate=produced isa Model._ModelSurfaceGeometryProduction ? produced.geometry : nothing
             source_binding=produced isa Model._ModelSurfaceGeometryProduction ? produced.production :
                 produced isa Model._ModelSurfaceProduction ? produced : nothing
@@ -2125,6 +2129,15 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                         caller=assembly.caller,only=(2,Int32(tag)),shared,
                         known=shared && live.inputs_known)
                     shared && (live.inputs_known=true)
+                    # The end of the pass validates every input against its
+                    # final authority. Record what this one was validated
+                    # against: while the log is only appended to, the same
+                    # product, producer rows and input give the same answer.
+                    if shared && validated!==nothing && haskey(constructor_inputs,(2,Int32(tag)))
+                        validated[(2,Int32(tag))]=(input.products[(2,Int32(tag))],
+                            get(input.producer_rows,(2,Int32(tag)),nothing),
+                            constructor_inputs[(2,Int32(tag))])
+                    end
                     unvalidated_inputs[]=true
                 end
                 if tag in unmerged_nonew_sources
@@ -2245,6 +2258,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     live=parallel_units===nothing && volume_forward===nothing ? _HigherLiveAuthority() : nothing
     live===nothing || (input=_higher_live_seed!(live,assembly,input))
     lines=_HigherLineCells()
+    validated=Dict{Tuple{Int,Int32},Tuple{Any,Any,Any}}()
     for (ui,tags) in enumerate(units)
         work=parallel_units===nothing ? nothing : parallel_units[ui]
         if work!==nothing && parallel_results[ui]===nothing
@@ -2281,7 +2295,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
                 periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
                 metric_surface,constructor_inputs,size_field,native_recombine_events,
-                unvalidated_inputs,live,lines))::
+                unvalidated_inputs,live,lines,validated))::
                 Tuple{Model._ModelMeshAuthority,Union{Nothing,Model._ExtrudeNoNewScope}}
         end
         # State this unit left behind that a later detached produce still
@@ -2339,7 +2353,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     # Each merge validated its own constructor input only; a later merge must
     # not have changed an earlier Surface's product.
     unvalidated_inputs[] && (input=Model._model_mesh_with_surface_constructor_inputs(
-        input,constructor_inputs;caller=assembly.caller))
+        input,constructor_inputs;caller=assembly.caller,validated))
     return input,scope,retained,volume_forward
 end
 

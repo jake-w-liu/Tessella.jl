@@ -532,7 +532,8 @@ function _model_surface_constructor_input(production,actual::MixedMesh,
 end
 
 function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthority,inputs;
-        caller="Surface constructor input",only=nothing,shared::Bool=false,known::Bool=false)
+        caller="Surface constructor input",only=nothing,shared::Bool=false,known::Bool=false,
+        validated=nothing)
     if shared
         # An authority taken from a log already shares its entity tables across
         # appends, so the pass's own table is bound as it is instead of being
@@ -564,7 +565,14 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
         # its retained corner skeleton. With `only`, just that owner's input
         # is validated: a caller that binds one Surface at a time validates
         # all of them once it is done, rather than all of them every time.
-        if only===nothing || owner==only
+        # `validated` names, per owner, the product, producer rows and input a
+        # log authority was already checked with. While they are the very same
+        # objects the log has only been appended to since, so the product view
+        # and the check's answer are the same too.
+        record=validated===nothing ? nothing : get(validated,owner,nothing)
+        if (only===nothing || owner==only) && !(record!==nothing &&
+                record[1]===authority.products[owner] &&
+                record[2]===get(authority.producer_rows,owner,nothing) && record[3]===constructor)
             actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
                 producer_order=true,first_order=true)
             _model_surface_constructor_binding(actual,constructor,caller)
