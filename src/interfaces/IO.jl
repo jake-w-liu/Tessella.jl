@@ -1602,7 +1602,10 @@ function read_stl(path; merge_tol=1e-9,
         tris_xyz = isbin ? _read_stl_binary(path,facet_limit) :
                            _read_stl_ascii(path,facet_limit)
         out=_weld_triangles(tris_xyz, mtol, node_limit)
-        d=validate(out)
+        # Welded STL soups routinely contain non-manifold edges and sliver
+        # triangles (Gmsh keeps them); only invalid indices, non-finite
+        # coordinates and repeated triangles are rejected.
+        d=validate(out;require_manifold_tris=false,allow_degenerate_tris=true)
         d.ok || throw(ArgumentError(
             "read_stl: welded surface is invalid — "*join(d.messages,"; ")))
         return out
@@ -14107,6 +14110,8 @@ const _BDF_ELEMENT_CARDS=Dict{String,Vector{Tuple{Int,Int,Vector{Int}}}}(
                (9,6,[4,5,6,10,11,12])],
     "CQUAD4"=>[(3,4,[4,5,6,7])],
     "CQUAD8"=>[(16,8,collect(4:11)),(16,8,[4,5,6,7,10,11,12,13])],
+    # Gmsh's second-order quadrangle card (not an MSC card).
+    "CQUAD9"=>[(10,9,collect(4:12))],
     "CTETRA"=>[(11,10,collect(4:13)),(11,10,[4,5,6,7,10,11,12,13,14,15]),
                (4,4,[4,5,6,7])],
     "CTETRA10"=>[(11,10,collect(4:13)),(11,10,[4,5,6,7,10,11,12,13,14,15])],
@@ -14123,7 +14128,29 @@ const _BDF_ELEMENT_CARDS=Dict{String,Vector{Tuple{Int,Int,Vector{Int}}}}(
               (7,5,collect(4:8))],
     "CPYRA13"=>[(19,13,collect(4:16)),
                 (19,13,[4,5,6,7,8,10,11,12,13,14,15,16,17])],
-    "CPYRA5"=>[(7,5,collect(4:8))])
+    "CPYRA5"=>[(7,5,collect(4:8))],
+    # MSC/Gmsh spelling of the pyramid card; Gmsh also writes the 14-node
+    # second-order pyramid under it.
+    "CPYRAM"=>[(14,14,collect(4:17)),(19,13,collect(4:16)),
+               (19,13,[4,5,6,7,8,10,11,12,13,14,15,16,17]),
+               (7,5,collect(4:8))],
+    "CPYRAM5"=>[(7,5,collect(4:8))],
+    "CPYRAM13"=>[(19,13,collect(4:16))],
+    "CPYRAM14"=>[(14,14,collect(4:17))])
+
+# Nastran orders the mid-nodes of the second-order solid cards differently from
+# Gmsh (GModelIO_BDF.cpp swaps them on reading and back on writing): the
+# `k`-th Gmsh node is the file's node `perm[k]+1`.
+const _BDF_NODE_ORDER=Dict{Int,Vector{Int}}(
+    11=>[0,1,2,3,4,5,6,7,9,8],
+    17=>[0,1,2,3,4,5,6,7,8,11,12,9,13,10,14,15,16,19,17,18],
+    18=>[0,1,2,3,4,5,6,8,9,7,10,11,12,14,13])
+for (card,candidates) in _BDF_ELEMENT_CARDS
+    for (index,(msh,arity,positions)) in enumerate(candidates)
+        order=get(_BDF_NODE_ORDER,msh,nothing)
+        order===nothing || (candidates[index]=(msh,arity,positions[order.+1]))
+    end
+end
 
 # Non-element card prefixes skipped silently (properties, materials, loads,
 # constraints, coordinate systems, case control); other unmapped `C`-cards
@@ -14479,9 +14506,9 @@ end
 # ── Nastran writer ─────────────────────────────────────────────────────────────
 
 const _BDF_WRITE_TABLE=Dict{Int,String}(
-    1=>"CBAR",2=>"CTRIA3",9=>"CTRIA6",3=>"CQUAD4",16=>"CQUAD8",
+    1=>"CBAR",2=>"CTRIA3",9=>"CTRIA6",3=>"CQUAD4",16=>"CQUAD8",10=>"CQUAD9",
     4=>"CTETRA",11=>"CTETRA10",6=>"CPENTA",18=>"CPENTA15",
-    5=>"CHEXA",17=>"CHEXA20",7=>"CPYRA",19=>"CPYRA13")
+    5=>"CHEXA",17=>"CHEXA20",7=>"CPYRAM",19=>"CPYRAM",14=>"CPYRAM")
 
 function _bdf_i8(value::Integer,caller::AbstractString,context::AbstractString)
     s=string(value)
@@ -14519,14 +14546,9 @@ end
 # `+`-id continuation lines holding up to eight further fields each.
 function _bdf_write_card(io,card::AbstractString,eid::AbstractString,
         pid::AbstractString,nids::Vector{String})
-    if card=="CTRIA6"
-        # MSC layout: G1–G3 on the first line, T1–T3 then G4–G6 on the
-        # continuation (reader candidates 13/14/15 in flat positions).
-        _bdf_card_line(io,card,[eid,pid,nids[1],nids[2],nids[3],"","",""];
-            contid="+")
-        _bdf_card_line(io,"+",["","","",nids[4],nids[5],nids[6]])
-        return nothing
-    end
+    # CTRIA6 carries all six grids on the first line (the layout Gmsh writes
+    # and reads, and reader candidate 2): Gmsh skips the blank THETA/ZOFFS/TFLAG
+    # fields of the MSC layout and then misreads the continuation.
     first=nids[1:min(6,length(nids))]
     _bdf_card_line(io,card,[eid;pid;first];
         contid=length(nids)>6 ? "+" : "")
@@ -14588,10 +14610,18 @@ function write_bdf(path,input_mesh)
                 counter+=UInt64(1)
                 eid=_bdf_i8(_foreign_cell_uid(m,bi,j,counter),caller,"element id")
                 physical=Int64(block.tags[j])
-                pid=physical>0 ? _bdf_i8(physical,caller,"property id") : ""
-                _bdf_write_card(io,card,eid,pid,
-                    [_bdf_i8(labels[block.nodes[k,j]],caller,"grid id")
-                     for k in 1:arity])
+                # A blank PID makes Gmsh's reader (which skips empty fields)
+                # shift every node one slot left, so write an explicit 0.
+                pid=physical>0 ? _bdf_i8(physical,caller,"property id") : "0"
+                gids=[_bdf_i8(labels[block.nodes[k,j]],caller,"grid id")
+                      for k in 1:arity]
+                order=get(_BDF_NODE_ORDER,block.msh,nothing)
+                if order!==nothing
+                    filed=similar(gids)
+                    for k in 1:arity;filed[order[k]+1]=gids[k];end
+                    gids=filed
+                end
+                _bdf_write_card(io,card,eid,pid,gids)
             end
         end
         println(io,"ENDDATA")
@@ -17013,6 +17043,13 @@ function _vtk_cell_layout(vtktype::Int64,nverts::Int,api,cache,info)
     cached=get(cache,key,nothing)
     cached===nothing || return cached
     msh=get(_VTK_READ_TYPES,vtktype,nothing)
+    # Gmsh writes its 14-node second-order pyramid under the 5-node VTK_PYRAMID
+    # code, with its own node order; a pyramid cell listing 14 nodes can only be
+    # that element.
+    if vtktype==14 && nverts==14
+        cache[key]=(14,collect(1:14))
+        return cache[key]
+    end
     if msh===nothing
         family=get(_VTK_LAGRANGE_FAMILIES,vtktype,nothing)
         family===nothing && throw(ArgumentError(

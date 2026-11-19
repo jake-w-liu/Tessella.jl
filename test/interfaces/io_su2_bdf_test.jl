@@ -255,11 +255,15 @@ end
         @test f.mesh.blocks[3].nodes == reshape(Int32[1:6;], 6, 1)
         @test f.mesh.blocks[4].nodes == reshape(Int32[1, 2, 3, 4], 4, 1)
         @test f.mesh.blocks[5].nodes == reshape(Int32[1:8;], 8, 1)
-        @test f.mesh.blocks[7].nodes == reshape(Int32[1:10;], 10, 1)
+        # Gmsh 4.15.2 reads a 10/15/20-node deck 1..n in these orders.
+        @test f.mesh.blocks[7].nodes ==
+              reshape(Int32[1, 2, 3, 4, 5, 6, 7, 8, 10, 9], 10, 1)
         @test f.mesh.blocks[8].nodes == reshape(Int32[1:6;], 6, 1)
-        @test f.mesh.blocks[9].nodes == reshape(Int32[1:15;], 15, 1)
+        @test f.mesh.blocks[9].nodes ==
+              reshape(Int32[1, 2, 3, 4, 5, 6, 7, 9, 10, 8, 11, 12, 13, 15, 14], 15, 1)
         @test f.mesh.blocks[10].nodes == reshape(Int32[1:8;], 8, 1)
-        @test f.mesh.blocks[11].nodes == reshape(Int32[1:20;], 20, 1)
+        @test f.mesh.blocks[11].nodes ==
+              reshape(Int32[1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 10, 14, 11, 15, 16, 17, 20, 18, 19], 20, 1)
         @test f.mesh.blocks[12].nodes == reshape(Int32[1:5;], 5, 1)
         @test f.mesh.blocks[13].nodes == reshape(Int32[1:13;], 13, 1)
         @test [b.tags for b in f.mesh.blocks][1] == Int32[5, 5, 5, 5]
@@ -326,7 +330,7 @@ end
         @test write_bdf(path, mesh) == path
         text = read(path, String)
         @test occursin("BEGIN BULK", text) && occursin("ENDDATA", text)
-        @test occursin("CTETRA  ", text) && occursin("CPYRA   ", text)
+        @test occursin("CTETRA  ", text) && occursin("CPYRAM  ", text)
         f = read_bdf(path)
         @test f.mesh.coords == coords
         @test [b.msh for b in f.mesh.blocks] == [1, 2, 3, 4, 6, 5, 7]
@@ -403,7 +407,11 @@ end
         quad9 = MixedMesh(zeros(3, 9),
             [ElementBlock(10, reshape(Int32[1:9;], 9, 1), Int32[1])])
         @test_throws ArgumentError write_su2(joinpath(dir, "q.su2"), quad9)
-        @test_throws ArgumentError write_bdf(joinpath(dir, "q.bdf"), quad9)
+        # Gmsh writes and reads CQUAD9 in .bdf, so only the 3-node line is out.
+        @test write_bdf(joinpath(dir, "q.bdf"), quad9) == joinpath(dir, "q.bdf")
+        lin3 = MixedMesh(zeros(3, 3),
+            [ElementBlock(8, reshape(Int32[1:3;], 3, 1), Int32[1])])
+        @test_throws ArgumentError write_bdf(joinpath(dir, "l.bdf"), lin3)
         special = MixedMesh(zeros(3, 2),
             [SpecialElementBlock(67, reshape(Int32[1, 2], 2, 1))])
         @test_throws ArgumentError write_su2(joinpath(dir, "s.su2"), special)

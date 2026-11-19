@@ -45,7 +45,13 @@ end
             write(path,grid*largecard(name,[17,9,collect(1:arity)...])*"ENDDATA\n")
             mesh=F.read_bdf(path)
             @test length(mesh.mesh.blocks)==1 && mesh.mesh.blocks[1].msh==msh
-            @test mesh.mesh.blocks[1].nodes==reshape(Int32.(1:arity),arity,1)
+            # Nastran's mid-node order differs from Gmsh's for these cards;
+            # Gmsh 4.15.2 (GModelIO_BDF.cpp, checked on a CTETRA/CHEXA/CPENTA
+            # deck with grids 1..n) returns the permuted order below.
+            gmsh=Dict(11=>[1,2,3,4,5,6,7,8,10,9],
+                17=>[1,2,3,4,5,6,7,8,9,12,13,10,14,11,15,16,17,20,18,19],
+                18=>[1,2,3,4,5,6,7,9,10,8,11,12,13,15,14])
+            @test mesh.mesh.blocks[1].nodes==reshape(Int32.(get(gmsh,msh,collect(1:arity))),arity,1)
             @test mesh.mesh.blocks[1].tags==[9]
         end
     end
