@@ -436,6 +436,7 @@ function _model_surface_constructor_binding(actual::MixedMesh,constructor::Mixed
             throw(ArgumentError("$caller: Surface constructor input changes bound node $uid"))
     end
     cells=Dict{UInt64,Tuple{Int,Int32,Int32,NTuple{4,UInt64}}}()
+    sizehint!(cells,sum(length,data.external_element_tags;init=0))
     length(actual.blocks)==length(data.external_element_tags)==length(data.block_entities) ||
         throw(ArgumentError("$caller: actual Surface cell metadata does not align"))
     for (block,labels,owners) in zip(actual.blocks,data.external_element_tags,data.block_entities)
@@ -448,7 +449,7 @@ function _model_surface_constructor_binding(actual::MixedMesh,constructor::Mixed
             cells[label]=(Int(block.msh),owners[column],block.tags[column],support)
         end
     end
-    seen=Set{UInt64}()
+    seen=Set{UInt64}();sizehint!(seen,length(cells))
     length(constructor.blocks)==length(receipt.external_element_tags)==length(receipt.block_entities) ||
         throw(ArgumentError("$caller: Surface constructor cell labels do not align"))
     for (block,labels,owners) in zip(constructor.blocks,receipt.external_element_tags,receipt.block_entities)
