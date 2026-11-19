@@ -5452,6 +5452,14 @@ function _geo_exec_extrude_run!(m::GeoModel,entities,params,blmeta,delta,
             "$caller: Twisting extrude not available with OpenCASCADE " *
             "geometry kernel"))
     end
+    if !builtin
+        # Under `SetFactory("OpenCASCADE")` upstream's parser action calls
+        # `OCC_Internals::extrude`/`revolve`: the sweep runs in the OCC kernel
+        # with OCC numbering (no GEO chapeau points or axis centres), and the
+        # created shapes are published by the synchronization.
+        return _geo_exec_occ_extrude_run!(m,entities,params,delta,revolve,
+                                          context,caller,allocator_state)
+    end
     tags=revolve===nothing ?
         extrude_entities!(m,entities,delta;params=params,
             return_lateral=context.extrude_return_lateral,caller=caller,
@@ -5469,6 +5477,30 @@ function _geo_exec_extrude_run!(m::GeoModel,entities,params,blmeta,delta,
             auto_coherence=_geo_auto_coherence(context))
     context.geo_changed=true
     return Float64.(tags)
+end
+
+function _geo_exec_occ_extrude_run!(m::GeoModel,entities,params,delta,revolve,
+                                    context::_GeoNumericContext,
+                                    caller::AbstractString,allocator_state)
+    kernel=_geo_occ_prepare_kernel!(m,allocator_state)
+    for (dim,tag) in entities
+        t=abs(tag)
+        dim==0 ? _geo_occ_pipe_vertex!(m,t,kernel,caller) :
+        dim==1 ? _geo_occ_pipe_edge!(m,t,kernel,caller) :
+        dim==2 ? _geo_occ_pipe_face!(m,t,kernel,caller) :
+            _geo_occ_bind_volume!(m,t,kernel,caller)
+    end
+    shapes=NTuple{2,Int}[(dim,abs(tag)) for (dim,tag) in entities]
+    out=if revolve===nothing
+        Model._model_occ_extrude(m,shapes,delta[1],delta[2],delta[3];
+            caller,params_override=params)
+    else
+        Model._model_occ_revolve(m,shapes,revolve.origin...,revolve.axis...,
+            revolve.angle;params_override=params)
+    end
+    Model._model_occ_synchronize!(m)
+    context.geo_changed=true
+    return Float64[Float64(t) for (_,t) in out]
 end
 
 # ── `Extrude {shapes} Using Wire {expr}` — OCC pipe extrusion ────────────────

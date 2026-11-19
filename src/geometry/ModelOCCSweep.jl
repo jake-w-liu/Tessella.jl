@@ -486,8 +486,13 @@ end
 
 function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
                             num_elements=Int[],heights=Float64[],
-                            recombine=false,caller="OCC.extrude")
-    params=_model_occ_sweep_mesh_params(num_elements,heights,recombine,caller)
+                            recombine=false,caller="OCC.extrude",
+                            params_override=nothing)
+    # `.geo` OCC-factory `Extrude` statements pass their parsed `Layers`
+    # record (QuadTri options included) verbatim.
+    params=params_override===nothing ?
+        _model_occ_sweep_mesh_params(num_elements,heights,recombine,caller) :
+        params_override
     d=_model_occ_extrude_direction(dx,dy,dz,caller)
     kernel=m.occ_kernel
     # Phase 1: validate and classify every input before any bind so a
@@ -1423,9 +1428,11 @@ end
 
 function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
                             num_elements=Int[],heights=Float64[],
-                            recombine=false)
+                            recombine=false,params_override=nothing)
     caller="OCC.revolve"
-    params=_model_occ_sweep_mesh_params(num_elements,heights,recombine,caller)
+    params=params_override===nothing ?
+        _model_occ_sweep_mesh_params(num_elements,heights,recombine,caller) :
+        params_override
     p=_finite3(x,y,z,caller)
     d=_finite3(ax,ay,az,caller)
     _occ_modulus(d)>0 || throw(ArgumentError(
