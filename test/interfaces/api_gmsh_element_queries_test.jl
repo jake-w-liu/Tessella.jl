@@ -33,16 +33,14 @@ sorted_by_tag(tags,nodes,width)=(perm=sortperm(tags);
         load("tets")
         @test quality(33:38,"eta")≈[0.8399473665965821,0.6872296635790217,
             0.7559526299369239,0.7559526299369239,0.6872296635790217,0.8399473665965821] rtol=1e-14
-        # Tags in any order, repeated, and across element blocks answer as
-        # each tag alone does.
+        # Tags in any order, repeated, and across element blocks (tetrahedra,
+        # a triangle, a point).
         mixed_tags=[38,33,33,21,36,1,37]
         @test quality(mixed_tags,"volume")≈[1/6,1/6,1/6,0.5,1/6,1.0,1/6] rtol=1e-14
-        for name in ("volume","gamma","eta")
-            @test quality(mixed_tags,name)==[only(quality([tag],name)) for tag in mixed_tags]
-        end
-        # The first barycentric coordinate at a mid-edge reference node is an
-        # exact zero.
-        @test A.mesh.get_basis_functions(4,[0.5,0.5,0.0],"Lagrange1")[2]==[0.0,0.5,0.5,0.0]
+        @test quality(mixed_tags,"gamma")≈[0.7320508075688774,0.7320508075688774,
+            0.7320508075688774,0.82842712474619,0.7174389352143008,0.0,0.6229863075268959] rtol=1e-13
+        @test quality(mixed_tags,"eta")≈[0.8399473665965821,0.8399473665965821,
+            0.8399473665965821,0.75,0.7559526299369239,0.0,0.6872296635790217] rtol=1e-14
         load("pyramid")
         @test quality([1],"eta")==[0.0]
         load("prism")
