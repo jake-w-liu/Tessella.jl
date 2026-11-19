@@ -279,6 +279,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_boolean_meridian_test.jl",
         "interfaces/api_occ_boolean_exact_conic_test.jl",
         "geometry/geo_printf_args_test.jl",
+        "geometry/geo_old_newreg_zero_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

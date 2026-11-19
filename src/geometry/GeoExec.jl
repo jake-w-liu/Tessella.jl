@@ -1473,6 +1473,10 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
                 continue
             end
             _geo_context_refresh_allocators!(context,allocator_state)
+            # Model-side `NEWCURVE()`-family allocations follow the live
+            # `Geometry.OldNewReg` option.
+            m.old_newreg=!iszero(something(_geo_option_number(
+                context,"Geometry",0,"OldNewReg"),1.0))
             # `_GeoSyntaxAbort` marks an upstream *syntax error* — the bison
             # parser records it, drops the statement and resumes at the next
             # one. The allocator observer is skipped: the statement did not

@@ -1235,7 +1235,9 @@ function _merge_points!(m::GeoModel,eps;keep_points=nothing)
         delete!(m.point_w,drop)
         _drop_entity_state!(m,0,drop)
     end
-    m.next_tag[1]=isempty(m.points) ? 0 : maximum(keys(m.points))
+    # `ReplaceDuplicatePoints` resets the counter only under `OldNewReg`.
+    m.old_newreg &&
+        (m.next_tag[1]=isempty(m.points) ? 0 : maximum(keys(m.points)))
     return mapping
 end
 
@@ -1309,7 +1311,8 @@ function _merge_curves!(m::GeoModel)
         delete!(m.curve_control_points,drop)
         _drop_entity_state!(m,1,drop)
     end
-    m.next_tag[2]=isempty(m.curves) ? 0 : maximum(keys(m.curves))
+    m.old_newreg &&
+        (m.next_tag[2]=isempty(m.curves) ? 0 : maximum(keys(m.curves)))
     return mapping
 end
 
@@ -1357,7 +1360,8 @@ function _merge_surfaces!(m::GeoModel)
             l in referenced || delete!(m.loops,l)
         end
     end
-    m.next_tag[3]=isempty(m.surfaces) ? 0 : maximum(keys(m.surfaces))
+    m.old_newreg &&
+        (m.next_tag[3]=isempty(m.surfaces) ? 0 : maximum(keys(m.surfaces)))
     return mapping
 end
 
@@ -1488,8 +1492,11 @@ function _geo_newreg_tag(m::GeoModel)
     return mx+1
 end
 
+# `NEWCURVE()`/`NEWSURFACE()`/`NEWVOLUME()`: `NEWREG()` under
+# `Geometry.OldNewReg`, the dimension's own `getMaxTag(dim) + 1` otherwise.
 _geo_newreg_alloc!(m::GeoModel,dim::Int,caller) =
-    _alloc_tag!(m,dim,_geo_newreg_tag(m),caller)
+    m.old_newreg ? _alloc_tag!(m,dim,_geo_newreg_tag(m),caller) :
+        _alloc_tag!(m,dim,0,caller)
 
 """
     duplicate_entities!(model, entities; caller) -> copies

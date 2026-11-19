@@ -561,6 +561,11 @@ mutable struct GeoModel
     # `_maxLineLoopNum` (`newll`/`NEWREG()`) and yield to a later explicit
     # `Curve Loop(t)` declaration.
     derived_loops::Set{Int}
+    # `Geometry.OldNewReg` as last synced by `.geo` execution (default 1):
+    # with it, `Duplicata`/`Extrude` copies draw `NEWREG()` tags and a
+    # coherence merge resets the per-dimension counters to the live maxima;
+    # without it they use `getMaxTag(dim) + 1` and the counters only grow.
+    old_newreg::Bool
 end
 
 """
@@ -603,7 +608,8 @@ GeoModel() = GeoModel(Dict{Int,NTuple{3,Float64}}(), Dict{Int,Float64}(),
                       Int[0,0,0,0],
                       "",
                       _ModelNativeOCCKernel(),
-                      Set{Int}())
+                      Set{Int}(),
+                      true)
 
 include("ModelMeshProjection.jl")
 
