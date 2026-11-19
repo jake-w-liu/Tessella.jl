@@ -85,7 +85,9 @@ end
         # for sizes larger than the model once acted on the open sector of a
         # growing pole fan and left two slivers at the south pole (minimum
         # angle 6.8 deg here; Gmsh 4.15.2: 29.0). It now runs only as a
-        # second pass when wrapped cells are left.
+        # second pass when wrapped cells are left. The fan itself then still
+        # kept a cell whose far edge passes beside the pole (23.8 deg) until
+        # such edges were exchanged; see the last testset.
         generate(()->A.model.occ.add_sphere(0,0,0,1);h=0.2)
         s=try
             shell_statistics((x,y,z)->0.2,(x,y,z)->abs(hypot(x,y,z)-1))
@@ -95,7 +97,7 @@ end
         @test s.closed
         @test s.residual<=1e-12
         @test 710<=s.cells<=870          # Gmsh: 790
-        @test s.smallest>20              # Gmsh: 29.0; slivers were 6.8
+        @test s.smallest>30              # Gmsh: 29.0; was 23.8, slivers 6.8
         @test 0.9<=s.ratio<=1.06
         # Each pole is an ordinary vertex of the closed mesh.
         for tag in s.tags
@@ -149,6 +151,43 @@ end
         @test 180<=s.cells<=240          # Gmsh: 208
         @test 0.85<=s.ratio<=1.1
         @test s.smallest>20
+    end
+
+    @testset "edge passing beside a pole is exchanged" begin
+        # A frontal candidate beyond a pole is outside the chart and rejected
+        # (Gmsh does the same), which leaves a fan cell whose far edge passes
+        # beside the pole: minimum angles of 3 to 18 deg on about one sphere
+        # in nine over centre, radius and size, in Gmsh 4.15.2 as well. Here
+        # the cell (pole,a,b) spans more than a half turn, so it lies folded
+        # over the pole; d is the vertex across a-b.
+        M=Tessella.Model
+        A.initialize()
+        geometry=try
+            A.model.occ.add_sphere(0,0,0,1);A.model.occ.synchronize()
+            A.CURRENT[].surface_geometry[1]
+        finally
+            A.finalize()
+        end
+        north=pi/2
+        uv=[1.8 0.2 3.4 1.8; north north-0.25 north-0.25 north-0.6]
+        world=Matrix{Float64}(undef,3,4)
+        for k in 1:4
+            world[:,k].=M._occ_surface_point(geometry,uv[1,k],uv[2,k])
+        end
+        owned=[false,true,true,true]
+        none=Set{NTuple{2,NTuple{2,Float64}}}()
+        cells()=Int32[1 3; 2 2; 3 4]
+        tris=cells()
+        @test M._occ_curved_surface_fan_flips!(uv,tris,world,owned,geometry,none)==1
+        @test tris==Int32[1 1; 2 4; 4 3]
+        # A constrained edge stays, and so does an edge that faces an
+        # ordinary vertex.
+        tris=cells()
+        kept=Set([((uv[1,2],uv[2,2]),(uv[1,3],uv[2,3]))])
+        @test M._occ_curved_surface_fan_flips!(uv,tris,world,owned,geometry,kept)==0
+        @test tris==cells()
+        @test M._occ_curved_surface_fan_flips!(uv,tris,world,trues(4),geometry,none)==0
+        @test tris==cells()
     end
 end
 end

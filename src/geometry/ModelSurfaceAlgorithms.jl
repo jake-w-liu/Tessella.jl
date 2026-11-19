@@ -825,6 +825,99 @@ end
     return 1.0-abs(60.0-amin)/60.0
 end
 
+# Fan repair at a collapsed row (sphere pole, cone apex) of a sized fill.
+# A frontal candidate that would land beyond the pole comes back outside the
+# chart and is rejected — upstream rejects it too — which leaves the cell
+# `(p,a,b)` whose edge `a–b` passes right beside the pole `p`: a wide sector
+# at `p` and two needle angles at `a` and `b` (3° to 18° in about one sphere
+# out of nine, in Gmsh 4.15.2 as well). The vertex `d` across `a–b` then lies
+# inside that cell's world circumcircle, so the edge is exchanged for `p–d`.
+# Only an edge facing a collapsed vertex is examined, so a face without such a
+# row is untouched. The exchange is made when the two world angles facing the
+# edge sum to more than a half turn (or the fan cell is folded over the pole),
+# the parameter quadrilateral is strictly convex and both new world triangles
+# face the same side of the surface as the neighbour.
+# `constrained` holds the parameter keys of the edges that must stay.
+# Returns the number of exchanges.
+function _occ_curved_surface_fan_flips!(uv::AbstractMatrix{Float64},
+        tris::AbstractMatrix{Int32},world::Matrix{Float64},face_owned,
+        geometry,constrained)
+    ncell=size(tris,2)
+    collapsed=falses(size(uv,2))
+    found=false
+    @inbounds for v in axes(uv,2)
+        face_owned[v] && continue
+        g=_occ_surface_ground(geometry,uv[1,v],uv[2,v])
+        (g[1]<=1e-10*g[3] || g[3]<=1e-10*g[1]) || continue
+        collapsed[v]=true;found=true
+    end
+    found || return 0
+    owner=Dict{NTuple{2,Int32},Int32}()
+    queue=Int32[]
+    @inbounds for c in 1:ncell
+        for k in 1:3
+            owner[(tris[k,c],tris[mod1(k+1,3),c])]=Int32(c)
+        end
+        (collapsed[tris[1,c]] || collapsed[tris[2,c]] || collapsed[tris[3,c]]) &&
+            push!(queue,Int32(c))
+    end
+    @inline point(v)=(world[1,v],world[2,v],world[3,v])
+    @inline orient(a,b,c)=(uv[1,b]-uv[1,a])*(uv[2,c]-uv[2,a])-
+                          (uv[1,c]-uv[1,a])*(uv[2,b]-uv[2,a])
+    function angle(apex,first,second)
+        o=point(apex)
+        e=Mesh2D._gmsh_sub3(point(first),o);f=Mesh2D._gmsh_sub3(point(second),o)
+        scale=Mesh2D._gmsh_norm3(e)*Mesh2D._gmsh_norm3(f)
+        scale>0 || return 0.0
+        return acos(clamp(Mesh2D._gmsh_dot3(e,f)/scale,-1.0,1.0))
+    end
+    function normal(a,b,c)
+        e=Mesh2D._gmsh_sub3(point(b),point(a));f=Mesh2D._gmsh_sub3(point(c),point(a))
+        return (e[2]*f[3]-e[3]*f[2],e[3]*f[1]-e[1]*f[3],e[1]*f[2]-e[2]*f[1])
+    end
+    flips=0
+    budget=4*ncell+16
+    @inbounds while !isempty(queue) && flips<budget
+        c=pop!(queue)
+        for k in 1:3
+            p=tris[k,c]
+            collapsed[p] || continue
+            a=tris[mod1(k+1,3),c];b=tris[mod1(k+2,3),c]
+            (collapsed[a] || collapsed[b]) && continue
+            other=get(owner,(b,a),Int32(0))
+            other==0 && continue
+            ((uv[1,a],uv[2,a]),(uv[1,b],uv[2,b])) in constrained && continue
+            ((uv[1,b],uv[2,b]),(uv[1,a],uv[2,a])) in constrained && continue
+            d=tris[1,other]
+            (d==a || d==b) && (d=tris[2,other])
+            (d==a || d==b) && (d=tris[3,other])
+            collapsed[d] && continue
+            # The neighbour is an ordinary cell and gives the side of the
+            # surface. Past a half-turn sector the fan cell itself lies
+            # folded over the pole and is exchanged whatever its angles.
+            outward=normal(b,a,d)
+            (Mesh2D._gmsh_dot3(normal(p,a,b),outward)<=0 ||
+             angle(p,a,b)+angle(d,b,a)>pi*(1.0+1e-9)) || continue
+            side=orient(p,a,b)
+            (side!=0 && orient(p,a,d)*side>0 && orient(p,d,b)*side>0) || continue
+            (Mesh2D._gmsh_dot3(normal(p,a,d),outward)>0 &&
+             Mesh2D._gmsh_dot3(normal(p,d,b),outward)>0) || continue
+            for cell in (c,other),j in 1:3
+                delete!(owner,(tris[j,cell],tris[mod1(j+1,3),cell]))
+            end
+            tris[1,c]=p;tris[2,c]=a;tris[3,c]=d
+            tris[1,other]=p;tris[2,other]=d;tris[3,other]=b
+            for cell in (c,other),j in 1:3
+                owner[(tris[j,cell],tris[mod1(j+1,3),cell])]=cell
+            end
+            push!(queue,c,other)
+            flips+=1
+            break
+        end
+    end
+    return flips
+end
+
 # Upstream `laplaceSmoothing` (`_relocate`) on the parametric sheet of an OCC
 # face: every face-owned vertex moves toward the average of its neighbours'
 # parameters weighted by the first-fundamental length of the unit direction

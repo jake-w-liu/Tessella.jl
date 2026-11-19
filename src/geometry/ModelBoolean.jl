@@ -7389,8 +7389,16 @@ function _model_occ_curved_surface_mesh_tracked(m::GeoModel,t::Int,
     end
     # Upstream `meshGFace` ends Delaunay/Frontal with `Mesh.Smoothing`
     # Laplacian passes on the face-owned vertices.
-    sized===nothing || _occ_curved_surface_smooth!(uvcoords,mesh.tris,coords,
-        face_owned,sg,m.meshing.native_smoothing)
+    if sized!==nothing
+        constrained=Set{NTuple{2,NTuple{2,Float64}}}()
+        for (i,j) in segs
+            push!(constrained,((xs[i],ys[i]),(xs[j],ys[j])))
+        end
+        _occ_curved_surface_fan_flips!(uvcoords,mesh.tris,coords,face_owned,sg,
+            constrained)
+        _occ_curved_surface_smooth!(uvcoords,mesh.tris,coords,
+            face_owned,sg,m.meshing.native_smoothing)
+    end
     # Degenerate-face collapse: the two uv boundary representatives of a pole
     # or apex (the degenerate edge's endpoints at u=0 and u=a) lift to the same
     # 3-D vertex, so a uv triangle touching both collapses to an edge. Weld
