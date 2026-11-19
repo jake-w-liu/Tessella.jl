@@ -4989,7 +4989,7 @@ function _geo_stmt_src_loc(context::_GeoNumericContext,src::AbstractString)
     # bytes still match a prefix of the statement — offsets stay valid.
     if root===stmt || root==stmt ||
        (root isa AbstractString && ncodeunits(root)<=ncodeunits(stmt) &&
-        SubString(stmt,1,ncodeunits(root))==root)
+        startswith(stmt,root))
         off=stripped.offset
     else
         # A `String` copy of an inner slice (regex capture converted to
@@ -5801,6 +5801,10 @@ end
 # `--`/`++` fold `a-b`/`a+b` on string symbols? No — Gmsh strings do not combine;
 # a `StringExpr` is a single term.
 
+# Marker for a line break inside a quoted `.geo` string (see the statement
+# splitters); string literals turn it back into a newline.
+const _GEO_QUOTED_NEWLINE=''
+
 function _geo_string_expr(src::AbstractString,context::_GeoNumericContext,
                           caller::AbstractString)::String
     s=String(strip(src))
@@ -5813,7 +5817,8 @@ function _geo_string_expr(src::AbstractString,context::_GeoNumericContext,
         tail=String(strip(s[nextind(s,close):end]))
         isempty(tail) || throw(ArgumentError(
             "$caller: unexpected text after string literal: $tail"))
-        return String(s[nextind(s,firstindex(s)):prevind(s,close)])
+        return replace(String(s[nextind(s,firstindex(s)):prevind(s,close)]),
+                       _GEO_QUOTED_NEWLINE=>'\n')
     end
     # `Physical Point{tag}` / `Point{tag}` entity-name reads
     if (em=match(r"^Physical\s+(Point|Line|Curve|Surface|Volume)\s*\{(.*)\}\s*$",s))!==nothing
@@ -9931,7 +9936,7 @@ function _scan_geo_statements(consume,stream::Base.IO)
             i=j
         end
         if quote_char!='\0'
-            write(buffer,'\n')
+            write(buffer,_GEO_QUOTED_NEWLINE)
         elseif position(buffer)>0
             write(buffer,' ')
         end

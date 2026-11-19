@@ -113,6 +113,7 @@ using ..IO: _msg_log_write
 using ..IO: _geo_exec_struct_def!
 using ..IO: _GeoSyntaxAbort, _geo_syntax_abort, _geo_first_token,
             _geo_stmt_head_token, _GeoLoopLevel, _GeoWhileLevel
+using ..IO: _GEO_QUOTED_NEWLINE
 using ..IO: _geo_string_index_offender, _GEO_STRING_FUNCTIONS,
             _geo_tstring_valid,
             _GEO_BARE_STRING_TOKENS, _GEO_ALL_FUNCTIONS, _GEO_LEXER_KEYWORDS,
@@ -721,7 +722,10 @@ function _geo_exec_statements(stream::Base.IO)
             i=nxt
         end
         if quote_char!='\0'
-            write(buf,'\n')
+            # A line break inside a quoted string is part of the string; it
+            # is carried as a marker so line-oriented statement patterns
+            # still see one line (`_geo_string_expr` restores it).
+            write(buf,_GEO_QUOTED_NEWLINE)
             push!(buf_nl,position(buf))
         elseif position(buf)>0
             write(buf,' ')
@@ -9413,6 +9417,9 @@ function _exec_line!(m::GeoModel,line::AbstractString,
             _geo_eval_string(args[2],context,"execute_geo: SetString")
         _geo_onelab_changed!(context)
         return
+    elseif (pm=_geo_print_statement(line))!==nothing
+        Base.inferencebarrier(_geo_exec_print!)(pm[1],pm[2],pm[3],context)
+        return
     elseif (mm=match(r"^(Printf|Warning|Error)\s*\(\s*(.*?)\s*\)\s*(?:(>>|>)\s*(.*?)\s*)?;?\s*$",
                      line)) !== nothing
         Base.inferencebarrier(_geo_exec_print!)(mm.captures[1],mm.captures[2],
@@ -9946,6 +9953,26 @@ function _geo_split_constant_brace(inner::AbstractString)
     boundary>length(items) &&
         return join(items,","),nothing
     return join(items[1:boundary-1],","),items[boundary:end]
+end
+
+# `Printf(args) [> file | >> file];` split at the argument list's own closing
+# parenthesis, so a comparison inside the arguments (`StrLen(s) > 0`) is not
+# taken for the file redirection. `nothing` when the parentheses do not close
+# (the regex form then reports it).
+function _geo_print_statement(line::AbstractString)
+    hm=match(r"^(Printf|Warning|Error)\s*\(",line)
+    hm===nothing && return nothing
+    open=lastindex(hm.match)
+    close=_geo_matching_delim(line,open)
+    close==0 && return nothing
+    args=String(strip(line[nextind(line,open):prevind(line,close)]))
+    rest=String(strip(line[nextind(line,close):end]))
+    endswith(rest,";") &&
+        (rest=String(strip(rest[firstindex(rest):prevind(rest,lastindex(rest))])))
+    isempty(rest) && return (String(hm.captures[1]),args,nothing)
+    rm=match(r"^(>>|>)\s*(.*?)\s*$",rest)
+    rm===nothing && return nothing
+    return (String(hm.captures[1]),args,(String(rm.captures[1]),String(rm.captures[2])))
 end
 
 # `Printf`/`Warning`/`Error` — the `StringExprVar [, RecursiveListOfDouble]`
