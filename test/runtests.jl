@@ -274,6 +274,7 @@ include("functional/fixtures.jl")
         "interfaces/api_gmsh_element_queries_test.jl",
         "interfaces/api_gmsh_point_location_test.jl",
         "interfaces/api_mesh_higher_incremental_authority_test.jl",
+        "interfaces/api_occ_thru_sections_conic_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

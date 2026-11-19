@@ -200,8 +200,11 @@ function _loft_edge_nc(geometry,rev,caller)
         cv=_model_occ_nurbs_line(geometry,caller)
         nc=cv.curve; inner=nothing; tan=false
     elseif geometry.occ===:circle || geometry.occ===:ellipse
+        # the converted conic is a plain rational quadratic; its knot
+        # parameter relates to the edge's angle through the per-span chart
         cv=_model_occ_nurbs_conic(geometry,caller)
-        nc=cv.curve; inner=cv.reparam; tan=true
+        nc=cv.curve
+        inner=_model_occ_conic_chart(geometry.t0,geometry.t1); tan=true
     elseif hasproperty(geometry,:curve)
         cv=geometry.curve
         if cv isa _ModelOCCReparamCurve
