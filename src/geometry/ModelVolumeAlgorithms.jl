@@ -13,7 +13,9 @@ end
 # volume vertices default to the interior movement role.
 function _model_native_volume_optimizer_movable(mesh,births,input)
     fixed=falses(nnodes(mesh))
-    for face in first(boundary_faces(mesh.tets)),node in face
+    # Only the nodes are marked, so the order of the faces is immaterial:
+    # take them from the sorted face table rather than a hash table.
+    for face in _single_tet_faces(mesh.tets),node in face
         fixed[node]=true
     end
     if births!==nothing && input!==nothing && hasproperty(input,:mesh)

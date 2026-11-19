@@ -498,7 +498,7 @@ function _gopt_ingest(mesh::Mesh,element_numbers,element_high_water,movable,
     embedded_edges=Set{Tuple{Int32,Int32}}(_gopt_edge(edge...) for edge in embedded_edges)
     movement=if movable===nothing
         fixed=falses(size(mesh.coords,2))
-        for face in first(boundary_faces(mesh.tets)),node in face
+        for face in _single_tet_faces(mesh.tets),node in face
             fixed[node]=true
         end
         .!fixed

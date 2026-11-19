@@ -8155,7 +8155,7 @@ end
 function _laplacian_smooth_volume(mesh::Mesh,iterations::Int,
                                   caller::AbstractString,t::Int)
     boundary=falses(nnodes(mesh))
-    @inbounds for face in first(boundary_faces(mesh.tets)),node in face
+    @inbounds for face in _single_tet_faces(mesh.tets),node in face
         boundary[node]=true
     end
     neighbors=[Int32[] for _ in 1:nnodes(mesh)]
