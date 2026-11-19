@@ -1235,6 +1235,8 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
                   require_manifold_tris::Bool=ntets(m)==0,
                   allow_degenerate_segs::Bool=false,
                   allow_flat_tets::Bool=false,
+                  require_tet_topology::Bool=true,
+                  allow_degenerate_tris::Bool=false,
                   tri_owners::Union{Nothing,AbstractVector{<:Integer}}=nothing,
                   pinch_link_chi::AbstractDict{Int32,Int}=Dict{Int32,Int}())
     msgs = String[]
@@ -1305,7 +1307,7 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
             end
         end
         nbadtri > 0 && push!(msgs, "$nbadtri triangles have non-finite computed area")
-        ndegtri > 0 && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
+        ndegtri > 0 && !allow_degenerate_tris && push!(msgs, "$ndegtri degenerate (zero-area) triangles")
         # Full combinatorial-manifold audits (incidence alone misses vertex pinches).
         # Lower-dimensional cells in a volume mesh may be arbitrary physical or embedded
         # entity subsets. They still may not duplicate a canonical cell globally.
@@ -1318,7 +1320,7 @@ function validate(m::Mesh; require_positive_tets::Bool=true,
             topok || push!(msgs,"non-manifold triangle complex: $reason")
         end
     end
-    if ntets(m) > 0
+    if ntets(m) > 0 && require_tet_topology
         topok, reason = _tet_topology(m.tets; pinch_link_chi=pinch_link_chi)
         topok || push!(msgs, "non-manifold tet complex: $reason")
     end

@@ -1,0 +1,226 @@
+module MshOpenGmshParityTest
+
+using Test, Tessella
+
+# Gmsh 4.15.2 opens every file below; each expectation was taken from Gmsh itself
+# (gmsh.open + the matching gmsh.model query on the same text).
+const API = Tessella.API
+
+const NEGATIVE_TET = """
+\$MeshFormat
+4.1 0 8
+\$EndMeshFormat
+\$Entities
+0 0 0 1
+1 0 0 0 1 1 1 1 1 0
+\$EndEntities
+\$Nodes
+1 4 1 4
+3 1 0 4
+1
+2
+3
+4
+0 0 0
+1 0 0
+0 1 0
+0 0 1
+\$EndNodes
+\$Elements
+1 1 1 1
+3 1 4 1
+1 1 3 2 4
+\$EndElements
+"""
+
+# Two tetrahedra, the second with its own nodes lying on the first one's face
+# (a hanging node) and one inverted element.
+const HANGING = """
+\$MeshFormat
+4.1 0 8
+\$EndMeshFormat
+\$Entities
+0 0 0 1
+1 0 0 -1 1 1 1 1 1 0
+\$EndEntities
+\$Nodes
+1 7 1 7
+3 1 0 7
+1
+2
+3
+4
+5
+6
+7
+0 0 0
+1 0 0
+0 1 0
+0 0 1
+1 1 1
+0.25 0.25 0
+0.3 0.2 -1
+\$EndNodes
+\$Elements
+1 2 1 2
+3 1 4 2
+1 1 2 3 4
+2 1 5 6 7
+\$EndElements
+"""
+
+# A surface whose boundary lists its two curves twice (seam style), with a
+# Curve that carries no element.
+const SEAM = """
+\$MeshFormat
+4.1 0 8
+\$EndMeshFormat
+\$Entities
+3 2 1 0
+1 0 0 0 0
+2 1 0 0 0
+3 0 1 0 0
+1 0 0 0 1 0 0 0 2 -1 2
+2 0 0 0 0 1 0 0 2 -3 1
+1 0 0 0 1 1 0 0 4 1 2 -1 -2
+\$EndEntities
+\$Nodes
+4 3 1 3
+0 1 0 1
+1
+0 0 0
+0 2 0 1
+2
+1 0 0
+0 3 0 1
+3
+0 1 0
+2 1 0 0
+\$EndNodes
+\$Elements
+1 1 1 1
+2 1 2 1
+1 1 2 3
+\$EndElements
+"""
+
+const PERIODIC = """
+\$MeshFormat
+4.1 0 8
+\$EndMeshFormat
+\$Entities
+4 2 0 0
+1 0 0 0 0
+2 0 1 0 0
+3 1 0 0 0
+4 1 1 0 0
+1 0 0 0 0 1 0 0 2 -1 2
+2 1 0 0 1 1 0 0 2 -3 4
+\$EndEntities
+\$Nodes
+2 4 1 4
+1 1 0 2
+1
+2
+0 0 0
+0 1 0
+1 2 0 2
+3
+4
+1 0 0
+1 1 0
+\$EndNodes
+\$Elements
+2 2 1 2
+1 1 1 1
+1 1 2
+1 2 1 1
+2 3 4
+\$EndElements
+\$Periodic
+3
+0 3 1
+0
+1
+3 1
+0 4 2
+0
+1
+4 2
+1 2 1
+0
+2
+3 1
+4 2
+\$EndPeriodic
+"""
+
+# Old-style partitioned MSH 2.2: tags are physical, elementary, #partitions, partition.
+partitioned(version, tags) = """
+\$MeshFormat
+$version 0 8
+\$EndMeshFormat
+\$Nodes
+4
+1 0 0 0
+2 1 0 0
+3 1 1 0
+4 0 1 0
+\$EndNodes
+\$Elements
+2
+1 2 $(length(tags[1])) $(join(tags[1], ' ')) 1 2 3
+2 2 $(length(tags[2])) $(join(tags[2], ' ')) 1 3 4
+\$EndElements
+"""
+
+function with_file(f, text)
+    path = tempname() * ".msh"
+    write(path, text)
+    try
+        return f(path)
+    finally
+        rm(path; force = true)
+    end
+end
+
+function opened(f, text)
+    with_file(text) do path
+        API.initialize()
+        try
+            API.open(path)
+            return f()
+        finally
+            API.finalize()
+        end
+    end
+end
+
+@testset "A.open accepts what Gmsh opens" begin
+    @testset "inverted and hanging tetrahedra" begin
+        opened(NEGATIVE_TET) do
+            types, tags, nodes = API.mesh.get_elements(3)
+            @test types == [4] && nodes == [[1, 3, 2, 4]]
+        end
+        opened(HANGING) do
+            _, tags, nodes = API.mesh.get_elements(3)
+            @test length(tags[1]) == 2 && length(API.mesh.get_nodes()[1]) == 7
+            out = tempname() * ".msh"
+            API.option("Mesh.MshFileVersion", 4.1)
+            API.write(out)
+            API.initialize()
+            API.open(out)
+            @test API.mesh.get_elements(3)[3] == nodes
+            rm(out)
+        end
+    end
+
+    @testset "boundary entities are listed once" begin
+        opened(SEAM) do
+            @test [b[2] for b in API.model.get_boundary([(2, 1)], false, false, false)] == [1, 2]
+        end
+    end
+
+end
+
+end # module

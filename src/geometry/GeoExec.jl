@@ -13470,8 +13470,13 @@ function _geo_mixed_simplex_mesh(mixed::MixedMesh,caller::AbstractString)
     end
     mesh=Mesh(mixed.coords;segs=segs,tris=tris,tets=tets,
         seg_tag=st,tri_tag=tt,tet_tag=qt)
-    # `read_msh` validates the folded mesh; keep the same gate on this path.
-    diagnostic=validate(mesh)
+    # The folded mesh is only the geometry carrier of a file Gmsh itself reads
+    # verbatim, so inverted or flat tetrahedra, hanging nodes and non-manifold
+    # surface patches are legitimate input. Non-finite coordinates and
+    # duplicated cells are still rejected.
+    diagnostic=validate(mesh;require_positive_tets=false,allow_flat_tets=true,
+        allow_degenerate_segs=true,allow_degenerate_tris=true,require_manifold_tris=false,
+        require_tet_topology=false)
     diagnostic.ok || throw(ArgumentError(
         "$caller: merged mesh is invalid — " * join(diagnostic.messages,"; ")))
     return mesh
@@ -13679,8 +13684,16 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
         # last-endpoint convention. Non-partitioned imports retain the
         # file-signed bounds verbatim (certificate transport).
         unsigned_points=dim==1 && mixed.partition_data!==nothing
+        listed=entity.boundaries
+        if dim>=2
+            # `GFace::setBoundEdges` / `GRegion::setBoundFaces` keep an entity
+            # once: a seam curve listed twice (both signs) stays one boundary
+            # entity, with the sign of its first occurrence.
+            seen=Set{Int}()
+            listed=[b for b in listed if abs(Int(b)) in seen ? false : (push!(seen,abs(Int(b)));true)]
+        end
         record.boundary=NTuple{2,Int}[(dim-1,
-            unsigned_points ? abs(Int(b)) : Int(b)) for b in entity.boundaries]
+            unsigned_points ? abs(Int(b)) : Int(b)) for b in listed]
     end
     for (key,name) in mixed.physical_names
         get!(m.physical_names,key,name)
