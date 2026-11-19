@@ -11,6 +11,17 @@ end
 
 include("ModelMeshEmittedProjection.jl")
 
+# Tables derived from an authority's mesh, built when first asked for and kept
+# with the authority, so that the producers of a pass share one instead of each
+# building its own from every node. They are no part of what an authority
+# means: two authorities of one mesh differ at most in what is cached here.
+mutable struct _ModelMeshDerived
+    label_rows::Union{Nothing,Dict{UInt64,Int}}
+    label_max::Union{Nothing,UInt64}
+end
+_ModelMeshDerived()=_ModelMeshDerived(nothing,nothing)
+Base.show(io::IO,::_ModelMeshDerived)=print(io,"_ModelMeshDerived()")
+
 struct _ModelMeshAuthority
     mesh::Union{Nothing,MixedMesh}
     products::Dict{Tuple{Int,Int32},_ModelMeshProduct}
@@ -23,6 +34,38 @@ struct _ModelMeshAuthority
     carrier_cells::Vector{Vector{Union{Nothing,UInt64}}}
     surface_constructor_inputs::Dict{Tuple{Int,Int32},MixedMesh}
     emitted_geometry::Union{Nothing,_ModelMeshEmittedReceipt}
+    derived::_ModelMeshDerived
+end
+
+# A reconstruction over another mesh starts without derived tables.
+_ModelMeshAuthority(mesh,products,done,private_rank,native_inputs,carrier,carrier_rows,
+        producer_rows,carrier_cells,surface_constructor_inputs,emitted_geometry)=
+    _ModelMeshAuthority(mesh,products,done,private_rank,native_inputs,carrier,carrier_rows,
+        producer_rows,carrier_cells,surface_constructor_inputs,emitted_geometry,
+        _ModelMeshDerived())
+
+# The row of every node label of the actual mesh. Read-only: it is shared by
+# everything that holds this authority.
+function _model_mesh_label_rows(authority::_ModelMeshAuthority)
+    derived=authority.derived
+    rows=derived.label_rows
+    if rows===nothing
+        rows=Dict(tag=>row for (row,tag) in
+            enumerate(authority.mesh.entity_data.external_node_tags))
+        derived.label_rows=rows
+    end
+    return rows
+end
+
+# The largest node label of the actual mesh, zero for an empty one.
+function _model_mesh_label_max(authority::_ModelMeshAuthority)
+    derived=authority.derived
+    value=derived.label_max
+    if value===nothing
+        value=maximum(authority.mesh.entity_data.external_node_tags;init=UInt64(0))
+        derived.label_max=value
+    end
+    return value
 end
 
 # Every authority reconstruction invalidates the old emitted constructor receipt.
@@ -552,7 +595,7 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
         end
         return _ModelMeshAuthority(authority.mesh,authority.products,authority.done,
             authority.private_rank,authority.native_inputs,authority.carrier,authority.carrier_rows,
-            authority.producer_rows,authority.carrier_cells,inputs)
+            authority.producer_rows,authority.carrier_cells,inputs,nothing,authority.derived)
     end
     bound=Dict{Tuple{Int,Int32},MixedMesh}()
     for (owner,constructor) in inputs
@@ -581,7 +624,7 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
     end
     return _ModelMeshAuthority(authority.mesh,authority.products,authority.done,
         authority.private_rank,authority.native_inputs,authority.carrier,authority.carrier_rows,
-        authority.producer_rows,authority.carrier_cells,bound)
+        authority.producer_rows,authority.carrier_cells,bound,nothing,authority.derived)
 end
 
 function _model_mesh_with_empty_surface_product(authority::_ModelMeshAuthority,owner,rows;
@@ -598,7 +641,7 @@ function _model_mesh_with_empty_surface_product(authority::_ModelMeshAuthority,o
     products[owner]=_ModelMeshProduct(owner,Int32.(rows),ElementBlock[],Vector{UInt64}[])
     return _ModelMeshAuthority(authority.mesh,products,authority.done,authority.private_rank,
         authority.native_inputs,authority.carrier,authority.carrier_rows,authority.producer_rows,
-        authority.carrier_cells,authority.surface_constructor_inputs)
+        authority.carrier_cells,authority.surface_constructor_inputs,nothing,authority.derived)
 end
 
 function _model_mesh_with_producer_rows(authority::_ModelMeshAuthority,producer_rows;
@@ -615,7 +658,7 @@ function _model_mesh_with_producer_rows(authority::_ModelMeshAuthority,producer_
     # inputs stay bound to the same actual products.
     return _ModelMeshAuthority(authority.mesh,authority.products,authority.done,
         authority.private_rank,authority.native_inputs,authority.carrier,authority.carrier_rows,rows,
-        authority.carrier_cells,authority.surface_constructor_inputs)
+        authority.carrier_cells,authority.surface_constructor_inputs,nothing,authority.derived)
 end
 
 function _model_mesh_with_curve_births(authority::_ModelMeshAuthority,births;

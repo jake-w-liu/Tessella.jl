@@ -60,6 +60,7 @@ mutable struct _ModelMeshLog
     rank::Memory{UInt64}
     carrier_rows::Memory{Int32}
     rank_max::UInt64
+    label_max::UInt64
     node_rows::Dict{UInt64,Int32}
     cells::Int
     types::Vector{Int}
@@ -168,7 +169,8 @@ function _model_mesh_log(authority::_ModelMeshAuthority;caller="mesh authority")
         _model_mesh_reserve(data.external_node_tags,count,capacity),
         _model_mesh_reserve(authority.private_rank,count,capacity),
         _model_mesh_row_numbers(capacity),
-        maximum(authority.private_rank;init=UInt64(0)),node_rows,cells,
+        maximum(authority.private_rank;init=UInt64(0)),
+        maximum(data.external_node_tags;init=UInt64(0)),node_rows,cells,
         types,counts,cell_nodes,cell_physical,cell_owners,cell_elementary,cell_tags,
         cell_bindings,block_index,element_tags,data.entities,owned,selected,
         Tuple{Int,Int32}[],Set{Tuple{Int,Int32}}(),copy(authority.products),
@@ -234,6 +236,7 @@ function _model_mesh_log_node!(log::_ModelMeshLog,point::NTuple{3,Float64},
     log.node_tags[row]=tag
     log.rank[row]=rank
     log.rank_max=rank
+    tag>log.label_max && (log.label_max=tag)
     log.node_rows[tag]=Int32(row)
     log.nodes=row
     push!(get!(()->Int32[],log.owned,owner),Int32(row))
@@ -393,7 +396,7 @@ function _model_mesh_log_authority!(log::_ModelMeshLog,done,completed=nothing)
         _model_mesh_prefix(log.cell_bindings[bi],(log.counts[bi],)) for bi in eachindex(log.types)]
     return _ModelMeshAuthority(mesh,log.products,log.done,rank,log.native_inputs,mesh,
         _model_mesh_prefix(log.carrier_rows,(log.nodes,)),log.producer_rows,bindings,
-        Dict{Tuple{Int,Int32},MixedMesh}())
+        Dict{Tuple{Int,Int32},MixedMesh}(),nothing,_ModelMeshDerived(nothing,log.label_max))
 end
 
 # Bind one entity's producer rows, with the checks `_model_mesh_with_producer_rows`
@@ -410,6 +413,7 @@ end
 function _model_mesh_same(a,b)
     a===b && return true
     typeof(a)===typeof(b) || return false
+    a isa _ModelMeshDerived && return true
     if a isa AbstractArray
         size(a)==size(b) || return false
         for index in eachindex(a)

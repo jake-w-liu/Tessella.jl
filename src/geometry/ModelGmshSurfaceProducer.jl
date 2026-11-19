@@ -604,7 +604,8 @@ function _gmsh_native_surface_lower_input(m,options,input,high_water,caller)
     if input!==nothing
         input.mesh!==nothing || throw(ArgumentError(
             "$caller: native Surface input has no actual lower-dimensional products"))
-        maximum_tag=maximum(input.mesh.entity_data.external_node_tags;init=UInt64(0))
+        maximum_tag=input isa _ModelMeshAuthority ? _model_mesh_label_max(input) :
+            maximum(input.mesh.entity_data.external_node_tags;init=UInt64(0))
         limit=high_water===nothing ? maximum_tag : UInt64(high_water)
         maximum_tag<=limit || throw(ArgumentError(
             "$caller: native Surface high water omits a consumed actual node label"))

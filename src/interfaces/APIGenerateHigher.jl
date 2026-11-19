@@ -2816,14 +2816,12 @@ end
 
 function _higher_volume_input_classification(assembly,m,mesh::Union{Mesh,MixedMesh},input,tag,
                                             source_tags,caller;
-                                            boundary_writeback=nothing,actual_rows=nothing)
+                                            boundary_writeback=nothing)
     length(source_tags)==nnodes(mesh) && allunique(source_tags) || throw(ArgumentError(
         "$caller: native Volume[$tag] lacks a unique complete row UID binding"))
     actual=input.mesh;data=actual.entity_data
     rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(source_tags))
-    # `actual_rows` is this table for `input`, shared by the Regions of a pass.
-    old_rows=actual_rows===nothing ?
-        Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags)) : actual_rows
+    old_rows=Model._model_mesh_label_rows(input)
     closure=Model._model_mesh_projection_closure(m,3,tag,caller)
     primary=(3,Int32(tag))
     node_entities=fill(primary,nnodes(mesh))
@@ -3739,7 +3737,6 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     end
     volume_tags=staged ? Int[] : sort!(meshed)
     assembly_index=_HigherAssemblyIndex()
-    actual_rows=nothing
     # `General.NumThreads` detaches runs of independent Regions: each
     # eligible unit produces its receipt on a transaction copy under
     # `Threads.@threads`, and the unchanged serial merge below replays or
@@ -3862,10 +3859,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
                 source_rows,source_row_retained,assembly.caller;grid_receipt=source_emission.grid)
         elseif native_rows
-            actual_rows===nothing && (actual_rows=Dict(uid=>row for (row,uid) in
-                enumerate(input.mesh.entity_data.external_node_tags)))
             _higher_volume_input_classification(assembly,m,mesh,input,tag,source_rows,assembly.caller;
-                boundary_writeback=wb_receipt,actual_rows)
+                boundary_writeback=wb_receipt)
         else
             _classify_cached_mesh(m,_classification_skeleton(
                 mesh,get(m.meshing.reverse,(3,tag),false)),3,tag,mesh;_extrude_scope=scope,

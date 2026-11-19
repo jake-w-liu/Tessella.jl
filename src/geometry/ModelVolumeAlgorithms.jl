@@ -22,7 +22,10 @@ function _model_native_volume_optimizer_movable(mesh,births,input)
         actual=input.mesh
         data=actual isa MixedMesh ? actual.entity_data : nothing
         if data!==nothing
-            rows=Dict(tag=>row for (row,tag) in enumerate(data.external_node_tags))
+            # One Region reads a few of these rows; the table of all of them is
+            # the authority's, not rebuilt for every Region.
+            rows=input isa _ModelMeshAuthority ? _model_mesh_label_rows(input) :
+                Dict(tag=>row for (row,tag) in enumerate(data.external_node_tags))
             for (row,tag) in enumerate(births.node_tags)
                 row<=nnodes(mesh) || break
                 binding=get(rows,tag,0)
