@@ -10307,7 +10307,11 @@ function _volume_cell_signed_volume(coords::AbstractMatrix{Float64},
             a2=nodes[f[k],cell];a3=nodes[f[k+1],cell]
             pb=(coords[1,a2],coords[2,a2],coords[3,a2])
             pc=(coords[1,a3],coords[2,a3],coords[3,a3])
-            value=tet_signed_volume(anchor,pa,pb,pc)
+            # A fan triangle through the anchor spans an exactly zero volume;
+            # answering it directly skips the exact fallback the degenerate
+            # determinant would take, with the same value.
+            value=(a1==first_node || a2==first_node || a3==first_node) ? 0.0 :
+                tet_signed_volume(anchor,pa,pb,pc)
             total,correction=_model_compensated_add(
                 total,correction,reverse_face ? -value : value)
         end

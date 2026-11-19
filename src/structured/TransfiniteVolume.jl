@@ -618,6 +618,93 @@ _certify_recombined_boundary(shadow, tris, quads) =
     StructuredRecombine._certify_recombined_boundary(
         "mesh_transfinite_volume", shadow, tris, quads)
 
+# Grid form of `_certify_recombined_boundary` for the six-tet-per-cell shadow
+# emitted in `_emit_six_recombined_cells!` order (i outer, k inner). Every
+# cell template partitions its cell (`_shadow_partitions_reference`) and every
+# shadow tetrahedron is certified positively oriented on emission, so the
+# shadow boundary is exactly the set of shadow faces lying in one of the six
+# grid boundary planes; only cells touching the boundary can own one. Each
+# such face must belong to exactly one shadow tetrahedron, and the emitted
+# boundary cells must cover them exactly — the same coverage audit as the
+# global extraction, at boundary rather than volume cost.
+function _certify_recombined_grid_boundary(shadow, tris, quads,
+                                           nu::Int, nv::Int, nw::Int)
+    npu = nu + 1; npv = nv + 1
+    layer = npu * npv
+    @inline function plane_mask(node::Int32)
+        index = Int(node) - 1
+        k, rest = divrem(index, layer)
+        j, i = divrem(rest, npu)
+        return (i == 0 ? 0x01 : 0x00) | (i == nu ? 0x02 : 0x00) |
+               (j == 0 ? 0x04 : 0x00) | (j == nv ? 0x08 : 0x00) |
+               (k == 0 ? 0x10 : 0x00) | (k == nw ? 0x20 : 0x00)
+    end
+    remaining = Set{NTuple{3,Int32}}()
+    sizehint!(remaining, size(tris, 2) + 2 * size(quads, 2))
+    @inbounds for i in 0:nu-1, j in 0:nv-1, k in 0:nw-1
+        (i == 0 || i == nu - 1 || j == 0 || j == nv - 1 ||
+         k == 0 || k == nw - 1) || continue
+        cell = (i * nv + j) * nw + k
+        for t in 6cell+1:6cell+6
+            a = shadow[1, t]; b = shadow[2, t]; c = shadow[3, t]; d = shadow[4, t]
+            for (p, q, r) in ((a, b, c), (a, b, d), (a, c, d), (b, c, d))
+                plane_mask(p) & plane_mask(q) & plane_mask(r) == 0 && continue
+                key = StructuredRecombine._canon3(p, q, r)
+                key in remaining && throw(ErrorException(
+                    "mesh_transfinite_volume: recombined volume decomposition " *
+                    "produced face incidence 2 on the boundary"))
+                push!(remaining, key)
+            end
+        end
+    end
+    @inbounds for t in axes(tris, 2)
+        key = StructuredRecombine._canon3(tris[1, t], tris[2, t], tris[3, t])
+        key in remaining || throw(ErrorException(
+            "mesh_transfinite_volume: emitted boundary triangle $t is not on " *
+            "the volume boundary"))
+        delete!(remaining, key)
+    end
+    @inbounds for q in axes(quads, 2)
+        a = quads[1, q]; b = quads[2, q]; c = quads[3, q]; d = quads[4, q]
+        covered = 0
+        for face in (StructuredRecombine._canon3(a, b, c),
+                     StructuredRecombine._canon3(a, c, d),
+                     StructuredRecombine._canon3(a, b, d),
+                     StructuredRecombine._canon3(b, c, d))
+            if face in remaining
+                delete!(remaining, face)
+                covered += 1
+            end
+        end
+        covered == 2 || throw(ErrorException(
+            "mesh_transfinite_volume: emitted boundary quadrangle $q does " *
+            "not cover exactly two boundary faces"))
+    end
+    isempty(remaining) || throw(ErrorException(
+        "mesh_transfinite_volume: emitted boundary leaves " *
+        "$(length(remaining)) volume boundary faces uncovered"))
+    return nothing
+end
+
+# The recombined cell templates reproduce Gmsh's six-tet partition of each
+# cell (`CREATE_SIM_1`…`CREATE_SIM_6`) up to vertex order. The templates are
+# position independent, so one symbolic cell certifies every cell.
+function _shadow_partitions_reference(all_recombined::Bool)
+    a, b, c, d, e, f, g, h = Int32.(1:8)
+    reference = Set(StructuredRecombine._canon4(x...) for x in
+        ((a, b, c, d), (b, c, d, e), (d, e, c, f), (b, c, e, g),
+         (c, f, e, g), (e, f, h, g)))
+    shadow = Set{NTuple{4,Int32}}()
+    cells = all_recombined ? (((a, b, g, c, d, e, h, f), _SHADOW_HEX),) :
+        (((a, b, c, d, e, f), _SHADOW_PRISM_1),
+         ((g, c, b, h, f, e), _SHADOW_PRISM_2))
+    for (vertices, decomp) in cells, tet in decomp
+        push!(shadow, StructuredRecombine._canon4(
+            vertices[tet[1]], vertices[tet[2]], vertices[tet[3]], vertices[tet[4]]))
+    end
+    return shadow == reference
+end
+
 _recombined_mixed_mesh(coords, tris, tri_tags, quads, quad_tags, hexes,
                        prisms, volume_tag::Int32) =
     StructuredRecombine._recombined_mixed_mesh(
@@ -1567,13 +1654,7 @@ function _transfinite_volume_recombined(converted_corners, raw_faces,
     # subdivision; the partial v/u-free tilings are instead certified by
     # orientation, conformity, and boundary coverage below.
     if all_recombined || (mask[1] && mask[2] && mask[3] && mask[4])
-        reference = Matrix{Int32}(undef, 4, tet_count)
-        _emit_six_simplex_tets!(reference, coords, node_id, nu, nv, nw) ==
-            tet_count || throw(ErrorException(
-            "mesh_transfinite_volume: internal reference partition count " *
-            "invariant failed"))
-        _canonical_tets(shadow) == _canonical_tets(reference) ||
-            throw(ErrorException(
+        _shadow_partitions_reference(all_recombined) || throw(ErrorException(
             "mesh_transfinite_volume: recombined cells do not partition " *
             "the reference simplex mesh"))
     end
@@ -1636,7 +1717,7 @@ function _transfinite_volume_recombined(converted_corners, raw_faces,
              converted_corners[4], converted_corners[5]),
             6, "mesh_transfinite_volume", "affine block")
     end
-    _certify_recombined_boundary(shadow, tris, quads)
+    _certify_recombined_grid_boundary(shadow, tris, quads, nu, nv, nw)
     mesh = _recombined_mixed_mesh(coords, tris, tri_tags, quads, quad_tags,
                                   hexes, prisms, converted_volume_tag)
     size(mesh.coords, 2) == node_count || throw(ErrorException(
