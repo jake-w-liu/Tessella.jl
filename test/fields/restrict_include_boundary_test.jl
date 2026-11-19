@@ -1,3 +1,5 @@
+module RestrictIncludeBoundaryTest
+
 using Test
 using Tessella
 
@@ -34,3 +36,5 @@ Field[6]=Min; Field[6].FieldsList={4,5}; Background Field=6;
     execution = execute_geo(path)
     @test Tessella.MeshTypes.nnodes(execution.mesh) == 51 + 14 + 35 + 15 - 4
 end
+
+end # module

@@ -1,3 +1,5 @@
+module ExtrudeGmshParityRegressionsTest
+
 using Test
 using Tessella
 
@@ -75,3 +77,5 @@ Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
     @test rev.counts[3] == 171
     @test rev.counts[5] == 108
 end
+
+end # module

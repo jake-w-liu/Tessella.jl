@@ -1,3 +1,5 @@
+module TransfiniteEllipticSmoothingTest
+
 using Test
 using Tessella
 
@@ -53,3 +55,5 @@ end
         A.finalize()
     end
 end
+
+end # module

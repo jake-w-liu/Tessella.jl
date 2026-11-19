@@ -1,3 +1,5 @@
+module ApiTransfiniteAutomaticChordsTest
+
 using Test
 using Tessella
 
@@ -32,3 +34,5 @@ using Tessella
         A.finalize()
     end
 end
+
+end # module
