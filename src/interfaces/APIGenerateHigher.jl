@@ -3472,7 +3472,7 @@ end
 function _higher_surface_constructor_publication(authority,constructors,cells,node_map,caller)
     rebound=Dict{Tuple{Int,Int32},MixedMesh}()
     for (owner,source) in constructors
-        constructor=deepcopy(source);data=constructor.entity_data
+        constructor=Elements._detached_mixed_copy(source);data=constructor.entity_data
         data!==nothing || throw(ArgumentError(
             "$caller: Surface constructor publication lacks its actual UID metadata"))
         nodes=UInt64[]

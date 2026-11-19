@@ -816,6 +816,12 @@ struct MixedEntity
         return new(d,t,converted,physical,boundary,embedded,parts,
                    (pdim,Int32(ptag)))
     end
+    # Fields taken from a record that passed the checks above.
+    MixedEntity(::_TrustedMixedStorage,dim::Int,tag::Int32,bbox::NTuple{6,Float64},
+                physical_tags::Vector{Int32},boundaries::Vector{Int32},
+                embedded_curves::Vector{Int32},partitions::Vector{Int32},
+                parent::Tuple{Int,Int32})=
+        new(dim,tag,bbox,physical_tags,boundaries,embedded_curves,partitions,parent)
 end
 
 function MixedEntity(dim::Integer,tag::Integer,bounds;
@@ -1413,6 +1419,83 @@ function _copy_mixed_entity_data(data::MixedEntityData)
         external_node_tags=data.external_node_tags,
         block_entities=data.block_entities,
         external_element_tags=data.external_element_tags,_native_mesh_tags=data.native_mesh_tags)
+end
+
+# A detached copy of a record that exists, and so passed its constructor.
+_detached_mixed_entity(entity::MixedEntity)=MixedEntity(_TRUSTED_MIXED_STORAGE,
+    entity.dim,entity.tag,entity.bbox,copy(entity.physical_tags),copy(entity.boundaries),
+    copy(entity.embedded_curves),copy(entity.partitions),entity.parent)
+
+_detached_mixed_parameters(values)=Union{Nothing,Vector{Float64}}[
+    value===nothing ? nothing : copy(value) for value in values]
+
+# The mesh that
+#     MixedMesh(coords,blocks;physical_names,elementary_entities,
+#         entity_data=MixedEntityData(entities;...,_native_mesh_tags))
+# builds, for parts cut from a mesh that passed those constructors already.
+# The public route copies every part three times and checks it twice; a pass
+# that cuts one such mesh per entity spends most of its time there. Here the
+# arrays are handed over as they are, each record is copied once, and the
+# structure is checked once, by the same `_assert_mixed_structure`.
+# `entities` and `physical_names` are still the source's own tables.
+function _detached_mixed_mesh(coords::Matrix{Float64},blocks::Vector{MixedElementBlock},
+        physical_names,entities,node_entities::Vector{Tuple{Int,Int32}},
+        node_parametric::Vector{Union{Nothing,Vector{Float64}}},
+        external_node_tags::Vector{UInt64},block_entities::Vector{Vector{Int32}},
+        external_element_tags::Vector{Vector{UInt64}},
+        elementary_entities::Vector{Vector{Int32}},native_mesh_tags::Bool)
+    # Two insertion passes, like the two copies the public route makes, so
+    # the table keeps the iteration order it would have had.
+    inserted=Dict{Tuple{Int,Int},MixedEntity}()
+    for (key,entity) in entities
+        inserted[(Int(key[1]),Int(key[2]))]=entity
+    end
+    copied=Dict{Tuple{Int,Int},MixedEntity}()
+    for (key,entity) in inserted
+        copied[key]=_detached_mixed_entity(entity)
+    end
+    data=MixedEntityData(_OWNED_MIXED_ENTITY_DATA,copied,node_entities,node_parametric,
+        external_node_tags,block_entities,external_element_tags,native_mesh_tags)
+    return MixedMesh(_OWNED_MIXED_MESH,coords,blocks,
+        _copy_physical_names(physical_names,"MixedMesh"),data,elementary_entities,
+        MixedPeriodicLink[],MshAncillarySection[],MshDataSection[],nothing)
+end
+
+# `deepcopy(mesh)` for a mesh of ordinary blocks without links, sections or
+# partitions, whose arrays are not shared between its fields: every array and
+# record copied once, every table refilled in its own order as `deepcopy`
+# refills it. Anything else takes `deepcopy` itself.
+function _detached_mixed_copy(mesh::MixedMesh)
+    data=mesh.entity_data;elementary=mesh.elementary_entities
+    (isempty(mesh.periodic_links) && isempty(mesh.ancillary_sections) &&
+     isempty(mesh.data_sections) && mesh.partition_data===nothing &&
+     all(block->block isa ElementBlock,mesh.blocks)) || return deepcopy(mesh)
+    if data!==nothing && elementary!==nothing
+        for owners in elementary,other in data.block_entities
+            owners===other && return deepcopy(mesh)
+        end
+    end
+    copied=nothing
+    if data!==nothing
+        entities=empty(data.entities)
+        for (key,entity) in data.entities
+            entities[key]=_detached_mixed_entity(entity)
+        end
+        copied=MixedEntityData(_OWNED_MIXED_ENTITY_DATA,entities,copy(data.node_entities),
+            _detached_mixed_parameters(data.node_parametric),copy(data.external_node_tags),
+            Vector{Int32}[copy(owners) for owners in data.block_entities],
+            Vector{UInt64}[copy(tags) for tags in data.external_element_tags],
+            data.native_mesh_tags)
+    end
+    names=empty(mesh.physical_names)
+    for (key,name) in mesh.physical_names
+        names[key]=name
+    end
+    return MixedMesh(_TRUSTED_MIXED_STORAGE,copy(mesh.coords),
+        MixedElementBlock[ElementBlock(_TRUSTED_MIXED_STORAGE,block.msh,copy(block.nodes),
+            copy(block.tags)) for block in mesh.blocks],names,copied,
+        elementary===nothing ? nothing : Vector{Int32}[copy(owners) for owners in elementary],
+        MixedPeriodicLink[],MshAncillarySection[],MshDataSection[],nothing)
 end
 
 function _copy_mixed_elementary_entities(values,context::AbstractString)

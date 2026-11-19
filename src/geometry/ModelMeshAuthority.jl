@@ -387,14 +387,29 @@ function _model_mesh_product(authority::_ModelMeshAuthority,dim::Int,tag::Int;
                             for block in blocks]
         rows=produced
     end
-    owners=[fill(Int32(tag),size(block.nodes,2)) for block in blocks]
     entities=_model_mesh_product_entities(source,product.owner,rows)
-    metadata=Elements._native_mixed_entity_data(entities;
-        node_entities=data.node_entities[rows],node_parametric=data.node_parametric[rows],
-        external_node_tags=data.external_node_tags[rows],block_entities=owners,
-        external_element_tags=product.element_tags)
-    return MixedMesh(source.coords[:,rows],blocks;
-        physical_names=source.physical_names,entity_data=metadata,elementary_entities=owners)
+    # Every part is cut from the validated actual mesh: copy each once and
+    # check the result once, instead of the public constructors' three copies.
+    return Elements._detached_mixed_mesh(source.coords[:,rows],
+        MixedElementBlock[ElementBlock(Elements._TRUSTED_MIXED_STORAGE,block.msh,
+            copy(block.nodes),copy(block.tags)) for block in blocks],
+        source.physical_names,entities,data.node_entities[rows],
+        Elements._detached_mixed_parameters(@view data.node_parametric[rows]),
+        data.external_node_tags[rows],
+        Vector{Int32}[fill(Int32(tag),size(block.nodes,2)) for block in blocks],
+        Vector{UInt64}[copy(tags) for tags in product.element_tags],
+        Vector{Int32}[fill(Int32(tag),size(block.nodes,2)) for block in blocks],true)
+end
+
+# The node labels of one linear triangle or quadrangle in increasing order,
+# padded to four: the cell's support without a vector per cell.
+@inline function _model_surface_cell_support(tags::Vector{UInt64},nodes::Matrix{Int32},column::Int)
+    a=tags[nodes[1,column]];b=tags[nodes[2,column]];c=tags[nodes[3,column]]
+    a,b=minmax(a,b);b,c=minmax(b,c);a,b=minmax(a,b)
+    size(nodes,1)==3 && return (a,b,c,UInt64(0))
+    d=tags[nodes[4,column]]
+    c,d=minmax(c,d);b,c=minmax(b,c);a,b=minmax(a,b)
+    return (a,b,c,d)
 end
 
 function _model_surface_constructor_binding(actual::MixedMesh,constructor::MixedMesh,
@@ -420,7 +435,7 @@ function _model_surface_constructor_binding(actual::MixedMesh,constructor::Mixed
             isequal(receipt.node_parametric[row],data.node_parametric[actual_row]) ||
             throw(ArgumentError("$caller: Surface constructor input changes bound node $uid"))
     end
-    cells=Dict{UInt64,Tuple{Int,Int32,Int32,Vector{UInt64}}}()
+    cells=Dict{UInt64,Tuple{Int,Int32,Int32,NTuple{4,UInt64}}}()
     length(actual.blocks)==length(data.external_element_tags)==length(data.block_entities) ||
         throw(ArgumentError("$caller: actual Surface cell metadata does not align"))
     for (block,labels,owners) in zip(actual.blocks,data.external_element_tags,data.block_entities)
@@ -429,7 +444,7 @@ function _model_surface_constructor_binding(actual::MixedMesh,constructor::Mixed
         for (column,label) in enumerate(labels)
             haskey(cells,label) && throw(ArgumentError(
                 "$caller: actual Surface cells repeat constructor UID $label"))
-            support=sort!(data.external_node_tags[block.nodes[:,column]])
+            support=_model_surface_cell_support(data.external_node_tags,block.nodes,column)
             cells[label]=(Int(block.msh),owners[column],block.tags[column],support)
         end
     end
@@ -443,8 +458,11 @@ function _model_surface_constructor_binding(actual::MixedMesh,constructor::Mixed
             label in seen && throw(ArgumentError(
                 "$caller: Surface constructor input repeats cell UID $label"))
             push!(seen,label)
-            support=sort!(receipt.external_node_tags[block.nodes[:,column]])
-            get(cells,label,nothing)==(Int(block.msh),owners[column],block.tags[column],support) || throw(ArgumentError(
+            # Actual cells are linear triangles and quadrangles; any other
+            # constructor cell has no equal among them.
+            block.msh in (2,3) && get(cells,label,nothing)==(Int(block.msh),owners[column],
+                block.tags[column],_model_surface_cell_support(receipt.external_node_tags,
+                    block.nodes,column)) || throw(ArgumentError(
                 "$caller: Surface constructor input changes cell $label owner or support"))
         end
     end
@@ -490,12 +508,24 @@ function _model_surface_constructor_input(production,actual::MixedMesh,
     end
     cursor==length(production.element_tags)+1 || throw(ArgumentError(
         "$caller: Surface constructor cells do not cover their birth labels"))
-    metadata=Elements._native_mixed_entity_data(data.entities;
-        node_entities=copy(data.node_entities),node_parametric=deepcopy(data.node_parametric),
-        external_node_tags=copy(data.external_node_tags),
-        block_entities=deepcopy(data.block_entities),external_element_tags=labels)
-    result=MixedMesh(copy(actual.coords),blocks;physical_names=copy(actual.physical_names),
-        entity_data=metadata,elementary_entities=deepcopy(actual.elementary_entities))
+    elementary=actual.elementary_entities
+    result=if elementary===nothing
+        metadata=Elements._native_mixed_entity_data(data.entities;
+            node_entities=copy(data.node_entities),node_parametric=deepcopy(data.node_parametric),
+            external_node_tags=copy(data.external_node_tags),
+            block_entities=deepcopy(data.block_entities),external_element_tags=labels)
+        MixedMesh(copy(actual.coords),blocks;physical_names=copy(actual.physical_names),
+            entity_data=metadata)
+    else
+        # The same mesh from one copy of each part: `actual` is a validated
+        # product and the blocks above passed their own constructor.
+        Elements._detached_mixed_mesh(copy(actual.coords),
+            MixedElementBlock[block for block in blocks],actual.physical_names,data.entities,
+            copy(data.node_entities),Elements._detached_mixed_parameters(data.node_parametric),
+            copy(data.external_node_tags),
+            Vector{Int32}[copy(owners) for owners in data.block_entities],labels,
+            Vector{Int32}[copy(owners) for owners in elementary],true)
+    end
     _model_surface_constructor_binding(actual,result,caller)
     return result
 end
