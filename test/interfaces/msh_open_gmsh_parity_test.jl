@@ -155,6 +155,37 @@ const PERIODIC = """
 \$EndPeriodic
 """
 
+# MSH 4.0 ASCII (version printed as "4" by Gmsh): entity-tag-first block
+# headers, node and element records interleaved, a six-value box for Points.
+const MSH40 = """
+\$MeshFormat
+4 0 8
+\$EndMeshFormat
+\$PhysicalNames
+1
+3 1 "all"
+\$EndPhysicalNames
+\$Entities
+1 0 0 1
+1 0 0 0 0 0 0 0
+1 0 0 0 1 1 1 1 1 0
+\$EndEntities
+\$Nodes
+2 4
+1 0 0 1
+1 0 0 0
+1 3 0 3
+2 1 0 0
+3 0 1 0
+4 0 0 1
+\$EndNodes
+\$Elements
+1 1
+1 3 4 1
+1 1 3 2 4
+\$EndElements
+"""
+
 # Old-style partitioned MSH 2.2: tags are physical, elementary, #partitions, partition.
 partitioned(version, tags) = """
 \$MeshFormat
@@ -225,6 +256,14 @@ end
         end
         opened(replace(NEGATIVE_TET, "4.1 0 8" => "4.2 0 8")) do
             @test length(API.mesh.get_nodes()[1]) == 4
+        end
+    end
+
+    @testset "MSH 4.0 ASCII" begin
+        opened(MSH40) do
+            @test API.mesh.get_nodes()[1] == UInt64[1, 2, 3, 4]
+            @test API.mesh.get_elements(3)[3] == [UInt64[1, 3, 2, 4]]
+            @test API.model.get_physical_name(3, 1) == "all"
         end
     end
 

@@ -38,8 +38,10 @@ detached state before publication. File suffix aliases are case insensitive,
 and filenames are passed directly to the reader as data.
 
 Like Gmsh, any 2.x file (2.0, 2.1, 2.2) is read with the MSH 2 layout and any
-version above 4.0 (4.1, 4.2, ...) with the MSH 4.1 layout; MSH 4.0 itself has a
-different layout and is rejected. Old-style MSH 2 partition numbers become
+version above 4.0 (4.1, 4.2, ...) with the MSH 4.1 layout. ASCII MSH 4.0 (the
+layout Gmsh 4.0 to 4.1 wrote; Gmsh 4.15.2 reads it as well) is rewritten to the
+4.1 layout and read by the same validating parser; binary 4.0 does not exist in
+Gmsh, and partitioned 4.0 files are rejected. Old-style MSH 2 partition numbers become
 partition entities as in `GModel::convertOldPartitioningToNewOne`. The geometry
 carrier of an imported mesh is not validated as a fresh mesh: inverted or flat
 tetrahedra, hanging nodes, non-manifold surface patches and zero-area triangles

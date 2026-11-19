@@ -3249,6 +3249,13 @@ function read_mixed_msh(path::AbstractString;
         "read_mixed_msh: file exceeds max_file_bytes=$(limits.max_file_bytes)"))
     open(path,"r") do io
         try
+            if _msh40_ascii_header(io)
+                # MSH 4.0 ASCII differs from 4.1 only in record layout; it is
+                # rewritten as 4.1 text and read by the one validating parser.
+                text=_msh40_to_41(io)
+                return _read_mixed_stream(IOBuffer(text),limits,tessella_extensions,
+                                          _source_identities,_factory_context;switch_tags)
+            end
             return _read_mixed_stream(io,limits,tessella_extensions,_source_identities,_factory_context;
                                       switch_tags)
         catch err
@@ -3256,6 +3263,125 @@ function read_mixed_msh(path::AbstractString;
             err isa EOFError && throw(ArgumentError("read_mixed_msh: truncated MSH file"))
             rethrow()
         end
+    end
+end
+
+# True when the stream starts with an ASCII `$MeshFormat` of version 4.0; the
+# stream position is restored either way.
+function _msh40_ascii_header(io)
+    mark=position(io)
+    try
+        first=strip(readline(io))
+        first=="\$MeshFormat" || return false
+        fields=split(strip(readline(io)))
+        return length(fields)==3 && fields[2]=="0" && tryparse(Float64,fields[1])==4.0
+    catch err
+        err isa InterruptException && rethrow()
+        return false
+    finally
+        seek(io,mark)
+    end
+end
+
+function _msh40_to_41(io)
+    try
+        lines=String[strip(line) for line in eachline(io)]
+        out=IOBuffer()
+        i=1
+        n=length(lines)
+        take_line()=(i<=n || throw(ArgumentError(
+            "read_mixed_msh: truncated MSH 4.0 file")); line=lines[i]; i+=1; line)
+        while i<=n
+            header=take_line()
+            if header=="\$MeshFormat"
+                take_line()
+                println(out,"\$MeshFormat
+4.1 0 8")
+            elseif header=="\$Entities"
+                println(out,header)
+                counts=parse.(Int,split(take_line()))
+                length(counts)==4 || throw(ArgumentError(
+                    "read_mixed_msh: malformed MSH 4.0 Entities header"))
+                println(out,join(counts,' '))
+                for dim in 0:3,_ in 1:counts[dim+1]
+                    fields=split(take_line())
+                    # 4.0 lists a six-value box for Points too.
+                    dim==0 && length(fields)>=7 && deleteat!(fields,5:7)
+                    println(out,join(fields,' '))
+                end
+            elseif header=="\$Nodes"
+                counts=parse.(Int,split(take_line()))
+                length(counts)==2 || throw(ArgumentError(
+                    "read_mixed_msh: malformed MSH 4.0 Nodes header"))
+                body=IOBuffer();low=typemax(UInt64);high=zero(UInt64)
+                for _ in 1:counts[1]
+                    block=split(take_line())
+                    length(block)==4 || throw(ArgumentError(
+                        "read_mixed_msh: malformed MSH 4.0 node-block header"))
+                    nodes=[split(take_line()) for _ in 1:parse(Int,block[4])]
+                    println(body,block[2]," ",block[1]," ",block[3]," ",block[4])
+                    for node in nodes
+                        tag=parse(UInt64,node[1])
+                        low=min(low,tag);high=max(high,tag)
+                        println(body,node[1])
+                    end
+                    for node in nodes
+                        println(body,join(node[2:end],' '))
+                    end
+                end
+                counts[2]==0 && (low=zero(UInt64))
+                println(out,"\$Nodes
+",counts[1]," ",counts[2]," ",low," ",high)
+                write(out,take!(body))
+            elseif header=="\$Elements"
+                counts=parse.(Int,split(take_line()))
+                length(counts)==2 || throw(ArgumentError(
+                    "read_mixed_msh: malformed MSH 4.0 Elements header"))
+                body=IOBuffer();low=typemax(UInt64);high=zero(UInt64)
+                for _ in 1:counts[1]
+                    block=split(take_line())
+                    length(block)==4 || throw(ArgumentError(
+                        "read_mixed_msh: malformed MSH 4.0 element-block header"))
+                    println(body,block[2]," ",block[1]," ",block[3]," ",block[4])
+                    for _ in 1:parse(Int,block[4])
+                        element=take_line()
+                        tag=parse(UInt64,first(split(element)))
+                        low=min(low,tag);high=max(high,tag)
+                        println(body,element)
+                    end
+                end
+                counts[2]==0 && (low=zero(UInt64))
+                println(out,"\$Elements
+",counts[1]," ",counts[2]," ",low," ",high)
+                write(out,take!(body))
+            elseif header=="\$Periodic"
+                println(out,header)
+                links=parse(Int,take_line())
+                println(out,links)
+                for _ in 1:links
+                    println(out,take_line())
+                    next=take_line()
+                    if startswith(next,"Affine")
+                        values=split(next)[2:end]
+                        println(out,length(values)," ",join(values,' '))
+                        next=take_line()
+                    else
+                        println(out,0)
+                    end
+                    println(out,next)
+                    for _ in 1:parse(Int,next)
+                        println(out,take_line())
+                    end
+                end
+            else
+                println(out,header)
+            end
+        end
+        return String(take!(out))
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError && rethrow()
+        throw(ArgumentError("read_mixed_msh: malformed MSH 4.0 file"))
     end
 end
 
