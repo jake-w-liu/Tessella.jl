@@ -184,7 +184,7 @@ _brep_pc_unneg(pc) =
 # spanning and lift logic treats circles and ellipses identically (`neg2d`
 # keeps the same periodic inner record).
 _brep_pc_iscirc(pc) = hasproperty(pc,:circ2d) ||
-    hasproperty(pc,:ellips2d) ||
+    hasproperty(pc,:ellips2d) || hasproperty(pc,:per2d) ||
     (hasproperty(pc,:neg2d) && _brep_pc_iscirc(pc.neg2d[1]))
 
 # Every stored pcurve kind the OCC face model produces — `lin2d`, `circ2d`,
@@ -804,6 +804,84 @@ function _brep_pc_line_on_cylinder(sg,o,d)
     p0=_brep_surface_uv(sg,o)
     sgn=_b3dot(d,sg.axis)>=0 ? 1.0 : -1.0
     return (lin2d=(p0,(0.0,sgn)),)
+end
+
+# ── exact conic sections with a fitted chart trace ──────────────────────────
+#
+# A plane cuts a sphere in a circle and a cylinder (obliquely) in an ellipse;
+# two spheres meet in a circle. The 3-D curve is exact even when its trace on
+# the curved face's chart is no line, and its trace on a plane is an exact
+# circ2d/ellips2d. Only the curved side's chart trace has to be fitted: a C1
+# cubic through exact chart points with exact chart velocities, refined until
+# it reproduces the conic to 1e-10·scale in space. The trace is laid out over
+# three turns ([-2π,4π]) and marked `per2d`, which makes it a natively
+# periodic pcurve like the conic itself — section spans may wrap the
+# parameter origin instead of being cut there.
+
+function _brep_conic_d1(curve,θ)
+    s,c=_gm_sincos(θ)
+    rx,ry=curve.kind===:circle ? (curve.r,curve.r) : (curve.rx,curve.ry)
+    return _b3add(_b3mul(curve.x,-s*rx),_b3mul(curve.y,c*ry))
+end
+
+# Chart trace of the closed conic `curve` on the curved face surface `sg`,
+# parametrized by the conic's own angle; `partner` is the other face of the
+# section (its distance field becomes the trace's level set). `nothing` when
+# the conic runs through a chart singularity or the fit does not converge —
+# the caller then falls back to the level-set tracer.
+function _brep_fit_conic_pc(sg,partner,curve)
+    fld,_=_brep_partner_field(partner)
+    uper=_brep_uperiod(sg);vper=_brep_vperiod(sg)
+    c=curve.c
+    mscale=max(1.0,abs(c[1]),abs(c[2]),abs(c[3]),
+               curve.kind===:circle ? curve.r : curve.rx)
+    tolfit=1e-10*mscale
+    n=64
+    while n<=4096
+        θs=Float64[_OCC_TWO_PI*i/n for i in 0:n]
+        pts=NTuple{2,Float64}[
+            _brep_surface_uv(sg,_brep_curve_eval(curve,θ)) for θ in θs]
+        _brep_unwrap_v!(_brep_unwrap_u!(pts,uper),vper)
+        duv=Vector{NTuple{2,Float64}}(undef,n+1)
+        for i in 1:n+1
+            V=_brep_conic_d1(curve,θs[i])
+            _,bu,bv=_occ_surface_d1(sg,pts[i][1],pts[i][2])
+            a=_b3dot(bu,bu);b=_b3dot(bu,bv);d=_b3dot(bv,bv)
+            det=a*d-b*b
+            # chart singularity (pole, apex) on the conic
+            det>1e-12*a*d || return nothing
+            r1=_b3dot(V,bu);r2=_b3dot(V,bv)
+            duv[i]=((d*r1-b*r2)/det,(a*r2-b*r1)/det)
+        end
+        duv[end]=duv[1]
+        knots,deg,cps=_hermite_bspline_2d(θs,pts,duv)
+        worst=0.0
+        for i in 1:n
+            for frac in (0.25,0.5,0.75)
+                θ=fma(θs[i+1]-θs[i],frac,θs[i])
+                uv=_occ_spl2d_eval(knots,deg,cps,θ)
+                worst=max(worst,_b3dist(
+                    _brep_surface_eval(sg,uv[1],uv[2]),
+                    _brep_curve_eval(curve,θ)))
+            end
+            worst>tolfit && break
+        end
+        if worst<=tolfit
+            turn=(pts[end][1]-pts[1][1],pts[end][2]-pts[1][2])
+            ts3=Float64[];p3=NTuple{2,Float64}[];d3=NTuple{2,Float64}[]
+            for k in -1:1, i in (k==-1 ? 1 : 2):n+1
+                push!(ts3,θs[i]+k*_OCC_TWO_PI)
+                push!(p3,(pts[i][1]+k*turn[1],pts[i][2]+k*turn[2]))
+                push!(d3,duv[i])
+            end
+            knots,deg,cps=_hermite_bspline_2d(ts3,p3,d3)
+            return (spl2d=(knots,deg,cps),
+                    lvl2d=(uv->fld(_brep_surface_eval(sg,uv[1],uv[2]))),
+                    per2d=_OCC_TWO_PI)
+        end
+        n*=2
+    end
+    return nothing
 end
 
 # ── tensor-patch × analytic-surface sections ────────────────────────────────
@@ -1778,9 +1856,23 @@ function _brep_sec_plane_cylinder(pl,cy,plane_is_a,caller)
         end
         return out
     end
-    # oblique section — an ellipse the analytic path can't emit; the
-    # generic level-set section traces it on the cylinder domain
-    return _brep_sec_msq(cy,pl,!plane_is_a,caller)
+    # oblique section — an exact ellipse centred where the axis pierces
+    # the plane: minor semi-axis R along axis×n, major R/|cos| along n×minor
+    n=pl.axis
+    c0=_b3add(cy.center,_b3mul(cy.axis,
+        _b3dot(_b3(pl.center,cy.center),n)/dot))
+    minor=_b3unit(_b3cross(cy.axis,n))
+    X=_b3cross(n,minor)
+    Y=_b3cross(n,X)
+    rx=cy.radius/abs(dot);ry=cy.radius
+    g=(occ=:ellipse,center=c0,n=n,X=X,Y=Y,rx=rx,ry=ry,
+       t0=0.0,t1=_OCC_TWO_PI)
+    curve=(kind=:ellipse,c=c0,n=n,x=X,y=Y,rx=rx,ry=ry,g=g)
+    fit=_brep_fit_conic_pc(cy,pl,curve)
+    fit===nothing && return _brep_sec_msq(cy,pl,!plane_is_a,caller)
+    pc_pl=_brep_synth_pcurve(pl,curve,0.0,_OCC_TWO_PI,caller)
+    return _brep_sec_entries(curve,true,NamedTuple[pc_pl],NamedTuple[fit],
+                             plane_is_a)
 end
 
 # Cartesian product of per-face pcurve lists into section entries.
@@ -1807,10 +1899,15 @@ function _brep_sec_plane_sphere(pl,sp,plane_is_a,caller)
     # a tilted-axis sphere (imported/rotated record) sees a non-latitude,
     # non-meridian circle — its uv trace isn't lin2d, so trace on the
     # sphere chart instead of rejecting
-    _brep_sphere_pc_ok(sp,c,n,r) ||
-        return _brep_sec_msq(sp,pl,!plane_is_a,caller)
     curve=(kind=:circle,c=c,n=n,x=x,y=y,r=r)
     pc_pl=NamedTuple[_brep_pc_circ_on_plane(pl,c,n,x,r)]
+    if !_brep_sphere_pc_ok(sp,c,n,r)
+        # neither a parallel nor a meridian of this sphere: exact circle,
+        # fitted chart trace
+        fit=_brep_fit_conic_pc(sp,pl,curve)
+        fit===nothing && return _brep_sec_msq(sp,pl,!plane_is_a,caller)
+        return _brep_sec_entries(curve,true,pc_pl,NamedTuple[fit],plane_is_a)
+    end
     pc_sp=_brep_sphere_section_pcs(sp,c,n,x,y,r,caller)
     return _brep_sec_entries(curve,true,pc_pl,pc_sp,plane_is_a)
 end
@@ -1858,14 +1955,25 @@ function _brep_sec_sphere_sphere(sa,sb,caller)
     c=_b3add(sa.center,_b3mul(n,a))
     r=sqrt(h2)
     x,y=_occ_ax2_frame(n)
-    if !(_brep_sphere_pc_ok(sa,c,n,r) && _brep_sphere_pc_ok(sb,c,n,r))
-        # the section circle's pcurve isn't lin2d-representable on at
-        # least one sphere — trace it on the first sphere's domain
-        return _brep_sec_msq(sa,sb,true,caller)
-    end
     curve=(kind=:circle,c=c,n=n,x=x,y=y,r=r)
-    pcA=_brep_sphere_section_pcs(sa,c,n,x,y,r,caller)
-    pcB=_brep_sphere_section_pcs(sb,c,n,x,y,r,caller)
+    # each sphere takes its exact parallel/meridian trace where the circle
+    # is one, a fitted trace otherwise; only a circle through a pole of a
+    # sphere it is not a meridian of falls back to the level-set tracer
+    local pcA,pcB
+    if _brep_sphere_pc_ok(sa,c,n,r)
+        pcA=_brep_sphere_section_pcs(sa,c,n,x,y,r,caller)
+    else
+        fit=_brep_fit_conic_pc(sa,sb,curve)
+        fit===nothing && return _brep_sec_msq(sa,sb,true,caller)
+        pcA=NamedTuple[fit]
+    end
+    if _brep_sphere_pc_ok(sb,c,n,r)
+        pcB=_brep_sphere_section_pcs(sb,c,n,x,y,r,caller)
+    else
+        fit=_brep_fit_conic_pc(sb,sa,curve)
+        fit===nothing && return _brep_sec_msq(sa,sb,true,caller)
+        pcB=NamedTuple[fit]
+    end
     out=NamedTuple[]
     for pa in pcA,pb in pcB
         push!(out,(curve=curve,closed=true,pcA=pa,pcB=pb))
@@ -3266,6 +3374,7 @@ function _brep_shift_pc(pc,shift)
             l=pc.lvl2d
             out=merge(out,(lvl2d=(uv->l((uv[1]+shift,uv[2]))),))
         end
+        hasproperty(pc,:per2d) && (out=merge(out,(per2d=pc.per2d,)))
         return out
     elseif hasproperty(pc,:tan2d)
         inner,u0,us,vv=pc.tan2d
@@ -3645,6 +3754,7 @@ function _brep_pc_param_period(pc)
     hasproperty(pc,:neg2d) && return _brep_pc_param_period(pc.neg2d[1])
     (hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d)) &&
         return _OCC_TWO_PI
+    hasproperty(pc,:per2d) && return pc.per2d
     dlo,dhi=_brep_pc_domain(pc)
     (isfinite(dlo)&&isfinite(dhi)) || return 0.0
     return dhi-dlo
@@ -3707,8 +3817,10 @@ function _brep_intersect_spans(spansA,spansB,closed,tol,caller;pc=nothing)
         if pc!==nothing
             per=_brep_pc_param_period(pc)
             dlo,_=_brep_pc_domain(pc)
-            isfinite(dlo) && (base=dlo)
             native=_brep_pc_native_periodic(pc)
+            # a periodic fitted trace spans several turns; its cells start
+            # at the parameter origin like a conic's
+            isfinite(dlo) && !native && (base=dlo)
         end
         per>0 || (per=_OCC_TWO_PI)
         cuts=Float64[base]
@@ -3836,6 +3948,7 @@ function _brep_flip_pc(pc,caller)
                     NTuple{2,Float64}[cp for cp in
                                       Iterators.reverse(cps)]),)
         hasproperty(pc,:lvl2d) && (out=merge(out,(lvl2d=pc.lvl2d,)))
+        hasproperty(pc,:per2d) && (out=merge(out,(per2d=pc.per2d,)))
         return out
     end
     throw(ArgumentError(
