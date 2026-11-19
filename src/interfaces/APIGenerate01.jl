@@ -27,11 +27,19 @@ mutable struct _Dim01Assembly
     caller::String
     node_counter_wrapped::Bool
     cell_counter_wrapped::Bool
+    # Counts every change to an existing node or cell row. Appending leaves it
+    # alone, so a consumer that mirrors the rows (the incremental Surface-phase
+    # authority) can tell an append from an edit without rescanning them.
+    edits::Int
 end
 
 # Detached planning records its own constructor events; it does not mutate session clocks.
 _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller)=
     _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller,false,false)
+_Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller,
+        node_counter_wrapped,cell_counter_wrapped)=
+    _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller,
+        node_counter_wrapped,cell_counter_wrapped,0)
 
 function _dim01_next_tag!(assembly::_Dim01Assembly,node::Bool)
     previous=node ? assembly.node_max : assembly.cell_max
@@ -57,6 +65,7 @@ function _dim01_add_node!(assembly::_Dim01Assembly,tag::UInt64,point,owner,
         # cache. Fill that absence without replacing caller-provided values.
         if previous.parameter===nothing && parameter!==nothing
             assembly.nodes[position]=_Dim01Node(tag,point,owner,copy(parameter))
+            assembly.edits+=1
         end
         return position
     end

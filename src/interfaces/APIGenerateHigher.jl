@@ -17,9 +17,25 @@ function _higher_native_parameters_pending!(assembly,m)
         parameter=dim==0 ? Float64[] :
             Model.model_parametrization(m,dim,Int(tag),collect(node.point))
         assembly.nodes[position]=_Dim01Node(node.tag,node.point,node.owner,parameter)
+        assembly.edits+=1
     end
     return nothing
 end
+
+# Private vertex ranks by node label. `next` is the largest rank handed out and
+# `ranked` counts the leading assembly nodes known to hold one, so completing
+# the table after an append costs the appended nodes, not all of them.
+mutable struct _HigherRanks
+    table::Dict{UInt64,UInt64}
+    next::UInt64
+    ranked::Int
+end
+Base.getindex(ranks::_HigherRanks,tag)=ranks.table[tag]
+Base.get(ranks::_HigherRanks,tag,default)=get(ranks.table,tag,default)
+Base.haskey(ranks::_HigherRanks,tag)=haskey(ranks.table,tag)
+Base.length(ranks::_HigherRanks)=length(ranks.table)
+Base.eltype(::Type{_HigherRanks})=Pair{UInt64,UInt64}
+Base.iterate(ranks::_HigherRanks,state...)=iterate(ranks.table,state...)
 
 function _higher_node_ranks(assembly,cached,mapping,previous)
     ranks=Dict{UInt64,UInt64}();next=UInt64(0)
@@ -46,16 +62,21 @@ function _higher_node_ranks(assembly,cached,mapping,previous)
         next<typemax(UInt64) || throw(ArgumentError("$(assembly.caller): private vertex rank overflows UInt64"))
         next+=UInt64(1);ranks[node.tag]=next
     end
-    return ranks
+    return _HigherRanks(ranks,maximum(values(ranks);init=UInt64(0)),length(assembly.nodes))
 end
 
-function _higher_complete_ranks!(ranks,assembly)
-    next=maximum(values(ranks);init=UInt64(0))
-    for node in assembly.nodes
-        haskey(ranks,node.tag) && continue
+# Nodes are only appended to an assembly and keep their labels, so the nodes
+# before `ranks.ranked` still hold their ranks and `ranks.next` is still the
+# largest: only the nodes after it need one.
+function _higher_complete_ranks!(ranks::_HigherRanks,assembly)
+    table=ranks.table;next=ranks.next
+    for position in ranks.ranked+1:length(assembly.nodes)
+        tag=assembly.nodes[position].tag
+        haskey(table,tag) && continue
         next<typemax(UInt64) || throw(ArgumentError("$(assembly.caller): private vertex rank overflows UInt64"))
-        next+=UInt64(1);ranks[node.tag]=next
+        next+=UInt64(1);table[tag]=next
     end
+    ranks.next=next;ranks.ranked=length(assembly.nodes)
     return nothing
 end
 
@@ -164,6 +185,7 @@ function _higher_append_surface_source_nodes!(assembly,mesh,production)
         previous.owner[1]<2 && all(isfinite,point) || throw(ArgumentError(
             "$(assembly.caller): restored Curve identity $tag has invalid ownership or coordinates"))
         assembly.nodes[position]=_Dim01Node(tag,point,previous.owner,previous.parameter)
+        assembly.edits+=1
     end
     count=nnodes(mesh)
     length(production.node_tags)==length(production.node_owners)==
@@ -963,6 +985,34 @@ function _higher_geometry_source_points(assembly,birth)
     return points
 end
 
+# The same table, built when it is first read. Only the transfinite producers
+# read it, and the serial passes hand one to every Surface and Region: built
+# eagerly, that is a scan of every geometry birth per entity. The assembly and
+# the births do not change while one producer runs, so the table read then is
+# the table an eager build would have held.
+mutable struct _HigherGeometryPoints <: AbstractDict{UInt64,NTuple{3,Float64}}
+    assembly::_Dim01Assembly
+    birth::_Dim01GeometryBirth
+    table::Union{Nothing,Dict{UInt64,NTuple{3,Float64}}}
+end
+
+function _higher_geometry_table(points::_HigherGeometryPoints)
+    table=points.table
+    if table===nothing
+        table=_higher_geometry_source_points(points.assembly,points.birth)
+        points.table=table
+    end
+    return table
+end
+
+Base.length(points::_HigherGeometryPoints)=length(_higher_geometry_table(points))
+Base.iterate(points::_HigherGeometryPoints,state...)=iterate(_higher_geometry_table(points),state...)
+Base.get(points::_HigherGeometryPoints,key,default)=get(_higher_geometry_table(points),key,default)
+Base.haskey(points::_HigherGeometryPoints,key)=haskey(_higher_geometry_table(points),key)
+
+_higher_lazy_geometry_source_points(assembly,birth)=birth===nothing ? nothing :
+    _HigherGeometryPoints(assembly,birth,nothing)
+
 function _higher_geometry_source_point(assembly,birth,uid)
     birth===nothing && return nothing
     node=get(birth.nodes,uid,nothing)
@@ -1046,13 +1096,42 @@ end
 # stale dim-1 cells with the actual recovered sub-edges. Fresh element
 # identities continue the generation's allocator; the stored parameter
 # samples follow so later consumers see the updated discretization.
-function _higher_surface_curve_remesh!(assembly,m,chains,curve_births)
+#
+# Every Surface asks for the Line cells of each of its Curves. `lines` keeps
+# their positions by Curve across the pass, so that a query costs the cells of
+# that Curve instead of a scan of every cell.
+mutable struct _HigherLineCells
+    positions::Dict{Int32,Vector{Int}}
+    cells::Int
+    edits::Int
+end
+_HigherLineCells()=_HigherLineCells(Dict{Int32,Vector{Int}}(),0,-1)
+
+function _higher_line_cells!(lines::_HigherLineCells,assembly)
+    if lines.edits!=assembly.edits || lines.cells>length(assembly.cells)
+        # A cell was moved or removed: the recorded positions are void.
+        empty!(lines.positions);lines.cells=0;lines.edits=assembly.edits
+    end
+    for position in lines.cells+1:length(assembly.cells)
+        cell=assembly.cells[position]
+        cell.owner[1]==1 && cell.msh==1 || continue
+        push!(get!(()->Int[],lines.positions,cell.owner[2]),position)
+    end
+    lines.cells=length(assembly.cells)
+    return lines.positions
+end
+
+function _higher_surface_curve_remesh!(assembly,m,chains,curve_births;lines=nothing)
     remeshed=Tuple{Int,Int32}[]
     for curve in sort!(collect(keys(chains)))
         owner=(1,curve)
         positions=Int[]
-        for (position,cell) in enumerate(assembly.cells)
-            cell.owner==owner && cell.msh==1 && push!(positions,position)
+        if lines===nothing
+            for (position,cell) in enumerate(assembly.cells)
+                cell.owner==owner && cell.msh==1 && push!(positions,position)
+            end
+        else
+            append!(positions,get(_higher_line_cells!(lines,assembly),curve,Int[]))
         end
         isempty(positions) && continue
         current=UInt64[]
@@ -1072,6 +1151,7 @@ function _higher_surface_curve_remesh!(assembly,m,chains,curve_births)
             push!(rows,row)
         end
         deleteat!(assembly.cells,positions)
+        assembly.edits+=1
         physical=_dim01_physical(m,(1,Int(curve)))
         for index in 1:length(rows)-1
             _dim01_add_cell!(assembly,1,owner,rows[index:index+1],
@@ -1835,7 +1915,7 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
         parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
         periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
         metric_surface,constructor_inputs,size_field,native_recombine_events,
-        unvalidated_inputs=nothing)
+        unvalidated_inputs=nothing,lines=nothing)
             alternate=produced isa Model._ModelSurfaceGeometryProduction ? produced.geometry : nothing
             source_binding=produced isa Model._ModelSurfaceGeometryProduction ? produced.production :
                 produced isa Model._ModelSurfaceProduction ? produced : nothing
@@ -1862,7 +1942,7 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                 # A grown recovered chain invalidates every detached produce
                 # still waiting on the consumed Curve's stored discretization.
                 for owner in _higher_surface_curve_remesh!(
-                        assembly,m,source_binding.curve_chains,curve_births)
+                        assembly,m,source_binding.curve_chains,curve_births;lines)
                     push!(parallel_dirty,owner)
                 end
             end
@@ -2057,6 +2137,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             dirty=parallel_dirty,precise=GmshLibm._win_cli_precision(),
             size_field=size_field))
     end
+    lines=_HigherLineCells()
     for (ui,tags) in enumerate(units)
         work=parallel_units===nothing ? nothing : parallel_units[ui]
         if work!==nothing && parallel_results[ui]===nothing
@@ -2083,7 +2164,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             size_field=size_field,_extrude_scope=scope,_mesh_input=input,_mesh1d_options=options,
             _mesh_node_high_water=assembly.node_max,_return_surface_production=true,
             _mesh_element_high_water=assembly.cell_max,_boundary_regrade=false,
-            _geometry_points=_higher_geometry_source_points(assembly,geometry_birth)))] :
+            _geometry_points=_higher_lazy_geometry_source_points(assembly,geometry_birth)))] :
             Base.inferencebarrier(_compound_surface_meshes)(m,tags,assembly.caller;size_field=size_field,
                 _mesh1d_options=options)
         for (tag,produced) in products
@@ -2093,7 +2174,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
                 periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
                 metric_surface,constructor_inputs,size_field,native_recombine_events,
-                unvalidated_inputs))::
+                unvalidated_inputs,lines))::
                 Tuple{Model._ModelMeshAuthority,Union{Nothing,Model._ExtrudeNoNewScope}}
         end
         # State this unit left behind that a later detached produce still
@@ -2277,6 +2358,7 @@ function _higher_native_region_surface_order!(assembly,m,tag)
         cells=assembly.cells[rows]
         sort!(cells;by=cell->_higher_triangle_vertex_key(assembly,cell))
         assembly.cells[rows]=cells
+        assembly.edits+=1
     end
     return nothing
 end
@@ -2949,6 +3031,7 @@ function _higher_volume_boundary_writeback!(assembly,m,wb,mapping,source_tags,ca
             push!(drop,index)
         end
         deleteat!(assembly.cells,sort!(drop))
+        assembly.edits+=1
     end
     added_cells=Dict{Tuple{Tuple{Int,Int32},Tuple},_Dim01Cell}()
     for owner in sort!(collect(keys(wb.added)))
@@ -3516,7 +3599,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 _optimize_pyramids=optimize_pyramids,
                 _mesh_node_high_water=assembly.node_max,_mesh_element_high_water=assembly.cell_max,
                 _boundary_regrade=false,
-                _geometry_points=_higher_geometry_source_points(assembly,geometry_birth))) :
+                _geometry_points=_higher_lazy_geometry_source_points(assembly,geometry_birth))) :
                 hybrid_batch.products[tag]
             production isa Union{Model._ModelVolumeGeometryProduction,Model._ModelNativeHybridVolumeProduction} &&
                 _higher_native_region_surface_order!(assembly,m,tag)
@@ -3742,6 +3825,34 @@ function _higher_volume_geometry_order(mesh,class,mapping,m,tag,input,scope;
     return geometry,geometry_class,mapping[rows]
 end
 
+# The rows a produced Surface binds must carry its own coordinates, up to the
+# weld tolerance.
+function _higher_bound_rows_check(authority,mesh,rows,tag,caller)
+    if authority.mesh.coords[:,rows]!=mesh.coords
+        # Upstream `pos.find` welding: a produced boundary row can bind to
+        # a vertex another producer emitted first (the curve parts' T/tops
+        # derive from an earlier kernel pass than the strip's own columns)
+        # — the appended node then carries the welded position, not the
+        # producer's own eval. The same `64eps·max(1,|p|)` rule
+        # `_higher_append_part!` welds by decides identity; a bound node
+        # beyond it is a real mismatch, not a weld.
+        delta=abs.(authority.mesh.coords[:,rows].-mesh.coords)
+        bad=count(axes(delta,2)) do j
+            tolerance=64eps(Float64)*max(1.0,maximum(@view mesh.coords[:,j]))
+            maximum(@view delta[:,j])>tolerance
+        end
+        bad>0 && begin
+            detail=join(("$(j):bound=$(authority.mesh.coords[:,rows[j]]) part=$(mesh.coords[:,j])"
+                         for j in axes(delta,2) if any(!=(0.0),delta[:,j])),"\n  ")
+            throw(ArgumentError(
+                "$caller: produced Surface[$tag] coordinates " *
+                "disagree with actual bound rows " *
+                "($bad/$(size(delta,2)) cols, max |delta|=$(maximum(delta)))\n  $detail"))
+        end
+    end
+    return nothing
+end
+
 function _higher_bind_producer_rows(authority,assembly,parts,previous;node_tag_map=nothing,
                                     curve_births=nothing)
     positions=Dict(tag=>Int32(row) for (row,tag) in
@@ -3778,28 +3889,7 @@ function _higher_bind_producer_rows(authority,assembly,parts,previous;node_tag_m
                 "$(assembly.caller): produced Surface[$tag] loses actual node $source_tag"))
             rows[slot]=row
         end
-        if authority.mesh.coords[:,rows]!=mesh.coords
-            # Upstream `pos.find` welding: a produced boundary row can bind to
-            # a vertex another producer emitted first (the curve parts' T/tops
-            # derive from an earlier kernel pass than the strip's own columns)
-            # — the appended node then carries the welded position, not the
-            # producer's own eval. The same `64eps·max(1,|p|)` rule
-            # `_higher_append_part!` welds by decides identity; a bound node
-            # beyond it is a real mismatch, not a weld.
-            delta=abs.(authority.mesh.coords[:,rows].-mesh.coords)
-            bad=count(axes(delta,2)) do j
-                tolerance=64eps(Float64)*max(1.0,maximum(@view mesh.coords[:,j]))
-                maximum(@view delta[:,j])>tolerance
-            end
-            bad>0 && begin
-                detail=join(("$(j):bound=$(authority.mesh.coords[:,rows[j]]) part=$(mesh.coords[:,j])"
-                             for j in axes(delta,2) if any(!=(0.0),delta[:,j])),"\n  ")
-                throw(ArgumentError(
-                    "$(assembly.caller): produced Surface[$tag] coordinates " *
-                    "disagree with actual bound rows " *
-                    "($bad/$(size(delta,2)) cols, max |delta|=$(maximum(delta)))\n  $detail"))
-            end
-        end
+        _higher_bound_rows_check(authority,mesh,rows,tag,assembly.caller)
         owner=(2,Int32(tag))
         if !haskey(authority.products,owner) && Model._surface_cell_count(mesh)==0
             authority=Model._model_mesh_with_empty_surface_product(authority,owner,rows;
