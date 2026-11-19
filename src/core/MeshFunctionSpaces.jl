@@ -294,11 +294,19 @@ end
 function _origin_barycentric(values,caller::AbstractString,point::Int)
     fast=1.0
     scale=1.0
+    rounded=false
     for value in values
-        fast-=value
+        # The rounding error of this subtraction (TwoSum). While every one is
+        # zero, `fast` is the exact coordinate — the usual case at a reference
+        # node, where 1 - 1/2 - 1/2 is an exact zero — and the rational
+        # evaluation below would return the same number.
+        difference=fast-value
+        virtual=difference-fast
+        rounded|=((fast-(difference-virtual))+(-value-virtual))!=0.0
+        fast=difference
         scale=max(scale,abs(value))
     end
-    if isfinite(fast) && abs(fast)>64eps(Float64)*scale
+    if isfinite(fast) && (!rounded || abs(fast)>64eps(Float64)*scale)
         return fast
     end
     exact=_Exact(1)

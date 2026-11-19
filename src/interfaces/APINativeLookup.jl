@@ -244,6 +244,38 @@ function _native_lookup_require_element_locked(tag::Integer,caller)
     return binding
 end
 
+# `_native_lookup_require_element_locked` for a list of tags, in order. A tag
+# that the catalogue binds and that follows its predecessor in the mesh's tag
+# table is present without a search of that table; every other tag — unbound,
+# retargeted, out of sequence or held by an entity record — takes the
+# single-tag path, which records the miss and reports the error.
+function _native_lookup_require_elements_locked(values,caller)
+    present=Vector{Bool}(undef,length(values))
+    cached=LAST_MESH[]
+    table=cached===nothing ? nothing : _mesh_public_tags(cached)
+    catalogue=nothing
+    position=0
+    for (slot,value) in enumerate(values)
+        tag=_cache_checked_public_tag(value,caller,"element")
+        catalogue===nothing && (catalogue=_native_lookup_rebuild_elements_locked!(true))
+        if table isa _CachePublicTags && catalogue.elements_primed &&
+                isempty(catalogue.element_targets) &&
+                get(catalogue.elements,tag,nothing)!==nothing
+            tags=table.element_tags
+            next=position+1
+            found=next<=length(tags) && tags[next]==tag ? next :
+                get(table.element_indices,tag,0)
+            if found!=0
+                position=found
+                present[slot]=true
+                continue
+            end
+        end
+        present[slot]=_native_lookup_require_element_locked(tag,caller)!==nothing
+    end
+    return present
+end
+
 function _native_lookup_require_node_locked(tag::Integer,caller)
     _native_lookup_has_node_locked(tag) && return true
     _native_lookup_query_error_locked(caller,"node",tag)

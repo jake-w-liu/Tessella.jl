@@ -3491,6 +3491,33 @@ function _mesh_public_element_index(mesh,value,caller,
     return _cache_element_index(table,value,total,caller)
 end
 
+# `_mesh_public_element_index` of every tag of a list. The element count is
+# taken once, and a tag that follows its predecessor in the mesh's tag table —
+# the usual case for tags returned by `get_elements` — needs no search: the
+# table holds each tag once, so the next position is the position.
+function _mesh_public_element_indices(mesh,values,caller,
+                                      class=_cached_classification_locked(mesh))
+    _,_,total=_mesh_element_offsets(mesh)
+    table=class===nothing ? nothing : class.public_tags
+    indices=Vector{Int}(undef,length(values))
+    if table isa _CachePublicTags
+        tags=table.element_tags
+        position=0
+        for (slot,value) in enumerate(values)
+            tag=_cache_checked_public_tag(value,caller,"element")
+            next=position+1
+            position=next<=length(tags) && tags[next]==tag ? next :
+                _cache_element_index(table,value,total,caller)
+            indices[slot]=position
+        end
+    else
+        for (slot,value) in enumerate(values)
+            indices[slot]=_cache_element_index(table,value,total,caller)
+        end
+    end
+    return indices
+end
+
 function _get_local_coordinates_in_element(element_tag,x,y,z)
     caller="API.mesh.get_local_coordinates_in_element"
     return lock(STATE_LOCK) do
@@ -3521,8 +3548,7 @@ function _get_element_qualities(element_tags,quality_name="minSICN",
         cached,class=_mesh_query_pair_locked(caller)
         task_index,task_count=_mesh_query_tasks(task,num_tasks,caller)
         selected=_mesh_task_tags(element_tags,task_index,task_count,caller)
-        present=Bool[_native_lookup_require_element_locked(
-            _cache_checked_public_tag(tag,caller,"element"),caller)!==nothing for tag in selected]
+        present=_native_lookup_require_elements_locked(selected,caller)
         if !all(present)
             result=zeros(Float64,length(selected))
             for index in eachindex(selected)
@@ -3545,7 +3571,7 @@ function _get_element_qualities(element_tags,quality_name="minSICN",
             return result
         end
         mesh_element_qualities(cached,
-            [_mesh_public_element_index(cached,tag,caller,class) for tag in selected],quality_name)
+            _mesh_public_element_indices(cached,selected,caller,class),quality_name)
     end
 end
 

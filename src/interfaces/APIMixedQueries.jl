@@ -380,9 +380,13 @@ function _locate_elements(locator::_MixedMeshLocator,p::NTuple{3,Float64},
     return UInt64.(matches)
 end
 
-function _mixed_frame(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell,family::Symbol,dimension::Int,
+_mixed_frame(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell,family::Symbol,dimension::Int,
+             uvw,caller::AbstractString,tag::Int,msh::Int=0;shape=nothing)=
+    _mixed_frame(mesh,cells,cell,Val(family),dimension,uvw,caller,tag,msh;shape=shape)
+
+function _mixed_frame(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,cell,family::Val,dimension::Int,
                       uvw,caller::AbstractString,tag::Int,msh::Int=0;shape=nothing)
-    mapped,du,dv,dw=_mixed_map(mesh,cells,cell,Val(family),uvw,caller,tag,msh;shape=shape)
+    mapped,du,dv,dw=_mixed_map(mesh,cells,cell,family,uvw,caller,tag,msh;shape=shape)
     if dimension==0
         return (1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0),1.0,mapped
     elseif dimension==1
@@ -518,10 +522,22 @@ function _mixed_write_jacobians!(jacobians,determinants,coordinates,mesh,cells,
     else
         nothing
     end
+    # The element type fixes which mapping every evaluation uses. The loop is a
+    # separate method compiled for that family and shape table, so a bulk
+    # query does not look the method up again for each cell and point.
+    return _mixed_write_jacobians_loop!(jacobians,determinants,coordinates,mesh,cells,
+        selected,offset,msh,local_coordinates,point_count,caller,
+        Val(spec.family),Int(spec.dim),Int(spec.order),shapes)
+end
+
+function _mixed_write_jacobians_loop!(jacobians,determinants,coordinates,mesh,cells,
+        selected,offset,msh,local_coordinates,point_count,caller,
+        family::Val{F},dimension::Int,order::Int,shapes) where F
+    native_tri3=msh==2 && mesh isa MixedMesh && mesh.entity_data!==nothing
     for (slot,cell) in enumerate(selected),point in 1:point_count
         base=3(point-1)
         uvw=(local_coordinates[base+1],local_coordinates[base+2],local_coordinates[base+3])
-        frame,determinant,mapped=if spec.family===:lin && spec.order>=3
+        frame,determinant,mapped=if F===:lin && order>=3
             _mixed_lineN_public_frame(mesh,cells,cell,shapes[point]...,caller,offset+cell)
         elseif msh==8
             _mixed_line3_public_frame(mesh,cells,cell,uvw[1],caller,offset+cell)
@@ -531,13 +547,13 @@ function _mixed_write_jacobians!(jacobians,determinants,coordinates,mesh,cells,
             # offsets, so public Line2 queries use the same ordered sum.
             _mixed_lineN_public_frame(mesh,cells,cell,
                 (0.5-0.5*uvw[1],0.5+0.5*uvw[1]),(-0.5,0.5),caller,offset+cell)
-        elseif spec.order>2
-            _native_cell_public_frame(mesh,cells,cell,spec.dim,shapes[point],caller,offset+cell)
+        elseif order>2
+            _native_cell_public_frame(mesh,cells,cell,dimension,shapes[point],caller,offset+cell)
         else
-            _mixed_frame(mesh,cells,cell,spec.family,spec.dim,uvw,caller,offset+cell,msh;
+            _mixed_frame(mesh,cells,cell,family,dimension,uvw,caller,offset+cell,msh;
                 shape=shapes===nothing ? nothing : shapes[point])
         end
-        if msh==2 && mesh isa MixedMesh && mesh.entity_data!==nothing
+        if native_tri3
             mapped=_mixed_tri3_native_mapped_point(mesh,cells,cell,uvw,caller,offset+cell)
         end
         evaluation=(slot-1)*point_count+point
@@ -827,11 +843,25 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
     element_tags isa AbstractArray && Base.require_one_based_indexing(element_tags)
     result=Vector{Float64}(undef,length(element_tags))
     rules=Dict{Int,_NativeCellMeasureRule}()
+    _,_,total=_mesh_element_offsets(mesh)
+    # The block of the previous tag is kept: consecutive tags usually share it.
+    # The names the loop body uses are bound once per element, so the closures
+    # below capture plain values.
+    low=0;high=0;block_msh=0;block_order=0;block_family=:pnt
+    block_cells=Matrix{Int32}(undef,0,0)
     for (index,value) in enumerate(element_tags)
-        tag=_mesh_query_element_tag(mesh,value,caller)
-        msh,_,cells,cell,family=_mixed_query_reference(mesh,tag,caller)
+        tag=_mesh_query_integer(value,caller,"element_tag")
+        1<=tag<=total || throw(ArgumentError(
+            "$caller: unknown element tag $value; expected a dense tag in 1:$total"))
+        if !(low<tag<=high)
+            block_msh,_,block_cells,first_cell,block_family=
+                _mixed_query_reference(mesh,tag,caller)
+            low=tag-first_cell;high=low+size(block_cells,2)
+            block_order=Int(msh_spec(block_msh).order)
+        end
+        msh=block_msh;cells=block_cells;family=block_family;order=block_order
+        cell=tag-low
         a=_mixed_node(mesh,cells,cell,1)
-        order=msh_spec(msh).order
         # Orders above two always take the native Jacobian paths; hexahedra,
         # prisms and pyramids take them at every order and quadrangles from
         # order two.
@@ -932,15 +962,15 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
                 rules[msh]=_native_cell_measure_rule(msh,caller)
             end
             result[index]=_native_cell_quality_volume(mesh,cells,cell,rules[msh],caller,tag)
-        elseif msh_spec(msh).order==1 && family===:lin
+        elseif order==1 && family===:lin
             name in MeshElementQuality._UNDEFINED_SEGMENT_QUALITIES && throw(ArgumentError(
                 "$caller: Gmsh 4.15.2 fails on $name for segment elements"))
             length,valid=MeshElementQuality._segment_geometry(a,_mixed_node(mesh,cells,cell,2))
             result[index]=MeshElementQuality._segment_quality(name,length,valid)
-        elseif msh_spec(msh).order==1 && family===:tri
+        elseif order==1 && family===:tri
             result[index]=MeshElementQuality._triangle_quality(name,a,
                 _mixed_node(mesh,cells,cell,2),_mixed_node(mesh,cells,cell,3))
-        elseif msh_spec(msh).order==1 && family===:tet
+        elseif order==1 && family===:tet
             result[index]=MeshElementQuality._tetrahedron_quality(name,a,
                 _mixed_node(mesh,cells,cell,2),_mixed_node(mesh,cells,cell,3),_mixed_node(mesh,cells,cell,4))
         elseif msh==3

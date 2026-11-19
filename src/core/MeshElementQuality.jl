@@ -852,12 +852,13 @@ end
 
 function _tetrahedron_quality(name,a,b,c,d)
     name=="eta" && return _tetrahedron_native_eta(a,b,c,d)
-    scale,edges,lengths,determinant,face_area2,exact_fallback,valid=
-        _tetrahedron_geometry(a,b,c,d)
+    # The volume measures do not use the normalized frame computed below.
+    name=="volume" && return tet_signed_volume(a,b,c,d)
     if name in ("minDetJac","maxDetJac")
         return 6tet_signed_volume(a,b,c,d)
     end
-    name=="volume" && return tet_signed_volume(a,b,c,d)
+    scale,edges,lengths,determinant,face_area2,exact_fallback,valid=
+        _tetrahedron_geometry(a,b,c,d)
     name=="minSJ" && return valid ? copysign(1.0,determinant) : 0.0
     name=="angleShape" && return 1.0
     ill_conditioned=valid &&
