@@ -82,8 +82,38 @@ function _native_recombine_gamma(s,t::NTuple{3,Int32})
 end
 function _native_recombine_triangle_eta(s,t::NTuple{3,Int32})
     p=ntuple(i->_native_recombine_point(s,t[i]),3)
-    angles=ntuple(i->180.0*_native_recombine_angle(
-        p[i],p[mod1(i+1,3)],p[mod1(i+2,3)])/pi,3)
+    # `qmTriangle::eta` needs the smallest of the three angles, each an
+    # emulated x87 `atan2(|e×f|,e·f)` — the dominant cost of the smoothing.
+    # The angle is decreasing in the cotangent `e·f/|e×f|`, so when one
+    # corner's cotangent leads the others by more than 1e-6 rad of angle that
+    # corner is the minimum whatever the last bits of the other two are, and
+    # only its `atan2` is evaluated: the same call on the same operands as
+    # before. A closer race evaluates all three as upstream does.
+    sines=ntuple(3) do i
+        first=Mesh2D._gmsh_sub3(p[i],p[mod1(i+1,3)])
+        second=Mesh2D._gmsh_sub3(p[mod1(i+2,3)],p[mod1(i+1,3)])
+        Mesh2D._gmsh_norm3(Mesh2D._gmsh_cross3(first,second))
+    end
+    cosines=ntuple(3) do i
+        first=Mesh2D._gmsh_sub3(p[i],p[mod1(i+1,3)])
+        second=Mesh2D._gmsh_sub3(p[mod1(i+2,3)],p[mod1(i+1,3)])
+        Mesh2D._gmsh_dot3(first,second)
+    end
+    if sines[1]>0 && sines[2]>0 && sines[3]>0
+        cotangents=(cosines[1]/sines[1],cosines[2]/sines[2],cosines[3]/sines[3])
+        k=cotangents[1]>=cotangents[2] ?
+            (cotangents[1]>=cotangents[3] ? 1 : 3) :
+            (cotangents[2]>=cotangents[3] ? 2 : 3)
+        lead=cotangents[k];gap=Inf
+        for i in 1:3
+            i==k || (gap=min(gap,lead-cotangents[i]))
+        end
+        if isfinite(lead) && gap>1e-6*(1.0+lead*lead)
+            smallest=180.0*_gm87_atan2(sines[k],cosines[k])/pi
+            return 1.0-abs(60.0-smallest)*(1.0/60.0)
+        end
+    end
+    angles=ntuple(i->180.0*_gm87_atan2(sines[i],cosines[i])/pi,3)
     smallest=min(min(angles[1],angles[2]),angles[3])
     return 1.0-abs(60.0-smallest)*(1.0/60.0)
 end
@@ -390,21 +420,67 @@ end
     _native_recombine_eta(s,s.quads[ref[2]]) :
     _native_recombine_triangle_eta(s,s.triangles[ref[2]])
 
-function _native_recombine_laplace_admit!(s,node,actual,trial,incident)
-    area_old=0.0;minimum_old=1.0
-    for ref in incident
-        area_old+=_native_recombine_uv_area(s,ref)
-        minimum_old=min(_native_recombine_cell_eta(s,ref),minimum_old)
+# Parameter area and worst `eta` of the cells around a node, in the order
+# `_isItAGoodIdeaToMoveThatVertex` accumulates them.
+# The same measure for a star of triangles alone, with one `atan2` instead of
+# one per cell. A triangle's `eta` rises with its smallest angle, so the worst
+# cell of the star is the one holding the corner of largest cotangent; when
+# that corner leads every other corner of the star by more than 1e-6 rad of
+# angle its `eta` is the star's minimum whatever the last bits of the others.
+# The area is summed in the same order. `nothing` (a quad in the star, a
+# degenerate cell or a closer race) sends the caller to the cell-by-cell loop.
+function _native_recombine_triangle_star(s,incident)
+    area=0.0
+    lead=-Inf;runner=-Inf;lead_sine=0.0;lead_cosine=0.0
+    @inbounds for ref in incident
+        ref[1] && return nothing
+        t=s.triangles[ref[2]]
+        area+=_native_recombine_uv_triangle_area(s,t[1],t[2],t[3])
+        p=(_native_recombine_point(s,t[1]),_native_recombine_point(s,t[2]),
+           _native_recombine_point(s,t[3]))
+        for i in 1:3
+            first=Mesh2D._gmsh_sub3(p[i],p[mod1(i+1,3)])
+            second=Mesh2D._gmsh_sub3(p[mod1(i+2,3)],p[mod1(i+1,3)])
+            sine=Mesh2D._gmsh_norm3(Mesh2D._gmsh_cross3(first,second))
+            sine>0 || return nothing
+            cosine=Mesh2D._gmsh_dot3(first,second)
+            cotangent=cosine/sine
+            if cotangent>lead
+                runner=lead;lead=cotangent;lead_sine=sine;lead_cosine=cosine
+            elseif cotangent>runner
+                runner=cotangent
+            end
+        end
     end
+    (isfinite(lead) && lead-runner>1e-6*(1.0+lead*lead)) || return nothing
+    smallest=180.0*_gm87_atan2(lead_sine,lead_cosine)/pi
+    return area,min(1.0-abs(60.0-smallest)*(1.0/60.0),1.0)
+end
+
+function _native_recombine_star(s,incident)
+    fast=_native_recombine_triangle_star(s,incident)
+    fast===nothing || return fast
+    area=0.0;minimum=1.0
+    for ref in incident
+        area+=_native_recombine_uv_area(s,ref)
+        minimum=min(_native_recombine_cell_eta(s,ref),minimum)
+    end
+    return area,minimum
+end
+
+# One relocation trial. `star_old` is the star measured with the node at
+# `actual`; the star at `trial` is returned so an accepted trial hands it to
+# the next one — the same sums over the same coordinates the next trial would
+# otherwise recompute, hence the same bits.
+function _native_recombine_laplace_admit!(s,node,actual,trial,incident,
+        star_old=_native_recombine_star(s,incident))
+    area_old,minimum_old=star_old
     previous=_native_recombine_point(s,node)
     s.uv[:,node].=trial;s.world[:,node].=s.lift(trial...)
-    area_new=0.0;minimum_new=1.0
-    for ref in incident
-        area_new+=_native_recombine_uv_area(s,ref)
-        minimum_new=min(_native_recombine_cell_eta(s,ref),minimum_new)
-    end
+    area_new,minimum_new=_native_recombine_star(s,incident)
     s.uv[:,node].=actual;s.world[:,node].=previous
-    return !((1.0+1e-10)*area_old<area_new || minimum_new<minimum_old)
+    return !((1.0+1e-10)*area_old<area_new || minimum_new<minimum_old),
+        (area_new,minimum_new)
 end
 
 function _native_recombine_laplace!(s,iterations,frame)
@@ -437,11 +513,14 @@ function _native_recombine_laplace!(s,iterations,frame)
         end
         inverse=1.0/count;after=(u*inverse,v*inverse)
         factor=1.0;actual=before
+        star=_native_recombine_star(s,incident)
         for _ in 1:5
             trial=(after[1]*factor+before[1]*(1.0-factor),
                 after[2]*factor+before[2]*(1.0-factor))
-            if _native_recombine_laplace_admit!(s,node,actual,trial,incident)
-                actual=trial
+            admitted,star_trial=_native_recombine_laplace_admit!(s,node,actual,
+                trial,incident,star)
+            if admitted
+                actual=trial;star=star_trial
                 s.uv[:,node].=trial;s.world[:,node].=s.lift(trial...)
             end
             factor/=1.4

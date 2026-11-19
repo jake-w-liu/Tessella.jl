@@ -260,6 +260,7 @@ include("functional/fixtures.jl")
         "meshing/mesh_planar_step_budget_test.jl",
         "interfaces/api_occ_curved_coarse_closed_test.jl",
         "interfaces/api_meshadapt_scalar_grading_test.jl",
+        "geometry/native_smoothing_star_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
