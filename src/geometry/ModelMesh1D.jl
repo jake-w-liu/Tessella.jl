@@ -1025,7 +1025,7 @@ function _model_curve_grade_params_general(m::GeoModel,curve::Integer,t0::Float6
         worst<=1.0 && return parameters
         scale=max(scale*1.02,worst*worst)
         runopts=_mesh1d_options_with_inner_field(options,
-            _MetricScaledAniso(inner,scale))
+            _model_curve_tightened_grading(inner,cert_fields,scale))
     end
     return parameters
 end

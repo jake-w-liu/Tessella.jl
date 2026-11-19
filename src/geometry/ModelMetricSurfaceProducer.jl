@@ -286,6 +286,38 @@ field_value(field::_MetricScaledAniso,x,y,z,entity::Tuple{T,U}) where
         {T<:Integer,U<:Integer}=
     metric_size(metric_at(field,x,y,z,entity))
 
+# The certificate of a Curve shared by several metric faces, as one field:
+# the tightest of the faces' scalar-context metrics at each point. It is the
+# grading base when no tensor background is selected (`Mesh.Algorithm=1` on a
+# face without a field, or with a scalar one): the face certificate then
+# measures the Curve against the face's own isotropic size, and that size is
+# what has to be tightened.
+struct _MetricCertificateMin{V} <: AbstractAnisoField
+    fields::V
+end
+function metric_at(field::_MetricCertificateMin,x,y,z)
+    size=Inf
+    for (_,certificate) in field.fields
+        size=min(size,metric_size(metric_at(certificate,x,y,z)))
+    end
+    return isotropic_metric(size)
+end
+metric_at(field::_MetricCertificateMin,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=metric_at(field,x,y,z)
+field_value(field::_MetricCertificateMin,x,y,z)=
+    metric_size(metric_at(field,x,y,z))
+field_value(field::_MetricCertificateMin,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}=metric_size(metric_at(field,x,y,z))
+
+# Grading field for the next attempt of a Curve whose emitted cells exceed a
+# face certificate: the selected tensor background tightened by `scale`, or,
+# when the selection is scalar or absent, the certificates themselves
+# tightened by it.
+function _model_curve_tightened_grading(inner,cert_fields,scale::Float64)
+    inner isa AbstractAnisoField && return _MetricScaledAniso(inner,scale)
+    return _MetricScaledAniso(_MetricCertificateMin(cert_fields),scale)
+end
+
 # Regrade stale boundary Curves under the producer's certificate field — and
 # under a progressively tightened metric while an under-resolution remnant
 # persists — before the lower products are consumed. `input!==nothing`
