@@ -124,6 +124,83 @@ function _higher_point_incidence_nodes(assembly,m)
     return bindings
 end
 
+# Lookups into the assembly that every appended part needs, kept across a pass
+# so that a part costs the rows and cells it looks at instead of a scan of
+# everything merged before it: the node positions each entity owns, the
+# triangle cells of each Surface, and the Point-to-vertex incidence of the
+# Curve cells. `edits` is the assembly edit count the index was built at; a
+# changed count voids it, and appended nodes and cells extend it.
+mutable struct _HigherAssemblyIndex
+    edits::Int
+    nodes::Int
+    owned::Dict{Tuple{Int,Int32},Vector{Int32}}
+    cells::Int
+    triangles::Dict{Tuple{Int,Int32},Vector{Int}}
+    incidence::Union{Nothing,Dict{Int32,Int32}}
+end
+_HigherAssemblyIndex()=_HigherAssemblyIndex(-1,0,Dict{Tuple{Int,Int32},Vector{Int32}}(),0,
+    Dict{Tuple{Int,Int32},Vector{Int}}(),nothing)
+
+function _higher_index_sync!(index::_HigherAssemblyIndex,assembly)
+    if index.edits!=assembly.edits || index.nodes>length(assembly.nodes) ||
+            index.cells>length(assembly.cells)
+        empty!(index.owned);empty!(index.triangles)
+        index.nodes=0;index.cells=0;index.incidence=nothing;index.edits=assembly.edits
+    end
+    for position in index.nodes+1:length(assembly.nodes)
+        push!(get!(()->Int32[],index.owned,assembly.nodes[position].owner),Int32(position))
+    end
+    index.nodes=length(assembly.nodes)
+    for position in index.cells+1:length(assembly.cells)
+        cell=assembly.cells[position]
+        if cell.owner[1]==2
+            msh_spec(cell.msh).family===:tri &&
+                push!(get!(()->Int[],index.triangles,cell.owner),position)
+        elseif cell.owner[1]==1 && cell.msh==1
+            # A new Line cell changes the endpoint degrees the incidence reads.
+            index.incidence=nothing
+        end
+    end
+    index.cells=length(assembly.cells)
+    return index
+end
+
+# `_higher_point_incidence_nodes`, computed once while no Line cell is added
+# and no row is edited. It throws for an inconsistent endpoint binding; that
+# is not cached, so every part that asks sees the same error.
+function _higher_index_point_incidence!(index::_HigherAssemblyIndex,assembly,m)
+    incidence=index.incidence
+    if incidence===nothing
+        incidence=_higher_point_incidence_nodes(assembly,m)
+        index.incidence=incidence
+    end
+    return incidence
+end
+
+# The nodes one entity owned when a part began (`initial` nodes), as
+# `_higher_append_part!` matches generated boundary rows against them: by exact
+# coordinates, and along the entity's longest axis for the tolerance search.
+# Source rows of a discarded entity are not candidates.
+function _higher_index_candidates(index::_HigherAssemblyIndex,assembly,owner,initial,
+                                  source_nodes,discarded)
+    table=Dict{NTuple{3,Float64},Vector{Int32}}()
+    owned=get(index.owned,owner,nothing)
+    owned===nothing && return table,nothing
+    first_slot=owner in discarded ? searchsortedfirst(owned,source_nodes+1) : 1
+    last_slot=searchsortedlast(owned,initial)
+    first_slot<=last_slot || return table,nothing
+    positions=owned[first_slot:last_slot]
+    for position in positions
+        push!(get!(()->Int32[],table,assembly.nodes[position].point),position)
+    end
+    spans=ntuple(axis->maximum(assembly.nodes[i].point[axis] for i in positions)-
+                       minimum(assembly.nodes[i].point[axis] for i in positions),3)
+    selected_axis=argmax(spans)
+    ordered=sort(positions;by=i->assembly.nodes[i].point[selected_axis])
+    return table,(selected_axis,
+        Float64[assembly.nodes[i].point[selected_axis] for i in ordered],ordered)
+end
+
 function _higher_assembly_authority(assembly,m,done;ranks=nothing,carrier=nothing,
                                     carrier_rows=Int32[],old_supports=nothing)
     # SetOrder1 deletes old native high-order vertices before extrusion reads
@@ -397,7 +474,7 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
                               source_cell_high_water=nothing,native_orphan_births=nothing,
                               source_batch_receipt=nothing,
                               source_row_order=nothing,source_volume_production=nothing,
-                              emit_cells=true)
+                              emit_cells=true,assembly_index=nothing)
     class===nothing && throw(ArgumentError(
         "$(assembly.caller): generated entity ($dimension, $tag) has no ownership metadata"))
     if source_row_order!==nothing
@@ -451,26 +528,16 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
             merge(native,(rows=source_emission.rows,)) : source_emission
     end
     mapping=if source_binding===nothing
-        point_incidence=_higher_point_incidence_nodes(assembly,m)
-        candidates=Dict{Tuple{Int,Int32},Vector{Int32}}()
-        for (position,node) in enumerate(assembly.nodes)
-            position<=source_nodes && node.owner in discarded && continue
-            push!(get!(()->Int32[],candidates,node.owner),Int32(position))
-        end
-        points=Dict{Tuple{Tuple{Int,Int32},NTuple{3,Float64}},Vector{Int32}}()
-        ranges=Dict{Tuple{Int,Int32},Tuple{Int,Vector{Float64},Vector{Int32}}}()
-        for (owner,positions) in candidates
-            for position in positions
-                point=assembly.nodes[position].point
-                push!(get!(()->Int32[],points,(owner,point)),position)
-            end
-            spans=ntuple(axis->maximum(assembly.nodes[i].point[axis] for i in positions)-
-                               minimum(assembly.nodes[i].point[axis] for i in positions),3)
-            selected_axis=argmax(spans)
-            ordered=sort(positions;by=i->assembly.nodes[i].point[selected_axis])
-            ranges[owner]=(selected_axis,
-                Float64[assembly.nodes[i].point[selected_axis] for i in ordered],ordered)
-        end
+        # The candidates of an entity are the nodes it owned when this part
+        # began. They are looked up per entity when a row first needs them:
+        # a part with born row identities needs none, and tabulating every
+        # node for every part is quadratic over a pass.
+        index=_higher_index_sync!(assembly_index===nothing ? _HigherAssemblyIndex() :
+            assembly_index,assembly)
+        initial_nodes=length(assembly.nodes)
+        point_incidence=_higher_index_point_incidence!(index,assembly,m)
+        points=Dict{Tuple{Int,Int32},Dict{NTuple{3,Float64},Vector{Int32}}}()
+        ranges=Dict{Tuple{Int,Int32},Union{Nothing,Tuple{Int,Vector{Float64},Vector{Int32}}}}()
         mapping=Vector{Int32}(undef,nnodes(mesh))
         for position in (native===nothing ?
             source_row_order===nothing ? axes(mesh.coords,2) : source_row_order : native.rows)
@@ -520,9 +587,14 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
             matches=Int32[]
             if owner[1]<dimension || owner in emitted
                 tolerance=64eps(Float64)*max(1.0,maximum(abs,point))
-                append!(matches,get(points,(owner,point),Int32[]))
-                if isempty(matches) && haskey(ranges,owner)
-                    search_axis,values,search_positions=ranges[owner]
+                if !haskey(points,owner)
+                    points[owner],ranges[owner]=_higher_index_candidates(index,assembly,
+                        owner,initial_nodes,source_nodes,discarded)
+                end
+                append!(matches,get(points[owner],point,Int32[]))
+                range=ranges[owner]
+                if isempty(matches) && range!==nothing
+                    search_axis,values,search_positions=range
                     lo=searchsortedfirst(values,prevfloat(point[search_axis]-tolerance))
                     hi=searchsortedlast(values,nextfloat(point[search_axis]+tolerance))
                     for slot in lo:hi
@@ -536,8 +608,9 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
                 "$(assembly.caller): generated boundary on entity $owner has ambiguous source identity"))
             if isempty(matches)
                 node=_dim01_add_node!(assembly,_dim01_next_tag!(assembly,true),point,owner,parameter)
-                push!(get!(()->Int32[],candidates,owner),node)
-                push!(get!(()->Int32[],points,(owner,point)),node)
+                # Only an entity that is matched at all is matched again.
+                table=get(points,owner,nothing)
+                table===nothing || push!(get!(()->Int32[],table,point),node)
                 mapping[position]=node
             else
                 node=only(matches);matched_node=assembly.nodes[node]
@@ -2001,7 +2074,8 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
         parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
         periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
         metric_surface,constructor_inputs,size_field,native_recombine_events,
-        unvalidated_inputs=nothing,live=nothing,lines=nothing,validated=nothing)
+        unvalidated_inputs=nothing,live=nothing,lines=nothing,validated=nothing,
+        assembly_index=nothing)
             alternate=produced isa Model._ModelSurfaceGeometryProduction ? produced.geometry : nothing
             source_binding=produced isa Model._ModelSurfaceGeometryProduction ? produced.production :
                 produced isa Model._ModelSurfaceProduction ? produced : nothing
@@ -2023,7 +2097,8 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                 source_row_tags=swept===nothing ? nothing : swept.node_tags,
                 source_row_retained=swept===nothing ? nothing : swept.retained,
                 source_rows_existing_only=swept!==nothing,
-                native_orphan_births=ordinary===nothing ? nothing : native_orphan_births)
+                native_orphan_births=ordinary===nothing ? nothing : native_orphan_births,
+                assembly_index)
             if source_binding!==nothing
                 # A grown recovered chain invalidates every detached produce
                 # still waiting on the consumed Curve's stored discretization.
@@ -2259,6 +2334,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     live===nothing || (input=_higher_live_seed!(live,assembly,input))
     lines=_HigherLineCells()
     validated=Dict{Tuple{Int,Int32},Tuple{Any,Any,Any}}()
+    assembly_index=_HigherAssemblyIndex()
     for (ui,tags) in enumerate(units)
         work=parallel_units===nothing ? nothing : parallel_units[ui]
         if work!==nothing && parallel_results[ui]===nothing
@@ -2295,7 +2371,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
                 periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
                 metric_surface,constructor_inputs,size_field,native_recombine_events,
-                unvalidated_inputs,live,lines,validated))::
+                unvalidated_inputs,live,lines,validated,assembly_index))::
                 Tuple{Model._ModelMeshAuthority,Union{Nothing,Model._ExtrudeNoNewScope}}
         end
         # State this unit left behind that a later detached produce still
@@ -2458,7 +2534,7 @@ end
     return (a,b,c)
 end
 
-function _higher_native_region_surface_order!(assembly,m,tag)
+function _higher_native_region_surface_order!(assembly,m,tag;assembly_index=nothing)
     m.meshing.algorithm_3d in (1,3) || return nothing
     Model._model_factory_volume_encoding(m,tag) && return nothing
     # meshGRegion sorts the real Region's boundary and embedded Surface
@@ -2471,9 +2547,17 @@ function _higher_native_region_surface_order!(assembly,m,tag)
         dim==2 && push!(owners,(2,Int32(surface)))
     end
     positions=Dict{Tuple{Int,Int32},Vector{Int}}()
-    for (index,cell) in enumerate(assembly.cells)
-        cell.owner in owners && msh_spec(cell.msh).family===:tri || continue
-        push!(get!(positions,cell.owner,Int[]),index)
+    if assembly_index===nothing
+        for (index,cell) in enumerate(assembly.cells)
+            cell.owner in owners && msh_spec(cell.msh).family===:tri || continue
+            push!(get!(positions,cell.owner,Int[]),index)
+        end
+    else
+        triangles=_higher_index_sync!(assembly_index,assembly).triangles
+        for owner in owners
+            rows=get(triangles,owner,nothing)
+            rows===nothing || (positions[owner]=rows)
+        end
     end
     for rows in values(positions)
         cells=assembly.cells[rows]
@@ -2481,6 +2565,9 @@ function _higher_native_region_surface_order!(assembly,m,tag)
         assembly.cells[rows]=cells
         assembly.edits+=1
     end
+    # The cells moved among positions of one Surface and one family: every
+    # table of the index still holds.
+    assembly_index===nothing || isempty(positions) || (assembly_index.edits=assembly.edits)
     return nothing
 end
 
@@ -2729,12 +2816,14 @@ end
 
 function _higher_volume_input_classification(assembly,m,mesh::Union{Mesh,MixedMesh},input,tag,
                                             source_tags,caller;
-                                            boundary_writeback=nothing)
+                                            boundary_writeback=nothing,actual_rows=nothing)
     length(source_tags)==nnodes(mesh) && allunique(source_tags) || throw(ArgumentError(
         "$caller: native Volume[$tag] lacks a unique complete row UID binding"))
     actual=input.mesh;data=actual.entity_data
     rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(source_tags))
-    old_rows=Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags))
+    # `actual_rows` is this table for `input`, shared by the Regions of a pass.
+    old_rows=actual_rows===nothing ?
+        Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags)) : actual_rows
     closure=Model._model_mesh_projection_closure(m,3,tag,caller)
     primary=(3,Int32(tag))
     node_entities=fill(primary,nnodes(mesh))
@@ -3649,6 +3738,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             meshed,assembly.caller)
     end
     volume_tags=staged ? Int[] : sort!(meshed)
+    assembly_index=_HigherAssemblyIndex()
+    actual_rows=nothing
     # `General.NumThreads` detaches runs of independent Regions: each
     # eligible unit produces its receipt on a transaction copy under
     # `Threads.@threads`, and the unchanged serial merge below replays or
@@ -3723,7 +3814,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 _geometry_points=_higher_lazy_geometry_source_points(assembly,geometry_birth))) :
                 hybrid_batch.products[tag]
             production isa Union{Model._ModelVolumeGeometryProduction,Model._ModelNativeHybridVolumeProduction} &&
-                _higher_native_region_surface_order!(assembly,m,tag)
+                _higher_native_region_surface_order!(assembly,m,tag;assembly_index)
             mesh=production.mesh
             if production isa Model._ModelNativeHybridVolumeProduction
                 hybrid_production=production
@@ -3771,8 +3862,10 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
                 source_rows,source_row_retained,assembly.caller;grid_receipt=source_emission.grid)
         elseif native_rows
+            actual_rows===nothing && (actual_rows=Dict(uid=>row for (row,uid) in
+                enumerate(input.mesh.entity_data.external_node_tags)))
             _higher_volume_input_classification(assembly,m,mesh,input,tag,source_rows,assembly.caller;
-                boundary_writeback=wb_receipt)
+                boundary_writeback=wb_receipt,actual_rows)
         else
             _classify_cached_mesh(m,_classification_skeleton(
                 mesh,get(m.meshing.reverse,(3,tag),false)),3,tag,mesh;_extrude_scope=scope,
@@ -3799,7 +3892,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             source_cell_tags=source_cells,source_cell_high_water=source_cell_max,
             source_batch_receipt=hybrid_batch_receipt,
             source_row_order=hybrid_production===nothing ? nothing : hybrid_production.registration_rows,
-            source_volume_production=hybrid_production,
+            source_volume_production=hybrid_production,assembly_index,
             # Recorded TF producers can create unused Region-owned logical rows.
             # Keep their born identities through finish, like ordinary sweep
             # events — swept non-ordinary Regions share that convention
@@ -3848,6 +3941,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
     # Subdivision remeshes lateral cells after allocating the volume. The
     # existing lateral vertex identities remain available to this cell pass.
     filter!(cell->!(cell.owner[1]==2 && Int(cell.owner[2]) in laterals),assembly.cells)
+    assembly.edits+=1
     lateral_owners=Set((2,Int32(tag)) for tag in laterals)
     for tag in sort!(collect(laterals))
         plan=get(lateral_plans,tag,nothing)
@@ -3863,7 +3957,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             emitted=lateral_owners,source_nodes,geometry_cells,
             source_row_tags=plan===nothing ? (swept===nothing ? nothing : swept.node_tags) : plan.node_tags,
             source_row_retained=plan===nothing ? (swept===nothing ? nothing : swept.retained) : trues(length(plan.node_tags)),
-            source_rows_existing_only=plan!==nothing || swept!==nothing)
+            source_rows_existing_only=plan!==nothing || swept!==nothing,assembly_index)
         push!(surface_parts,(tag,mesh,class,mapping))
         push!(done,(2,Int32(tag)))
     end
