@@ -218,8 +218,52 @@ end
 
 # One entity's product: the rows it owns or references, in private-rank order,
 # and its cells per block. `selected` lists (block, columns) in block order.
-function _model_mesh_owner_product(mesh::MixedMesh,owner,owned,selected,private_rank,caller)
+#
+# `work` is a zeroed table of one entry per mesh row, lent by a caller that
+# builds every product of a mesh: rows are then marked and numbered in it
+# instead of in a set and a dictionary, and it is zeroed again on return. A
+# large product (a Region of half a million cells) spends its time in those
+# hashes otherwise. Without `work`, a product costs only its own size, which
+# an append to one entity among many needs.
+function _model_mesh_owner_product(mesh::MixedMesh,owner,owned,selected,private_rank,caller;
+                                   work::Union{Nothing,Vector{Int32}}=nothing)
     data=mesh.entity_data
+    if work!==nothing
+        rows=Int32[]
+        for row in owned
+            work[row]==0 || continue
+            work[row]=Int32(-1);push!(rows,row)
+        end
+        for (bi,columns) in selected
+            nodes=mesh.blocks[bi].nodes
+            for column in columns,slot in axes(nodes,1)
+                node=nodes[slot,column]
+                0<node<=nnodes(mesh) || throw(ArgumentError(
+                    "$caller: entity $owner references an invalid actual node row"))
+                work[node]==0 || continue
+                work[node]=Int32(-1);push!(rows,node)
+            end
+        end
+        sort!(rows;by=row->private_rank[row])
+        for (index,row) in enumerate(rows)
+            work[row]=Int32(index)
+        end
+        blocks=ElementBlock[];tags=Vector{UInt64}[]
+        for (bi,columns) in selected
+            block=mesh.blocks[bi];nodes=block.nodes
+            local_nodes=Matrix{Int32}(undef,size(nodes,1),length(columns))
+            for (position,column) in enumerate(columns),slot in axes(nodes,1)
+                local_nodes[slot,position]=work[nodes[slot,column]]
+            end
+            push!(blocks,ElementBlock(Elements._TRUSTED_MIXED_STORAGE,block.msh,local_nodes,
+                block.tags[columns]))
+            push!(tags,data.external_element_tags[bi][columns])
+        end
+        for row in rows
+            work[row]=Int32(0)
+        end
+        return _ModelMeshProduct(owner,rows,blocks,tags)
+    end
     referenced=Set(owned)
     for (bi,columns) in selected,node in mesh.blocks[bi].nodes[:,columns]
         0<node<=nnodes(mesh) || throw(ArgumentError(
@@ -263,24 +307,35 @@ function _model_mesh_authority(mesh::MixedMesh,done=();caller="mesh authority",
             "$caller: geometry carrier rows do not align with actual identities"))
     selections=Dict{Tuple{Int,Int32},Vector{Tuple{Int,Vector{Int}}}}()
     owned_rows=Dict{Tuple{Int,Int32},Vector{Int32}}()
+    # Nodes and cells arrive entity by entity: the table entry of a run of one
+    # owner is looked up once.
+    run_owner=(-1,Int32(-1));run_rows=Int32[]
     for (row,owner) in enumerate(data.node_entities)
-        push!(get!(()->Int32[],owned_rows,owner),Int32(row))
-        get!(()->Tuple{Int,Vector{Int}}[],selections,owner)
+        if owner!=run_owner
+            run_owner=owner
+            run_rows=get!(()->Int32[],owned_rows,owner)
+            get!(()->Tuple{Int,Vector{Int}}[],selections,owner)
+        end
+        push!(run_rows,Int32(row))
     end
-    all_tags=Set{UInt64}()
+    seen_tags=Elements._SeenTags(data.external_element_tags)
     for (bi,block) in enumerate(mesh.blocks)
         block isa ElementBlock || throw(ArgumentError("$caller: unsupported mesh block"))
         owners=data.block_entities[bi];tags=data.external_element_tags[bi]
         length(owners)==size(block.nodes,2)==length(tags) || throw(ArgumentError(
             "$caller: actual cell metadata does not align with connectivity"))
         for tag in tags
-            !(tag in all_tags) || throw(ArgumentError(
+            Elements._seen_tag!(seen_tags,tag) && throw(ArgumentError(
                 "$caller: actual element labels must be positive, unique and Int32 representable"))
-            push!(all_tags,tag)
         end
         by_owner=Dict{Int32,Vector{Int}}()
+        cell_owner=Int32(-1);cell_columns=Int[]
         for (column,owner) in enumerate(owners)
-            push!(get!(()->Int[],by_owner,owner),column)
+            if owner!=cell_owner || column==1
+                cell_owner=owner
+                cell_columns=get!(()->Int[],by_owner,owner)
+            end
+            push!(cell_columns,column)
         end
         for (owner,columns) in by_owner
             key=(msh_dimension(block.msh),owner)
@@ -288,9 +343,10 @@ function _model_mesh_authority(mesh::MixedMesh,done=();caller="mesh authority",
         end
     end
     products=Dict{Tuple{Int,Int32},_ModelMeshProduct}()
+    work=zeros(Int32,nnodes(mesh))
     for (owner,selected) in selections
         products[owner]=_model_mesh_owner_product(mesh,owner,
-            get(owned_rows,owner,Int32[]),selected,private_rank,caller)
+            get(owned_rows,owner,Int32[]),selected,private_rank,caller;work)
     end
     completed=Set{Tuple{Int,Int32}}((Int(dim),Int32(tag)) for (dim,tag) in done)
     bindings=_model_mesh_carrier_cell_tags(mesh,carrier,carrier_cells,caller)

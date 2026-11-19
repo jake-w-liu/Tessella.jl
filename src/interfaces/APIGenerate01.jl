@@ -120,17 +120,22 @@ function _dim01_physical(m,entity)
         Model._model_projection_physical_tags(m,entity[1],entity[2]))
 end
 
+# `raw=false` leaves the set of raw cells empty: only a cache without public
+# labels is matched against it, and a tuple per cell of a large record costs
+# more than the rest of the ingest.
 function _dim01_ingest_record_cells!(assembly,m,records;preserve_source_order::Bool=false,
-                                    retired_nodes=nothing)
+                                    retired_nodes=nothing,raw::Bool=true)
     cell_tags=Dict{UInt64,Int}()
     raw_cells=Set{Tuple{Int,Tuple{Int,Int32},Tuple}}()
     count=sum(length(record.element_tags) for (_,record) in records;init=0)
-    sizehint!(cell_tags,count);sizehint!(raw_cells,count)
+    sizehint!(cell_tags,count);raw && sizehint!(raw_cells,count)
     for ((dim,tag),record) in records
         owner=(dim,Int32(tag))
         retired=retired_nodes===nothing ? nothing : get(retired_nodes,owner,nothing)
+        # One projection per record, taken with its first cell.
+        physical=nothing
         for column in eachindex(record.element_tags)
-            nodes=Int32[]
+            nodes=Int32[];sizehint!(nodes,length(record.element_nodes[column]))
             for source in record.element_nodes[column]
                 position=get(assembly.node_positions,UInt64(source),Int32(0))
                 if retired!==nothing && UInt64(source) in retired
@@ -147,9 +152,10 @@ function _dim01_ingest_record_cells!(assembly,m,records;preserve_source_order::B
             external=UInt64(record.element_tags[column])
             haskey(cell_tags,external) && throw(ArgumentError(
                 "$(assembly.caller): duplicate source element tag $external"))
+            physical===nothing && (physical=_dim01_physical(m,(dim,tag)))
             _dim01_add_cell!(assembly,record.element_types[column],owner,nodes,external;
-                             physical=_dim01_physical(m,(dim,tag)),preserve_source_order)
-            push!(raw_cells,(Int(record.element_types[column]),owner,Tuple(nodes)))
+                             physical,preserve_source_order)
+            raw && push!(raw_cells,(Int(record.element_types[column]),owner,Tuple(nodes)))
             cell_tags[external]=length(assembly.cells)
         end
     end
@@ -168,7 +174,8 @@ function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bo
         end
     end
     if cached===nothing
-        _dim01_ingest_record_cells!(assembly,m,records;preserve_source_order=preserve_source_order,retired_nodes)
+        _dim01_ingest_record_cells!(assembly,m,records;preserve_source_order=preserve_source_order,
+            retired_nodes,raw=false)
         return Int32[]
     end
     cached_class===nothing && throw(ArgumentError(
@@ -233,12 +240,16 @@ function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bo
     # A raw cell may reference a published cache-owned primary/support node.
     # Resolve those exact labels before parsing record connectivity; raw nodes
     # still establish ownership first and parameter enrichment remains intact.
-    cell_tags,raw_cells=_dim01_ingest_record_cells!(assembly,m,records;preserve_source_order=preserve_source_order,retired_nodes)
+    cell_tags,raw_cells=_dim01_ingest_record_cells!(assembly,m,records;preserve_source_order=preserve_source_order,
+        retired_nodes,raw=!authoritative)
     for (bi,(msh,dim,offset,cells,owners)) in enumerate(_cache_catalog(cached,cached_class))
         physical=_cache_native_blocks(cached)[bi][3]
         for column in axes(cells,2)
             owner=(dim,owners[column])
-            nodes=mapping[cells[:,column]]
+            nodes=Vector{Int32}(undef,size(cells,1))
+            for slot in eachindex(nodes)
+                nodes[slot]=mapping[cells[slot,column]]
+            end
             retired=retired_nodes===nothing ? nothing : get(retired_nodes,owner,nothing)
             if retired!==nothing
                 for slot in eachindex(nodes)
