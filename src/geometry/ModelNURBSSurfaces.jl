@@ -216,6 +216,12 @@ function _model_tensor_surface!(m,points,num_points_u,family,tag,degree_u,degree
     vertex_uv=Dict(point_tags[1]=>lo,point_tags[2]=>(lo[1],hi[2]),
                    point_tags[3]=>(hi[1],lo[2]),point_tags[4]=>hi)
     curve_tags=Int[]
+    # Each boundary edge is an iso-parameter line of the patch, so its pcurve
+    # is that line of the (u,v) square. With the pcurves on the record the
+    # face is meshed in its own parameter domain like every other curved OCC
+    # face; without them it reached the plane mesher and was rejected
+    # ("plane geometry requires a Plane surface").
+    pcurves=Dict{Int,NamedTuple}()
     geometry=(occ=family===:bezier ? :tensor_bezier : :tensor_bspline,
               patch=patch,vertex_uv=vertex_uv,reversed=false)
     endpoints=((1,2),(1,3),(3,4),(2,4))
@@ -228,13 +234,17 @@ function _model_tensor_surface!(m,points,num_points_u,family,tag,degree_u,degree
         fixed=side in (1,2) ? lo[3-axis] : hi[3-axis]
         staged.curve_geometry[curve]=(occ=:surface_iso,face=geometry,axis=axis,
                                       fixed=fixed,t0=lo[axis],t1=hi[axis])
+        pcurves[curve]=(fwd=(lin2d=axis==1 ? ((0.0,Float64(fixed)),(1.0,0.0)) :
+                                             ((Float64(fixed),0.0),(0.0,1.0)),),
+                        rev=nothing)
         push!(curve_tags,curve)
     end
     loop=add_curve_loop!(staged,[-curve_tags[1],curve_tags[2],curve_tags[3],-curve_tags[4]])
     surface_tag=_alloc_tag!(staged,2,requested,caller)
     staged.surfaces[surface_tag]=[loop]
     staged.surface_types[surface_tag]=family===:bezier ? :tensor_bezier : :tensor_bspline
-    staged.surface_geometry[surface_tag]=merge(geometry,(boundary_curves=curve_tags,))
+    staged.surface_geometry[surface_tag]=merge(geometry,
+        (boundary_curves=curve_tags,pcurves=pcurves))
     for field in fieldnames(GeoModel)
         setfield!(m,field,getfield(staged,field))
     end
