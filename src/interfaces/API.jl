@@ -8826,6 +8826,24 @@ function _set_periodic(dim,slave_entities,master_entities,affine;atol=1e-12)
     end
 end
 
+# Rows that are not a higher-order node: a row is higher-order when it only
+# ever occupies a non-corner slot of a cell (rows no cell references stay primary).
+function _mesh_primary_node_mask(mesh::MixedMesh)
+    corner=falses(nnodes(mesh));higher=falses(nnodes(mesh))
+    for block in mesh.blocks
+        block isa ElementBlock || continue
+        family=msh_spec(block.msh).family
+        corners=family===:pnt ? 1 : family===:lin ? 2 : family===:tri ? 3 :
+            family===:qua || family===:tet ? 4 : family===:pyr ? 5 :
+            family===:pri ? 6 : family===:hex ? 8 : size(block.nodes,1)
+        corners=min(corners,size(block.nodes,1))
+        @inbounds for column in axes(block.nodes,2),row in axes(block.nodes,1)
+            (row<=corners ? corner : higher)[block.nodes[row,column]]=true
+        end
+    end
+    return .!(higher .& .!corner)
+end
+
 function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
     return lock(STATE_LOCK) do
         current=_model_locked()
@@ -8867,6 +8885,31 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
             return (master_entity=constraint===nothing ? Int32(slave) : constraint.master_entity,
                 slave_nodes=UInt64[],master_nodes=UInt64[],
                 affine=constraint===nothing || constraint.affine===nothing ? Float64[] : collect(constraint.affine))
+        end
+        if (dim==0 || dim==1) && cached isa MixedMesh && !isempty(cached.periodic_links) &&
+                _mesh_public_tags(cached)!==nothing
+            # A loaded MSH file declares its Point and Curve correspondences
+            # in `$Periodic`; no model constraint exists for them.
+            caller="API.mesh.get_periodic_nodes"
+            slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
+            link=nothing
+            for candidate in cached.periodic_links
+                candidate.dim==dim && candidate.slave_entity==slave || continue
+                link=candidate;break
+            end
+            if link!==nothing && !haskey(current.periodic,(dim,slave))
+                _model_entity_known(current,dim,slave) || throw(ArgumentError(
+                    "$caller: unknown entity ($dim,$slave)"))
+                public=_mesh_public_tags(cached)
+                keep=include_high_order ? trues(length(link.slave_nodes)) :
+                    let primary=_mesh_primary_node_mask(cached)
+                        [primary[a] && primary[b] for (a,b) in zip(link.slave_nodes,link.master_nodes)]
+                    end
+                return (master_entity=link.master_entity,
+                    slave_nodes=_cache_node_tags(public,link.slave_nodes[keep]),
+                    master_nodes=_cache_node_tags(public,link.master_nodes[keep]),
+                    affine=link.affine===nothing ? Float64[] : collect(link.affine))
+            end
         end
         if dim==1 && cached isa MixedMesh && _mesh_public_tags(cached)!==nothing
             caller="API.mesh.get_periodic_nodes"
@@ -9745,6 +9788,31 @@ function _view_get_model_data(tag,step)
             end
         end
         return types,tags,data
+    end
+end
+
+function _view_get_model_data_full(tag,step)
+    caller="API.view.get_model_data_full"
+    step_value=_mesh_query_integer(step,caller,"step")
+    return lock(STATE_LOCK) do
+        view=_session_view_data(tag,caller)
+        keys_at_step=sort!([key for key in keys(view.model_data) if key[1]==step_value])
+        if isempty(keys_at_step)
+            # Same diagnostics as the flat accessor.
+            _view_get_model_data(tag,step)
+            return ("",UInt64[],Vector{Float64}[],0.0,0)
+        end
+        key=first(keys_at_step)
+        tags,values,components=view.model_data[key]
+        context=get(view.model_contexts,key,nothing)
+        counts=context===nothing ? fill(components,length(tags)) : context.counts
+        data=Vector{Vector{Float64}}(undef,length(tags));offset=0
+        for index in eachindex(tags)
+            width=Int(counts[index])
+            data[index]=values[offset+1:offset+width];offset+=width
+        end
+        time=context===nothing ? 0.0 : Float64(context.time)
+        return (key[2],copy(tags),data,time,Int(components))
     end
 end
 
@@ -12170,7 +12238,7 @@ module view
 
 using ..API: _view_add,_view_remove,_view_get_index,_view_get_tags,
              _view_add_list_data,_view_get_list_data,_view_add_model_data,
-             _view_get_model_data,_view_set_number,_view_get_number,
+             _view_get_model_data,_view_get_model_data_full,_view_set_number,_view_get_number,
              _view_set_string,_view_get_string,_view_write,
              _view_add_list_data_string,_view_get_list_data_strings,
              _view_copy_options,_view_set_visibility_per_window,
@@ -12202,6 +12270,15 @@ add_model_data(tag,step,model_name,data_type,tags,data,time=0.0,
                          num_components,partition)
 """Return the model data types, entity tags, and values of view `tag` at `step`."""
 get_model_data(tag,step)=_view_get_model_data(tag,step)
+"""
+    get_model_data_full(tag, step) -> (dataType, tags, data, time, numComponents)
+
+Gmsh's `gmsh.view.getModelData` result shape for one stored step: the data type
+name, the entity tags, one `Vector{Float64}` per tag (for `ElementNodeData` all
+node values of the element), the step's time and the number of components.
+[`get_model_data`](@ref) keeps returning the flat `(types, tags, values)` triple.
+"""
+get_model_data_full(tag,step)=_view_get_model_data_full(tag,step)
 "Set numeric option `name` of view `tag` to `value`."
 set_number(tag,name,value)=_view_set_number(tag,name,value)
 "Return numeric option `name` of view `tag` (0 if unset)."

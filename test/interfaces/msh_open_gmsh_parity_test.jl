@@ -215,26 +215,6 @@ end
         end
     end
 
-    @testset "boundary entities are listed once" begin
-        opened(SEAM) do
-            @test [b[2] for b in API.model.get_boundary([(2, 1)], false, false, false)] == [1, 2]
-        end
-    end
-
-    @testset "bounding boxes of loaded entities" begin
-        opened(SEAM) do
-            @test API.model.get_bounding_box(0, 3) == (0.0, 1.0, 0.0, 0.0, 1.0, 0.0)
-            @test API.model.get_bounding_box(2, 1) == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
-            # Gmsh: a Curve without elements has an empty box.
-            err = try API.model.get_bounding_box(1, 1); nothing catch e; e end
-            @test err isa ArgumentError && occursin("Empty bounding box", err.msg)
-            @test API.model.get_bounding_box(-1, -1) == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
-            @test API.model.get_entities_in_bounding_box(-1, -1, -1, 2, 2, 2, 1) == [(1, 1), (1, 2)]
-            @test API.model.get_entities_in_bounding_box(-1, -1, -1, 2, 2, 2, 0) ==
-                  [(0, 1), (0, 2), (0, 3)]
-        end
-    end
-
     @testset "format versions 2.0, 2.1 and 4.2" begin
         for version in ("2.0", "2.1", "2.2")
             # Before 2.2 the third tag is the partition number itself.
@@ -259,6 +239,58 @@ end
         end
     end
 
+    @testset "boundary entities are listed once" begin
+        opened(SEAM) do
+            @test [b[2] for b in API.model.get_boundary([(2, 1)], false, false, false)] == [1, 2]
+        end
+    end
+
+    @testset "bounding boxes of loaded entities" begin
+        opened(SEAM) do
+            @test API.model.get_bounding_box(0, 3) == (0.0, 1.0, 0.0, 0.0, 1.0, 0.0)
+            @test API.model.get_bounding_box(2, 1) == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+            # Gmsh: a Curve without elements has an empty box.
+            err = try API.model.get_bounding_box(1, 1); nothing catch e; e end
+            @test err isa ArgumentError && occursin("Empty bounding box", err.msg)
+            @test API.model.get_bounding_box(-1, -1) == (0.0, 0.0, 0.0, 1.0, 1.0, 0.0)
+            @test API.model.get_entities_in_bounding_box(-1, -1, -1, 2, 2, 2, 1) == [(1, 1), (1, 2)]
+            @test API.model.get_entities_in_bounding_box(-1, -1, -1, 2, 2, 2, 0) ==
+                  [(0, 1), (0, 2), (0, 3)]
+        end
+    end
+
+    @testset "periodic Points and Curves of a loaded file" begin
+        opened(PERIODIC) do
+            master, slaves, masters, affine = API.mesh.get_periodic_nodes(0, 3, false)
+            @test master == 1 && slaves == [3] && masters == [1] && isempty(affine)
+            master, slaves, masters, _ = API.mesh.get_periodic_nodes(1, 2, false)
+            @test master == 1
+            @test sort(collect(zip(slaves, masters))) == [(3, 1), (4, 2)]
+            @test API.mesh.get_periodic_nodes(1, 1, false)[1] == 1
+        end
+    end
+
+    @testset "Gmsh-shaped model data" begin
+        API.initialize()
+        try
+            API.model.add("m")
+            API.model.geo.add_point(0, 0, 0; meshSize = 1.0)
+            API.model.geo.add_point(1, 0, 0; meshSize = 1.0)
+            API.model.geo.add_line(1, 2)
+            API.model.geo.synchronize()
+            API.mesh.generate(1)
+            nodes = API.mesh.get_nodes()[1]
+            view = API.view.add("v")
+            API.view.add_model_data(view, 0, "m", "NodeData", nodes,
+                [[Float64(i), 2.0i] for i in eachindex(nodes)], 0.5, 2)
+            kind, tags, data, time, components = API.view.get_model_data_full(view, 0)
+            @test kind == "NodeData" && tags == nodes && time == 0.5 && components == 2
+            @test data == [[Float64(i), 2.0i] for i in eachindex(nodes)]
+            @test API.view.get_model_data(view, 0)[3] == reduce(vcat, data)
+        finally
+            API.finalize()
+        end
+    end
 end
 
 end # module
