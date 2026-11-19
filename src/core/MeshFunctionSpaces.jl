@@ -236,6 +236,7 @@ end
     # `getBasisFunctions` orientation count agrees with 8!; Tessella follows
     # the verified basis count, not the metadata divergence.
     family===:hex && return 40320
+    family===:pyr && return 120
     return 720 # :pri
 end
 
@@ -864,12 +865,23 @@ function mesh_basis_functions(element_type_value,local_coord,
 end
 
 """Return the number of reference orientations for a supported function space."""
+# Orientation queries (`getBasisFunctionsOrientation`, its per-element form and
+# `getNumberOfOrientations`) never look at the family or order of the space in
+# Gmsh 4.15.2: a nodal space answers zero and any hierarchical name ranks the
+# primary vertex tags of whatever element type it is given, pyramids and
+# points included.
+function _orientation_element_contract(element_type_value,space::_FunctionSpace,
+                                       caller::AbstractString)
+    element_type=_checked_element_type(element_type_value,caller)
+    return element_type,msh_spec(element_type).family,0,element_type
+end
+
 function mesh_number_of_orientations(element_type_value,function_space_type;
                                      caller::AbstractString=
                                          "mesh_number_of_orientations")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,family,_,_=_basis_element_contract(element_type,space,caller)
+    element_type,family,_,_=_orientation_element_contract(element_type,space,caller)
     return Int32(space.hierarchical ? _orientation_count(family) : 1)
 end
 
@@ -922,7 +934,7 @@ function mesh_basis_orientations(mesh::Mesh,element_type_value,
                                      "mesh_basis_orientations")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
+    element_type,_,_,_=_orientation_element_contract(element_type,space,caller)
     block=mesh_element_block(mesh,element_type)
     block===nothing && return Int32[]
     _,cells=block
@@ -946,7 +958,7 @@ function mesh_basis_orientations(mesh::Mesh,element_type_value,
                                      "mesh_basis_orientations")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
+    element_type,_,_,_=_orientation_element_contract(element_type,space,caller)
     block=mesh_element_block(mesh,element_type)
     block===nothing && return Int32[]
     _,cells=block
@@ -973,7 +985,7 @@ function mesh_basis_orientations(mesh::Mesh,element_type_value,
                                      "mesh_basis_orientations")
     element_type=_checked_element_type(element_type_value,caller)
     space=_function_space(function_space_type,caller)
-    element_type,_,_,_=_basis_element_contract(element_type,space,caller)
+    element_type,_,_,_=_orientation_element_contract(element_type,space,caller)
     block=mesh_element_block(mesh,element_type)
     block===nothing && return Int32[]
     _,cells=block
@@ -996,7 +1008,7 @@ function mesh_basis_orientation(mesh::Mesh,element_tag_value,
     tag=_checked_element_tag(mesh,element_tag_value,caller)
     space=_function_space(function_space_type,caller)
     record=mesh_element_record(mesh,tag)
-    _basis_element_contract(record.element_type,space,caller)
+    _orientation_element_contract(record.element_type,space,caller)
     return space.hierarchical ? _orientation_rank(record.node_tags) : Int32(0)
 end
 

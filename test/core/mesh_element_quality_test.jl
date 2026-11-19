@@ -36,7 +36,11 @@ end
     @test _ELEMENT_QUALITY.mesh_element_quality(fixture,1,"angleShape")==1.0
     @test _ELEMENT_QUALITY.mesh_element_quality(fixture,1,"minEdge")==2.0
     @test _ELEMENT_QUALITY.mesh_element_quality(fixture,1,"maxEdge")==2.0
-    for quality in ("minDetJac","maxDetJac","minSIGE","minIsotropy")
+    # Gmsh 4.15.2 answers DBL_MAX for the gradient-error measure of a line and
+    # 0 for its eta; the Jacobian-range measures of a 2-node line stay errors.
+    @test _ELEMENT_QUALITY.mesh_element_quality(fixture,1,"minSIGE")==floatmax(Float64)
+    @test _ELEMENT_QUALITY.mesh_element_quality(fixture,1,"eta")==0.0
+    for quality in ("minDetJac","maxDetJac","minIsotropy")
         @test_throws ArgumentError _ELEMENT_QUALITY.mesh_element_quality(
             fixture,1,quality)
     end
@@ -230,7 +234,7 @@ end
         ()->_ELEMENT_QUALITY.mesh_element_qualities(
             fixture,(big(typemax(Int))+1,),"volume"),
         ()->_ELEMENT_QUALITY.mesh_element_qualities(fixture,(1,),:volume),
-        ()->_ELEMENT_QUALITY.mesh_element_qualities(fixture,(1,),"eta"),
+        ()->_ELEMENT_QUALITY.mesh_element_qualities(fixture,(1,),"etaMin"),
         ()->_ELEMENT_QUALITY.mesh_element_qualities(fixture,(1,),"volume\0"),
         ()->_ELEMENT_QUALITY.mesh_element_qualities(
             fixture,(2,1),"minIsotropy"),

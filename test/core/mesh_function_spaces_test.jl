@@ -232,12 +232,12 @@ end
         @test h1[2]==repeat(lag,orientation_count)
         grad=mesh_basis_functions(
             element_type,points,"GradLagrange1",Int32[0])[2]
-        # Point GradH1Legendre1 is the verified zero gradient even though the
-        # pinned release answers [1,0,0] there; the differential pins that
-        # Gmsh divergence exactly.
+        # Gmsh 4.15.2 answers (1, 0, 0) for the gradient of the point function
+        # (HierarchicalBasisH1Point), not the zero gradient of the constant.
         @test mesh_basis_functions(
             element_type,points,"GradH1Legendre1",Int32[0])==
-            (Int32(3),grad,Int32(orientation_count))
+            (Int32(3),element_type==15 ? repeat([1.0,0.0,0.0],2) : grad,
+             Int32(orientation_count))
         selected=mesh_basis_functions(
             element_type,points,"H1Legendre1",
             orientation_count==1 ? Int32[0] : Int32[orientation_count-1,0])[2]

@@ -175,6 +175,10 @@ function _native_cell_sample_ige(a,b,c,determinant,family)
     l2=_native_cell_sample_norm(c)
     family===:hex && return determinant/l0/l1/l2
     l3=_native_cell_sample_norm(_native_cell_sample_sub(b,a))
+    # `_computeIGE` for TYPE_PRI: the triangle measure of the two base
+    # directions and their difference, each against the prism axis.
+    family===:pri && return (2.0/sqrt(3.0))*determinant*(1.0/l0/l1/l2+
+        1.0/l0/l3/l2+1.0/l1/l3/l2)/3.0
     l4=_native_cell_sample_norm(_native_cell_sample_sub(c,a))
     l5=_native_cell_sample_norm(_native_cell_sample_sub(c,b))
     return sqrt(2.0)*determinant*(1.0/l0/l5/l1+1.0/l0/l5/l2+1.0/l0/l5/l3+

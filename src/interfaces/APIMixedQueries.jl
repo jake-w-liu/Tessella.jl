@@ -591,7 +591,7 @@ function mesh_basis_orientations(mesh::MixedMesh,element_type,function_space_typ
         positions::Union{Nothing,UnitRange{Int},AbstractVector{<:Integer}}=nothing;
         caller::AbstractString="mesh_basis_orientations")
     space=MeshFunctionSpaces._function_space(function_space_type,caller)
-    msh,family,_,_=MeshFunctionSpaces._basis_element_contract(element_type,space,caller)
+    msh,family,_,_=MeshFunctionSpaces._orientation_element_contract(element_type,space,caller)
     block=_mesh_element_block(mesh,msh)
     block===nothing && return Int32[]
     _,cells=block
@@ -630,7 +630,7 @@ function mesh_basis_orientation(mesh::MixedMesh,element_tag,function_space_type;
     tag=_mesh_query_element_tag(mesh,element_tag,caller)
     space=MeshFunctionSpaces._function_space(function_space_type,caller)
     msh,_,cells,cell,family=_mixed_query_reference(mesh,tag,caller)
-    MeshFunctionSpaces._basis_element_contract(msh,space,caller)
+    MeshFunctionSpaces._orientation_element_contract(msh,space,caller)
     return _mixed_cell_orientation(mesh,cells,cell,space,family)
 end
 
@@ -664,13 +664,10 @@ function _mixed_keys_for_cells(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,msh
     coordinates=Vector{Float64}(undef,return_coord ? 3key_count : 0)
     primary=msh_spec(msh).family===:pnt ? 15 : msh_type(family,1)
     edge_patterns=MeshEntityTopology._simplex_edge_patterns(primary)
-    # Gmsh's element keys follow its MElement face order. Prism face functions
-    # pack the quadrangular faces first, followed by the triangular faces.
-    face_patterns=family===:pri ?
-        (MeshEntityTopology._simplex_face_patterns(primary,4)...,
-         MeshEntityTopology._simplex_face_patterns(primary,3)...) :
-        (MeshEntityTopology._simplex_face_patterns(primary,3)...,
-         MeshEntityTopology._simplex_face_patterns(primary,4)...)
+    # Gmsh's element keys follow `MElement::getFaceSolin`: its face order
+    # (prisms list the quadrangular faces first) and its vertex order, which
+    # is also the summation order of the face-key coordinates.
+    face_patterns=MeshEntityTopology._solin_face_patterns(primary)
     cursor=0
     for cell in axes(cells,2)
         for local_node in 1:counts.vertex
@@ -755,25 +752,24 @@ function _mixed_keys_for_cells(mesh::Union{MixedMesh,P2TriMesh,P2Mesh},cells,msh
     return type_keys,entity_keys,coordinates
 end
 
+# The hierarchical key queries register faces through `getFaceSolin`: a face
+# first seen here keeps that vertex order in `get_all_faces`. Only the faces
+# that own functions of the space are registered (at order two a prism
+# registers its quadrangles and not its triangles), as Gmsh 4.15.2 numbers them.
 _mesh_face_topology_for_key_cells(mesh::Mesh,topology,cells,msh,space)=
-    _mesh_face_topology_for_cells(mesh,topology,cells,msh)
+    MeshEntityTopology._mesh_face_topology_for_solin_cells(mesh,topology,cells,Int(msh))
 
 function _mesh_face_topology_for_key_cells(mesh::MixedMesh,topology,cells,msh,function_space_type)
     space=MeshFunctionSpaces._function_space(function_space_type,"API.mesh key query")
     family=msh_spec(msh).family
-    primary=msh_type(family,1)
     blocks=space.key_dimension==1 ?
         MeshFunctionSpaces._hcurl_face_blocks(family,space.key_order) :
         MeshFunctionSpaces._h1_face_blocks(family,space.key_order)
-    patterns=family===:pri ?
-        (MeshEntityTopology._simplex_face_patterns(primary,4)...,
-         MeshEntityTopology._simplex_face_patterns(primary,3)...) :
-        (MeshEntityTopology._simplex_face_patterns(primary,3)...,
-         MeshEntityTopology._simplex_face_patterns(primary,4)...)
+    patterns=MeshEntityTopology._solin_face_patterns(Int(msh))
     selected=Tuple(patterns[index] for index in eachindex(patterns) if blocks[index][2]>0)
-    replacement=MeshEntityTopology._face_topology_copy(topology,size(mesh.coords,2))
-    MeshEntityTopology._append_generated_faces!(replacement,cells,selected,primary)
-    return replacement
+    isempty(selected) && return topology
+    return MeshEntityTopology._mesh_face_topology_for_patterns(
+        mesh,topology,cells,Int(msh),selected,())
 end
 
 function mesh_keys(mesh::MixedMesh,element_type,function_space_type,
@@ -825,7 +821,7 @@ end
 
 function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSICN")
     caller="mesh_element_qualities"
-    name=MeshElementQuality._quality_name(quality_name,caller;allow_quad_eta=true)
+    name=MeshElementQuality._quality_name(quality_name,caller)
     (element_tags isa AbstractVector || element_tags isa Tuple) || throw(ArgumentError(
         "$caller: element_tags must be a vector or tuple of integers"))
     element_tags isa AbstractArray && Base.require_one_based_indexing(element_tags)
@@ -834,18 +830,65 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
     for (index,value) in enumerate(element_tags)
         tag=_mesh_query_element_tag(mesh,value,caller)
         msh,_,cells,cell,family=_mixed_query_reference(mesh,tag,caller)
-        name=="eta" && msh!=3 && throw(ArgumentError(
-            "$caller: eta is unsupported for native type-$msh $family elements"))
         a=_mixed_node(mesh,cells,cell,1)
-        if msh==15 && name in ("volume","minEdge","maxEdge")
+        order=msh_spec(msh).order
+        # Orders above two always take the native Jacobian paths; hexahedra,
+        # prisms and pyramids take them at every order and quadrangles from
+        # order two.
+        jacobian_native=order>2 ||
+            (family===:qua ? order==2 : family in (:hex,:pri,:pyr))
+        if name=="eta"
+            # `MElement::etaShapeMeasure` is zero except on triangles,
+            # quadrangles and tetrahedra, which measure their primary
+            # vertices at every order.
+            result[index]=family===:tri ? MeshElementQuality._triangle_native_eta(
+                    a,_mixed_node(mesh,cells,cell,2),_mixed_node(mesh,cells,cell,3)) :
+                family===:qua ? MeshElementQuality._quadrangle_native_eta(
+                    ntuple(i->_mixed_node(mesh,cells,cell,i),4)) :
+                family===:tet ? MeshElementQuality._tetrahedron_native_eta(
+                    a,_mixed_node(mesh,cells,cell,2),_mixed_node(mesh,cells,cell,3),
+                    _mixed_node(mesh,cells,cell,4)) : 0.0
+        elseif msh==15 && name in ("volume","minEdge","maxEdge")
             # MPoint inherits MElement's unit 0-D integration measure and
             # empty-edge extrema (initial min 1e25, initial max zero).
             result[index]=name=="volume" ? 1.0 : name=="minEdge" ? 1e25 : 0.0
-        elseif msh==8 && name=="volume"
-            # MLine3 inherits MLine::getVolume: endpoint distance, including
-            # when the quadratic support is away from the straight chord.
+        elseif msh==15 && name in ("angleShape","gamma","innerRadius","outerRadius","minSIGE")
+            # The remaining MElement defaults of a point; the Jacobian-based
+            # measures fail upstream and stay unsupported here.
+            result[index]=name=="angleShape" ? 1.0 :
+                name=="minSIGE" ? floatmax(Float64) : 0.0
+        elseif family===:lin && order>1 && name=="volume"
+            # MLine3 and MLineN inherit MLine::getVolume: endpoint distance,
+            # including when the curved support is away from the straight chord.
             length,_=MeshElementQuality._segment_geometry(a,_mixed_node(mesh,cells,cell,2))
             result[index]=length
+        elseif family===:lin && order>1 &&
+               name in ("innerRadius","gamma","outerRadius","minSICN","angleShape","minSIGE")
+            # A curved line keeps MLine's chord measures and the 1-D defaults.
+            length,valid=MeshElementQuality._segment_geometry(a,_mixed_node(mesh,cells,cell,2))
+            result[index]=MeshElementQuality._segment_quality(name,length,valid)
+        elseif family===:lin && order>1 && name=="minSJ"
+            result[index]=_native_line_scaled_jacobian(mesh,cells,cell,msh,caller)
+        elseif family in (:tri,:qua) && order>1 && name=="angleShape"
+            # `qmTriangle::angles` and `qmQuadrangle::angles` sample the
+            # element's own Jacobian, so a curved element is measured on its
+            # curved map and not on its primary vertices.
+            data=_native_cell_polynomial_cached(msh,caller)
+            tangents=(u,v)->_native_surface_tangents(mesh,cells,cell,msh,data,u,v,caller)
+            result[index]=family===:qua ?
+                MeshElementQuality._quadrangle_angle_shape_from(tangents) :
+                MeshElementQuality._triangle_angle_shape_from(tangents,
+                    (MeshElementQuality._sub3(_mixed_node(mesh,cells,cell,2),a),
+                     MeshElementQuality._sub3(_mixed_node(mesh,cells,cell,3),a)))
+        elseif family in (:tri,:tet) && order>2 &&
+               name in ("angleShape","innerRadius","outerRadius")
+            # MTriangleN and MTetrahedronN inherit the radii of their primary
+            # vertices; a tetrahedron keeps MElement's unit angle measure.
+            result[index]=family===:tri ? MeshElementQuality._triangle_quality(name,a,
+                    _mixed_node(mesh,cells,cell,2),_mixed_node(mesh,cells,cell,3)) :
+                MeshElementQuality._tetrahedron_quality(name,a,
+                    _mixed_node(mesh,cells,cell,2),_mixed_node(mesh,cells,cell,3),
+                    _mixed_node(mesh,cells,cell,4))
         elseif name=="minEdge" || name=="maxEdge"
             primary=msh_type(family,1)
             edges=MeshEntityTopology._simplex_edge_patterns(primary)
@@ -866,29 +909,24 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
         # them at their low orders too. (Prisms above order two still hit the
         # unsupported-closure contract; linear/quadratic triangles and
         # tetrahedra and MSH_QUA_4 keep their dedicated branches below.)
-        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
-                family in (:hex,:pri,:pyr)) &&
+        elseif jacobian_native &&
                name in ("minDetJac","maxDetJac","minSJ") &&
                family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_bezier(mesh,cells,cell,msh,name,caller)
-        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
-                family in (:hex,:pri,:pyr)) &&
+        elseif jacobian_native &&
                name in ("minSICN","minSIGE") &&
                family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_sampled(mesh,cells,cell,msh,name,caller)
-        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
-                family in (:hex,:pri,:pyr)) &&
+        elseif jacobian_native &&
                name=="minIsotropy" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_isotropy(mesh,cells,cell,msh,caller)
-        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
-                family in (:hex,:pri,:pyr)) &&
+        elseif jacobian_native &&
                name=="gamma" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             result[index]=_native_cell_quality_gamma(mesh,cells,cell,family,caller)
-        elseif msh_spec(msh).order>2 && name=="volume" && family===:tet
+        elseif order>2 && name=="volume" && family===:tet
             result[index]=_native_cell_tetrahedron_volume(a,_mixed_node(mesh,cells,cell,2),
                 _mixed_node(mesh,cells,cell,3),_mixed_node(mesh,cells,cell,4))
-        elseif (msh_spec(msh).order>2 || family===:qua ? msh_spec(msh).order==2 :
-                family in (:hex,:pri,:pyr)) &&
+        elseif jacobian_native &&
                name=="volume" && family in (:tri,:qua,:tet,:hex,:pri,:pyr)
             if !haskey(rules,msh)
                 rules[msh]=_native_cell_measure_rule(msh,caller)
@@ -896,7 +934,7 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
             result[index]=_native_cell_quality_volume(mesh,cells,cell,rules[msh],caller,tag)
         elseif msh_spec(msh).order==1 && family===:lin
             name in MeshElementQuality._UNDEFINED_SEGMENT_QUALITIES && throw(ArgumentError(
-                "$caller: Gmsh 4.15.2 does not define $name reliably for segment elements"))
+                "$caller: Gmsh 4.15.2 fails on $name for segment elements"))
             length,valid=MeshElementQuality._segment_geometry(a,_mixed_node(mesh,cells,cell,2))
             result[index]=MeshElementQuality._segment_quality(name,length,valid)
         elseif msh_spec(msh).order==1 && family===:tri
@@ -908,27 +946,25 @@ function mesh_element_qualities(mesh::MixedMesh,element_tags,quality_name="minSI
         elseif msh==3
             points=ntuple(i->_mixed_node(mesh,cells,cell,i),4)
             result[index]=name=="volume" ? MeshElementQuality._quadrangle_native_volume(points...) :
-                name in ("gamma","eta") ? MeshElementQuality._quadrangle_native_eta(points) :
+                name=="gamma" ? MeshElementQuality._quadrangle_native_eta(points) :
                 name=="angleShape" ? MeshElementQuality._quadrangle_native_angle_shape(points) :
                 name=="innerRadius" ? MeshElementQuality._quadrangle_native_inner_radius(points) :
                 name=="outerRadius" ? 1.0 : name=="minIsotropy" ?
                 MeshElementQuality._quadrangle_native_isotropy(points) :
                 MeshElementQuality._quadrangle_native_jacobian_quality(name,points)
-        elseif family===:qua && name in ("eta","angleShape","innerRadius","outerRadius")
+        elseif family===:qua && name in ("innerRadius","outerRadius")
             # Higher-order quadrangles share the linear element's
-            # primary-vertex measures upstream.
+            # primary-vertex radii upstream.
             points=ntuple(i->_mixed_node(mesh,cells,cell,i),4)
-            result[index]=name=="eta" ? MeshElementQuality._quadrangle_native_eta(points) :
-                name=="angleShape" ? MeshElementQuality._quadrangle_native_angle_shape(points) :
-                name=="innerRadius" ? MeshElementQuality._quadrangle_native_inner_radius(points) :
-                1.0
+            result[index]=name=="innerRadius" ?
+                MeshElementQuality._quadrangle_native_inner_radius(points) : 1.0
         elseif family in (:hex,:pri,:pyr) &&
-               name in ("eta","outerRadius","angleShape","innerRadius")
+               name in ("outerRadius","angleShape","innerRadius")
             # Order-agnostic MElement measures on the primary vertices:
-            # eta and outerRadius keep their MElement defaults (zero),
-            # pyramids additionally keep angleShape=1.0, and the
-            # hexahedron/prism overrides evaluate the ported kernels.
-            result[index]=name in ("eta","outerRadius") ? 0.0 :
+            # outerRadius keeps its MElement default (zero), pyramids
+            # additionally keep angleShape=1.0, and the hexahedron/prism
+            # overrides evaluate the ported kernels.
+            result[index]=name=="outerRadius" ? 0.0 :
                 name=="angleShape" ?
                     (family===:hex ? _native_cell_hexahedron_angles(mesh,cells,cell) : 1.0) :
                 family===:hex ? _native_cell_hexahedron_inner_radius(mesh,cells,cell) :

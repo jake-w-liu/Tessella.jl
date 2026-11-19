@@ -355,7 +355,10 @@ end
 # order. p>=1 for every family except :pnt, which ignores the order.
 # ---------------------------------------------------------------------------
 function _h1_tables(::Val{:pnt},p::Int,u::Float64,v::Float64,w::Float64)
-    return _BF[_BF(1.0)],_BF[],_BF[],_BF[]
+    # `HierarchicalBasisH1Point::generateGradientBasis` of Gmsh 4.15.2 writes
+    # 1 into the first gradient component of the constant vertex function;
+    # `GradH1Legendre` on a point therefore answers (1, 0, 0), not zero.
+    return _BF[_BF(1.0,(1.0,0.0,0.0))],_BF[],_BF[],_BF[]
 end
 
 function _h1_tables(::Val{:lin},p::Int,u::Float64,v::Float64,w::Float64)

@@ -14,9 +14,9 @@ const E=Tessella.Elements
 # Unit square pair sharing the x=1 edge; node/Point tag i sits at vertex i.
 const CORNERS=[0. 1. 0. 1. 2. 2.;0. 0. 1. 1. 0. 1.;0. 0. 0. 0. 0. 0.]
 # Curve tag, stored Line2 cell direction, declared signed Point bounds.
-const CURVES=[(11,(1,2),[1,-2]),(12,(2,4),[2,-4]),(13,(4,3),[4,-3]),
-              (14,(3,1),[3,-1]),(15,(2,5),[2,-5]),(16,(5,6),[5,-6]),
-              (17,(6,4),[6,-4])]
+const CURVES=[(11,(1,2),[1,2]),(12,(2,4),[2,4]),(13,(4,3),[4,3]),
+              (14,(3,1),[3,1]),(15,(2,5),[2,5]),(16,(5,6),[5,6]),
+              (17,(6,4),[6,4])]
 # Surface tag, Tri3 columns into TRIANGLES, declared signed Curve boundary.
 const TRIANGLES=UInt64[1 1 2 2;2 4 5 6;4 3 6 4]
 const SURFACES=[(21,(1,2),[11,12,13,14]),(22,(3,4),[15,16,17,-12])]
@@ -119,8 +119,8 @@ point_children()=sort!([tag for (_,tag) in A.model.get_entities(0)
     @test A.model.get_parent(1,c2)==(1,12)
     # Declared Point bounds transport to the Point children.
     p1,p2,p3,p4,p5,p6=(child(0,p) for p in 1:6)
-    @test signed_bounds(1,c2)==[(0,p2),(0,-p4)]
-    @test signed_bounds(1,c1)==[(0,p1),(0,-p2)]
+    @test signed_bounds(1,c2)==[(0,p2),(0,p4)]
+    @test signed_bounds(1,c1)==[(0,p1),(0,p2)]
     # Two emitted interface Curves — the internal edges (1,4) of Surface 21
     # and (2,6) of Surface 22 — each parented on the source Surface of its
     # lower-partition carrier and carrying both partition indices.
@@ -138,8 +138,8 @@ point_children()=sort!([tag for (_,tag) in A.model.get_entities(0)
     # Interface entity bounds are its junction endpoints signed by stored
     # traversal: ia stores (4,1) (the lower-partition carrier T1's edge),
     # so its start binds +p4 and its end −p1; likewise ib stores (6,2).
-    @test sort!(signed_bounds(1,ia))==sort!([(0,-p1),(0,p4)])
-    @test sort!(signed_bounds(1,ib))==sort!([(0,-p2),(0,p6)])
+    @test sort!(signed_bounds(1,ia))==sort!([(0,p1),(0,p4)])
+    @test sort!(signed_bounds(1,ib))==sort!([(0,p2),(0,p6)])
     # Surface children bind their lower entities with actual-traversal
     # signs: the two sides of the shared Curve carry opposite signs.
     @test sort!(signed_bounds(2,s11))==sort!([(1,c1),(1,c2),(1,ia)])
@@ -260,7 +260,7 @@ end
     A.finalize();A.initialize();A.model.add("lines only")
     A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
     A.model.add_discrete_entity(0,1);A.model.add_discrete_entity(0,2)
-    A.model.add_discrete_entity(1,11,[1,-2])
+    A.model.add_discrete_entity(1,11,[1,2])
     A.mesh.add_nodes(0,1,[1],[0.,0.,0.]);A.mesh.add_nodes(0,2,[2],[1.,0.,0.])
     A.mesh.add_elements_by_type(11,1,[701],[1,2])
     A.mesh.add_elements_by_type(1,15,[801],[1]);A.mesh.add_elements_by_type(2,15,[802],[2])

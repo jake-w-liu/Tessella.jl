@@ -4,14 +4,15 @@
 Scale-robust Gmsh-shaped quality measures for dense linear-simplex elements in a
 finalized [`Mesh`](@ref). The implementation follows the Gmsh 4.15.2 definitions
 for type-1 segments, type-2 triangles, and type-4 tetrahedra while rejecting the
-four 1-D measures that Gmsh itself does not define reliably.
+three 1-D measures on which Gmsh itself fails.
 """
 module MeshElementQuality
 
 using ..MeshTypes: Mesh, node, triangle_area, tet_signed_volume,
     _parallel_workers, _parallel_for
 using ..MeshPointLocation: mesh_element_offsets
-using ..GmshLibm: _gm_atan, _gm_acos, _gm_atan2
+using ..GmshLibm: _gm_atan, _gm_acos, _gm_atan2, _gm_pow
+using ..Predicates: O3DERRBOUND_A
 using LinearAlgebra: svd
 
 export mesh_element_quality, mesh_element_qualities
@@ -19,9 +20,10 @@ export mesh_element_quality, mesh_element_qualities
 const ELEMENT_QUALITY_NAMES=(
     "minDetJac","maxDetJac","minSJ","minSICN","minSIGE","gamma",
     "innerRadius","outerRadius","minIsotropy","angleShape","minEdge",
-    "maxEdge","volume")
-const _UNDEFINED_SEGMENT_QUALITIES=("minDetJac","maxDetJac","minSIGE",
-                                    "minIsotropy")
+    "maxEdge","volume","eta")
+# Gmsh 4.15.2 raises on these for a 1-D element (and its failure then poisons
+# its own Bezier pools for later calls); `minSIGE` instead answers `DBL_MAX`.
+const _UNDEFINED_SEGMENT_QUALITIES=("minDetJac","maxDetJac","minIsotropy")
 const _Exact=Rational{BigInt}
 const _FILTER_FACTOR=sqrt(eps(Float64))
 
@@ -85,6 +87,50 @@ function _quadrangle_native_eta(points)
     end
     return sign*(1.0-deviation*(1.0/90.0))
 end
+# `qmTriangle::eta`: one minus the relative deviation of the smallest corner
+# angle from 60 degrees, on the three primary vertices.
+function _triangle_native_eta(a,b,c)
+    first=180*_quadrangle_native_angle(a,b,c)/Float64(pi)
+    second=180*_quadrangle_native_angle(b,c,a)/Float64(pi)
+    third=180*_quadrangle_native_angle(c,a,b)/Float64(pi)
+    smallest=min(min(first,second),third)
+    return 1.0-abs(60.0-smallest)*(1.0/60.0)
+end
+
+# Value of Shewchuk's orient3d as `robustPredicates::orient3d` returns it: the
+# plain determinant when its filter accepts it, the exact one otherwise.
+function _orient3_value(a,b,c,d)
+    ad=_sub3(a,d);bd=_sub3(b,d);cd=_sub3(c,d)
+    determinant=ad[3]*(bd[1]*cd[2]-cd[1]*bd[2])+
+        bd[3]*(cd[1]*ad[2]-ad[1]*cd[2])+cd[3]*(ad[1]*bd[2]-bd[1]*ad[2])
+    permanent=(abs(bd[1]*cd[2])+abs(cd[1]*bd[2]))*abs(ad[3])+
+        (abs(cd[1]*ad[2])+abs(ad[1]*cd[2]))*abs(bd[3])+
+        (abs(ad[1]*bd[2])+abs(bd[1]*ad[2]))*abs(cd[3])
+    abs(determinant)>O3DERRBOUND_A*permanent && return determinant
+    ar=ntuple(i->_Exact(a[i])-_Exact(d[i]),3)
+    br=ntuple(i->_Exact(b[i])-_Exact(d[i]),3)
+    cr=ntuple(i->_Exact(c[i])-_Exact(d[i]),3)
+    return Float64(ar[3]*(br[1]*cr[2]-cr[1]*br[2])+
+        br[3]*(cr[1]*ar[2]-ar[1]*cr[2])+cr[3]*(ar[1]*br[2]-br[1]*ar[2]))
+end
+
+@inline function _squared_distance_native(a,b)
+    return (b[1]-a[1])*(b[1]-a[1])+(b[2]-a[2])*(b[2]-a[2])+(b[3]-a[3])*(b[3]-a[3])
+end
+
+# `qmTetrahedron::eta`: 12 (3 V)^(2/3) over the sum of the squared edge
+# lengths, on the four primary vertices.
+function _tetrahedron_native_eta(a,b,c,d)
+    volume=abs(_orient3_value(a,b,c,d))/6.0
+    total=_squared_distance_native(a,b)
+    total+=_squared_distance_native(a,c)
+    total+=_squared_distance_native(a,d)
+    total+=_squared_distance_native(b,c)
+    total+=_squared_distance_native(b,d)
+    total+=_squared_distance_native(d,c)
+    return 12.0*_gm_pow(3*abs(volume),2.0/3.0)/total
+end
+
 function _quadrangle_native_gradients(points,u,v)
     du=(-0.25+0.25*v,0.25-0.25*v,0.25+0.25*v,-0.25-0.25*v)
     dv=(-0.25+0.25*u,-0.25-0.25*u,0.25+0.25*u,0.25-0.25*u)
@@ -104,14 +150,19 @@ function _quadrangle_native_gradients(points,u,v)
     end,3)
     return first,second
 end
-function _quadrangle_native_angle_shape(points)
+_quadrangle_native_angle_shape(points)=_quadrangle_angle_shape_from(
+    (u,v)->_quadrangle_native_gradients(points,u,v))
+
+# `qmQuadrangle::angles` on the two Jacobian rows `tangents(u, v)` of the
+# element: a higher-order quadrangle is sampled on its own curved map.
+function _quadrangle_angle_shape_from(tangents::F) where F
     coefficient=100.0
     denominator=_gm_atan(coefficient*(pi/4.0))+
         _gm_atan(coefficient*(2.0*pi/4.0-(pi/4.0)))
     quality=floatmax(Float64)
     for (u,v) in ((-1.,-1.),(-1.,1.),(1.,1.),(1.,-1.),
             (0.,-1.),(0.,1.),(1.,0.),(-1.,0.),(0.,0.))
-        first,second=_quadrangle_native_gradients(points,u,v)
+        first,second=tangents(u,v)
         cosine=_quadrangle_native_dot(_quadrangle_native_unit(first),
             _quadrangle_native_unit(second))
         angle=abs(_gm_acos(cosine))-pi/2.0
@@ -122,6 +173,32 @@ function _quadrangle_native_angle_shape(points)
     end
     return quality
 end
+# `qmTriangle::angles` on a triangle of order two or more: the corner angles
+# of its own Jacobian rows `tangents(u, v)`, each corner brought to the origin
+# of the map by the upstream rotation, and the flipped-element test against
+# the primary rows `primary`.
+function _triangle_angle_shape_from(tangents::F,primary) where F
+    coefficient=500.0
+    denominator=_gm_atan(coefficient*(pi/9.0))+_gm_atan(coefficient*(pi/9.0))
+    third=_quadrangle_native_unit(_cross3(_quadrangle_native_unit(primary[1]),
+        _quadrangle_native_unit(primary[2])))
+    quality=floatmax(Float64)
+    for corner in 0:2
+        first,second=tangents(corner==1 ? 1.0 : 0.0,corner==2 ? 1.0 : 0.0)
+        for _ in 1:corner
+            first,second=ntuple(i->-first[i]+second[i],3),ntuple(i->-first[i],3)
+        end
+        first=_quadrangle_native_unit(first);second=_quadrangle_native_unit(second)
+        normal=_quadrangle_native_unit(_cross3(first,second))
+        _quadrangle_native_dot(normal,third)<0 && return -floatmax(Float64)
+        angle=_gm_acos(_quadrangle_native_dot(first,second))-pi/3.0
+        value=(_gm_atan(coefficient*(angle+pi/9.0))+
+            _gm_atan(coefficient*(pi/9.0-angle)))/denominator
+        value<quality && (quality=value)
+    end
+    return quality
+end
+
 function _quadrangle_native_tangent_radius(x,y,i)
     a=ntuple(j->y[mod1(i+j-1,4)]-y[mod1(i+j,4)],3)
     b=ntuple(j->x[mod1(i+j,4)]-x[mod1(i+j-1,4)],3)
@@ -734,13 +811,16 @@ end
 function _segment_quality(name,length,valid)
     name in ("minEdge","maxEdge","volume") && return length
     name=="innerRadius" && return length/2
-    name in ("gamma","outerRadius","minSICN") && return 0.0
+    name in ("gamma","outerRadius","minSICN","eta") && return 0.0
+    # `MElement::signedInvGradErrorRange` leaves its minimum at `DBL_MAX` in 1-D.
+    name=="minSIGE" && return floatmax(Float64)
     name=="angleShape" && return 1.0
     name=="minSJ" && return valid ? 1.0 : 0.0
     error("internal segment quality dispatch failure for $name")
 end
 
 function _triangle_quality(name,a,b,c)
+    name=="eta" && return _triangle_native_eta(a,b,c)
     scale,lengths,area2,valid=_triangle_geometry(a,b,c)
     name in ("minDetJac","maxDetJac") && return 2triangle_area(a,b,c)
     name=="volume" && return triangle_area(a,b,c)
@@ -771,6 +851,7 @@ function _triangle_quality(name,a,b,c)
 end
 
 function _tetrahedron_quality(name,a,b,c,d)
+    name=="eta" && return _tetrahedron_native_eta(a,b,c,d)
     scale,edges,lengths,determinant,face_area2,exact_fallback,valid=
         _tetrahedron_geometry(a,b,c,d)
     if name in ("minDetJac","maxDetJac")
@@ -843,10 +924,11 @@ end
     mesh_element_qualities(mesh, element_tags, quality_name="minSICN")
 
 Return one `Float64` quality per dense element tag, preserving request order and
-duplicates. Supported names match the documented Gmsh 4.15.2 quality list.
-`minDetJac`, `maxDetJac`, `minSIGE`, and `minIsotropy` reject segment tags because
-Gmsh 4.15.2 has no reliable 1-D definition for those measures. Degenerate simplex
-shape measures return zero; an undefined circumradius returns `Inf`.
+duplicates. Supported names match the documented Gmsh 4.15.2 quality list,
+including `eta`. `minDetJac`, `maxDetJac`, and `minIsotropy` reject segment tags
+because Gmsh 4.15.2 itself fails on them in 1-D; `minSIGE` of a segment is
+`floatmax(Float64)` as in Gmsh. Degenerate simplex shape measures return zero;
+an undefined circumradius returns `Inf`.
 """
 function mesh_element_qualities(mesh::Mesh,element_tags,
                                 quality_name="minSICN")

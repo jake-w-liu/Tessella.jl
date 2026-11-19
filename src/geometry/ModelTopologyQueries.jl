@@ -324,7 +324,9 @@ end
 
 Return detached topology-only adjacency tags for an existing positive entity.
 `upward` is sorted and contains entities of dimension `dim + 1`; `downward`
-retains direct boundary order and contains dimension `dim - 1`. Mesh embeddings
+retains direct boundary order and contains dimension `dim - 1`, one entry per
+incidence as in Gmsh 4.15.2: a closed Curve lists its Point twice and a Surface
+lists a seam Curve once per use. Mesh embeddings
 do not create topological adjacencies. Materialized `add_box!` Volumes answer
 downward queries from their stored Surface Loop; downward queries for Boolean
 Volumes and primitives without stored topology raise an error.
@@ -338,7 +340,6 @@ function model_adjacencies(m::GeoModel,dim,tag)
     downward=Int[abs(boundary_tag) for (_,boundary_tag) in
         _model_direct_boundary(
             m,dimension,entity_tag,caller;canonical_orientation=true)]
-    unique!(downward)
     upward=Int[]
     if dimension==0
         for (curve,endpoints) in m.curves

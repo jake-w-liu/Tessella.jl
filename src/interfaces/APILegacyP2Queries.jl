@@ -22,7 +22,7 @@ end
 function _legacy_p2_basis_orientations(mesh,selected,function_space_type;
         caller::AbstractString="API.mesh.get_basis_functions_orientation")
     space=MeshFunctionSpaces._function_space(function_space_type,caller)
-    _,family,_,_=MeshFunctionSpaces._basis_element_contract(
+    _,family,_,_=MeshFunctionSpaces._orientation_element_contract(
         _legacy_p2_type(mesh),space,caller)
     positions=_legacy_p2_selected(mesh,selected,caller)
     cells=_legacy_p2_cells(mesh)

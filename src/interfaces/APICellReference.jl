@@ -359,6 +359,31 @@ function _native_cell_polynomial(msh,caller)
     return _NativeCellPolynomial(exponents,coefficients,spec.dim)
 end
 
+# The coefficient matrix depends on the element type alone; per-element public
+# queries (point location, the angle measures) share one copy per type.
+const _NATIVE_CELL_POLYNOMIALS=Dict{Int,_NativeCellPolynomial}()
+const _NATIVE_CELL_POLYNOMIAL_LOCK=ReentrantLock()
+function _native_cell_polynomial_cached(msh,caller)
+    return lock(_NATIVE_CELL_POLYNOMIAL_LOCK) do
+        get!(()->_native_cell_polynomial(msh,caller),_NATIVE_CELL_POLYNOMIALS,Int(msh))
+    end
+end
+
+# The two Jacobian rows of a surface element of any order at `(u, v)`, summed
+# over the nodes in order as `MElement::getJacobian` does.
+function _native_surface_tangents(mesh,cells,cell,msh,data,u,v,caller)
+    _,gradients=_native_cell_query_shape(msh,(u,v,0.0),data,caller)
+    first=(0.0,0.0,0.0);second=first
+    @inbounds for node in eachindex(gradients)
+        point=_mixed_node(mesh,cells,cell,node);gradient=gradients[node]
+        first=(first[1]+point[1]*gradient[1],first[2]+point[2]*gradient[1],
+            first[3]+point[3]*gradient[1])
+        second=(second[1]+point[1]*gradient[2],second[2]+point[2]*gradient[2],
+            second[3]+point[3]*gradient[2])
+    end
+    return first,second
+end
+
 function _native_cell_shape(data::_NativeCellPolynomial,uvw)
     u,v,w=uvw;count=length(data.exponents)
     terms=Vector{Float64}(undef,count)

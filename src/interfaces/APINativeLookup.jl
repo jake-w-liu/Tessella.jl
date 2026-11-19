@@ -44,6 +44,7 @@ end
 
 function _native_lookup_reset_locked!()
     empty!(NATIVE_LOOKUP_CATALOGUES)
+    LAST_LOCATION_OCTREE[]=nothing
     return nothing
 end
 
@@ -53,6 +54,8 @@ function _native_lookup_remove_slot_locked!(slot::_ModelSlot)
 end
 
 function _native_lookup_invalidate_locked!()
+    # `GModel::destroyMeshCaches` drops the element octree with the tag caches.
+    LAST_LOCATION_OCTREE[]=nothing
     index=_current_slot_index_locked()
     index==0 && return nothing
     catalogue=get(NATIVE_LOOKUP_CATALOGUES,MODEL_SLOTS[index],nothing)

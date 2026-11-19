@@ -41,3 +41,5 @@ test/data/native_hybrid_import_events_4152_v1/native_hybrid_import_source_4152_v
 /test/fixtures/brep_native_pcurve_edge_*.brep -text whitespace=-blank-at-eol
 /test/fixtures/brep_native_trimmed_planar_curve.brep -text whitespace=-blank-at-eol
 /test/fixtures/brep_native_periodic_circle.brep -text whitespace=-blank-at-eol
+# Meshes written by Gmsh 4.15.2 for the API parity tests keep their bytes.
+/test/fixtures/gmsh_4152_api_*.msh -text whitespace=-blank-at-eol,cr-at-eol

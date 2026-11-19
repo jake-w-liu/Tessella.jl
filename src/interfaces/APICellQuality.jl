@@ -189,3 +189,33 @@ function _native_cell_prism_inner_radius(mesh,cells,cell)
     rad_vert=0.5*_native_cell_norm(_native_cell_difference(d,a))
     return min(rad_tri,rad_vert)
 end
+
+# `MElement::scaledJacRange` minimum of a curved line (MLine3, MLineN): the
+# derivative along the primary tangent, scaled by the squared primary tangent,
+# sampled on the order-(p-1) lattice of `JacobianBasis` and bounded from below
+# by its Bernstein coefficients.
+function _native_line_scaled_jacobian(mesh,cells,cell,msh,caller)
+    spec=msh_spec(msh);degree=spec.order-1;count=degree+1
+    first=_mixed_node(mesh,cells,cell,1);last=_mixed_node(mesh,cells,cell,2)
+    tangent=(-0.5*first[1]+0.5*last[1],-0.5*first[2]+0.5*last[2],-0.5*first[3]+0.5*last[3])
+    scale=_native_cell_dot(tangent,tangent)
+    scale==0.0 && return 0.0
+    samples=Vector{Float64}(undef,count)
+    bernstein=Matrix{Float64}(undef,count,count)
+    for sample in 1:count
+        position=degree==0 ? 0.5 : (sample-1)/degree
+        _,gradients,_=mesh_basis_functions(msh,[2.0*position-1.0,0.0,0.0],"GradLagrange";caller)
+        derivative=(0.0,0.0,0.0)
+        for node in 1:spec.nnodes
+            point=_mixed_node(mesh,cells,cell,node);weight=gradients[3node-2]
+            derivative=(derivative[1]+weight*point[1],derivative[2]+weight*point[2],
+                derivative[3]+weight*point[3])
+        end
+        samples[sample]=_native_cell_dot(derivative,tangent)/scale
+        for coefficient in 0:degree
+            bernstein[sample,coefficient+1]=binomial(degree,coefficient)*
+                position^coefficient*(1.0-position)^(degree-coefficient)
+        end
+    end
+    return minimum(bernstein\samples)
+end

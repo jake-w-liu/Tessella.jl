@@ -1114,15 +1114,61 @@ function _add_discrete_entity(dim,tag=0,boundary=())
             "(dimension, tag) pair"))
     end
     return lock(STATE_LOCK) do
-        add_discrete_entity!(_model_locked(),dim,tag,pairs)
+        model=_model_locked()
+        if dimension==1 && all(entry->entry isa Integer,boundary)
+            # `gmsh::model::addDiscreteEntity` keeps `boundary[0]` as the begin
+            # Point and `boundary[1]` as the end Point. An entry naming no
+            # Point (a negative tag never does) is dropped without error, and
+            # so is every further entry. The record keeps the MSH `$Entities`
+            # form: begin Point positive, end Point negative.
+            known(point)=point>0 && _model_entity_known(model,0,Int(point))
+            pairs=NTuple{2,Int}[]
+            length(boundary)>=1 && known(boundary[1]) && push!(pairs,(0,Int(boundary[1])))
+            length(boundary)>=2 && known(boundary[2]) && push!(pairs,(0,-Int(boundary[2])))
+        end
+        add_discrete_entity!(model,dim,tag,pairs)
     end
 end
 
-_get_boundary(dim_tags,combined=true,oriented=false,recursive=false)=
-    _with_model() do current
-        model_boundary(
-            current,dim_tags,combined,oriented,recursive)
+# `GModel::getBoundaryTags` of Gmsh 4.15.2. A Curve lists its begin and end
+# Points, never signed, and both of them when the Curve is closed; a negative
+# Curve tag swaps the two. Surface and Volume tags are taken by magnitude. A
+# recursive query on a Surface or Volume returns its Points as a tag-ordered
+# set. A Point contributes itself to a recursive query and nothing otherwise,
+# and an unknown Point is not an error. The stored records keep their signs
+# (see `model_boundary`); only this result drops them.
+function _get_boundary(dim_tags,combined=true,oriented=false,recursive=false)
+    caller="API.model.get_boundary"
+    combined isa Bool || throw(ArgumentError("$caller: combined must be Bool"))
+    oriented isa Bool || throw(ArgumentError("$caller: oriented must be Bool"))
+    recursive isa Bool || throw(ArgumentError("$caller: recursive must be Bool"))
+    return _with_model() do current
+        boundaries=Tuple{Int,Int}[]
+        for (dimension,signed_tag) in Model._model_topology_dim_tags(dim_tags,caller,current)
+            tag=abs(signed_tag)
+            if dimension==0
+                recursive && _model_entity_known(current,0,tag) && push!(boundaries,(0,tag))
+            elseif dimension==1
+                for (_,point) in Model._model_direct_boundary(
+                        current,1,signed_tag,caller;canonical_orientation=true)
+                    push!(boundaries,(0,abs(point)))
+                end
+            elseif recursive
+                points=Int[abs(point) for (_,point) in
+                    Model._model_recursive_boundary(current,dimension,tag,caller)]
+                for point in sort!(unique!(points))
+                    push!(boundaries,(0,point))
+                end
+            else
+                for (child_dimension,child) in Model._model_direct_boundary(
+                        current,dimension,tag,caller;canonical_orientation=true)
+                    push!(boundaries,(child_dimension,oriented ? child : abs(child)))
+                end
+            end
+        end
+        combined ? Model._model_combined_boundary(boundaries) : boundaries
     end
+end
 
 _get_adjacencies(dim,tag)=_with_model() do current
     model_adjacencies(current,dim,tag)
@@ -1774,8 +1820,11 @@ set_visibility_per_window(value,window_index=0)=
 
 Create a parametrization-free entity of dimension `dim`, matching Gmsh's
 `model.addDiscreteEntity`. `tag=0` allocates the next tag in `dim`; `boundary`
-lists the declared `(dim, tag)` boundary entities used by topology queries.
-Signed Curve and Surface boundary tags retain their incidence orientation.
+lists the declared boundary entities used by topology queries. Signed Curve and
+Surface boundary tags retain their incidence orientation. A Curve takes its
+begin Point from `boundary[1]` and its end Point from `boundary[2]`; as in Gmsh
+4.15.2 an entry that names no Point (any negative tag) is dropped, so
+`add_discrete_entity(1, 41, [1, -3])` bounds the Curve by Point 1 alone.
 Nodes and elements are attached with `mesh.add_nodes`, `mesh.add_elements`, or
 `mesh.add_elements_by_type`.
 """
@@ -1784,8 +1833,11 @@ add_discrete_entity(dim,tag=0,boundary=[])=_add_discrete_entity(dim,tag,boundary
 """
 Return explicit entity boundaries. `combined` cancels even incidences, `oriented`
 retains signed Curve and Surface tags, and `recursive` returns the Point closure.
-Primitive and Boolean Volume boundaries are unavailable because their Surface Loop
-topology is implicit.
+As in Gmsh 4.15.2, Point tags are never signed: a Curve lists its begin Point
+and then its end Point (swapped for a negative Curve tag, and both listed for a
+closed Curve), and a recursive query on a Surface or Volume lists its Points in
+tag order. Primitive and Boolean Volume boundaries are unavailable because their
+Surface Loop topology is implicit.
 """
 get_boundary(dim_tags,combined=true,oriented=false,recursive=false)=
     _get_boundary(dim_tags,combined,oriented,recursive)
@@ -3170,7 +3222,7 @@ function _mesh_task_tags(values,task_index::Int,task_count::Int,
     return values[_mesh_task_range(length(values),task_index,task_count)]
 end
 
-function _mesh_element_family(value,caller::AbstractString)
+function _mesh_element_family(value,caller::AbstractString;unknown=:throw)
     value isa AbstractString || throw(ArgumentError(
         "$caller: family_name must be a string"))
     name=String(value)
@@ -3186,6 +3238,7 @@ function _mesh_element_family(value,caller::AbstractString)
     normalized=="prism" && return :pri
     normalized=="pyramid" && return :pyr
     normalized=="trihedron" && return :trih
+    unknown===:throw || return unknown
     throw(ArgumentError(
         "$caller: unknown family_name $(repr(name)); expected Point, Line, " *
         "Triangle, Quadrangle, Tetrahedron, Hexahedron, Prism, Pyramid, or " *
@@ -3194,9 +3247,13 @@ end
 
 function _get_element_type(family_name,order,serendip=false)
     caller="API.mesh.get_element_type"
-    family=_mesh_element_family(family_name,caller)
     polynomial_order=_mesh_query_integer(order,caller,"order")
     incomplete=_mesh_query_bool(serendip,caller,"serendip")
+    # `ElementType::getType` answers 0, with a warning, for a family name it
+    # does not know ("Quadrilateral" is the name in the element properties,
+    # "Quadrangle" the family).
+    family=_mesh_element_family(family_name,caller;unknown=nothing)
+    family===nothing && return Int32(0)
     return Int32(msh_type(
         family,polynomial_order;serendipity=incomplete))
 end
@@ -3318,6 +3375,21 @@ function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
         p=_mesh_query_point(x,y,z,caller)
         dimension=_mesh_query_dimension(dim,caller)
         strict_mode=_mesh_query_bool(strict,caller,"strict")
+        overlay=_high_order_overlay(cached)
+        if overlay===nothing
+            # Gmsh's own search: the element `MElementOctree::find` returns and
+            # the reference coordinates `MElement::xyz2uvw` gives for it.
+            tree=_location_octree_locked(cached,class,caller)
+            found=_location_find(tree,p,dimension,strict_mode,caller)
+            if found!=0
+                dense=tree.elements.dense[found]
+                public=class===nothing ? nothing : class.public_tags
+                located=mesh_element_record(cached,dense)
+                return _cache_element_tag(public,dense),located.element_type,
+                    _cache_node_tags(public,located.node_tags),
+                    _location_uvw(tree.elements,found,p,caller)...
+            end
+        end
         if dimension==0
             point_mesh,point_tags=_public_point_locations(_model_locked(),cached,p,strict_mode,caller)
             if !isempty(point_tags)
@@ -3327,9 +3399,7 @@ function _get_element_by_coordinates(x,y,z,dim=-1,strict=false)
                     [_cache_node_tag(point_mesh,point_mesh.blocks[1].nodes[1,position])],coordinates...
             end
         end
-        overlay=_high_order_overlay(cached)
-        tags=overlay===nothing ? _locate_elements(
-            _mesh_query_locator_locked(cached),p,dimension,strict_mode,caller) :
+        tags=overlay===nothing ? UInt64[] :
             _legacy_p2_locate_elements(cached,overlay,p,dimension,strict_mode,caller)
         if isempty(tags) && dimension<0
             point_mesh,point_tags=_public_point_locations(_model_locked(),cached,p,strict_mode,caller)
@@ -3362,14 +3432,25 @@ function _get_elements_by_coordinates(x,y,z,dim=-1,strict=false)
         dimension=_mesh_query_dimension(dim,caller)
         strict_mode=_mesh_query_bool(strict,caller,"strict")
         overlay=_high_order_overlay(cached)
-        tags=overlay===nothing ? _locate_elements(
-            _mesh_query_locator_locked(cached),p,dimension,strict_mode,caller) :
-            _legacy_p2_locate_elements(cached,overlay,p,dimension,strict_mode,caller)
         table=class===nothing ? nothing : class.public_tags
-        result=_cache_element_tags(table,_mesh_public_location_order(cached,tags,table))
+        if overlay===nothing
+            # `MElementOctree::findAll`, in the order it lists the elements.
+            tree=_location_octree_locked(cached,class,caller)
+            tags=UInt64[tree.elements.dense[found] for found in
+                _location_find_all(tree,p,dimension,strict_mode,caller)]
+            result=_cache_element_tags(table,tags)
+        else
+            tags=_legacy_p2_locate_elements(cached,overlay,p,dimension,strict_mode,caller)
+            result=_cache_element_tags(table,_mesh_public_location_order(cached,tags,table))
+        end
         if dimension in (-1,0)
             point_mesh,point_tags=_public_point_locations(_model_locked(),cached,p,strict_mode,caller)
-            if point_mesh!==nothing
+            if point_mesh!==nothing && overlay===nothing
+                for position in point_tags
+                    tag=_cache_element_tag(point_mesh,position)
+                    tag in result || push!(result,tag)
+                end
+            elseif point_mesh!==nothing
                 append!(result,[_cache_element_tag(point_mesh,position) for position in point_tags])
                 unique!(result)
                 dimensions=Dict{UInt64,Int}()
@@ -3416,8 +3497,10 @@ function _get_local_coordinates_in_element(element_tag,x,y,z)
         end
         tag=_mesh_public_element_index(cached,element_tag,caller,class)
         overlay=_high_order_overlay(cached)
-        coordinates,_,_=overlay===nothing ? _local_coordinates(cached,tag,p,caller) :
-            _legacy_p2_local_coordinates(cached,overlay,tag,p,caller)
+        # `MElement::xyz2uvw`, including what it leaves in the coordinates a
+        # Curve or Surface element does not span.
+        overlay===nothing && return _location_element_uvw(cached,tag,p,caller)
+        coordinates,_,_=_legacy_p2_local_coordinates(cached,overlay,tag,p,caller)
         return _require_local_coordinates(coordinates,caller,tag)
     end
 end
@@ -3596,7 +3679,7 @@ function _get_basis_functions_orientation(element_type,function_space_type,
         public=_mesh_query_detached_public(cached,class)
         if public!==nothing
             query_space=MeshFunctionSpaces._function_space(function_space_type,caller)
-            _,query_family,_,_=MeshFunctionSpaces._basis_element_contract(msh,query_space,caller)
+            _,query_family,_,_=MeshFunctionSpaces._orientation_element_contract(msh,query_space,caller)
             block===nothing && return Int32[]
             query_count=positions===nothing ? size(block[2],2) : length(positions)
             query_columns=_mesh_task_range(query_count,task_index,task_count)
@@ -3605,7 +3688,7 @@ function _get_basis_functions_orientation(element_type,function_space_type,
         end
         if cached isa Mesh && _mesh_public_tags(cached)!==nothing
             space=MeshFunctionSpaces._function_space(function_space_type,caller)
-            _,family,_,_=MeshFunctionSpaces._basis_element_contract(msh,space,caller)
+            _,family,_,_=MeshFunctionSpaces._orientation_element_contract(msh,space,caller)
             block===nothing && return Int32[]
             count=positions===nothing ? size(block[2],2) : length(positions)
             task_columns=_mesh_task_range(count,task_index,task_count)
@@ -3646,14 +3729,14 @@ function _get_basis_functions_orientation_for_element(
         if public!==nothing
             query_record=mesh_element_record(cached,tag)
             query_space=MeshFunctionSpaces._function_space(function_space_type,caller)
-            _,query_family,_,_=MeshFunctionSpaces._basis_element_contract(Int(query_record.element_type),query_space,caller)
+            _,query_family,_,_=MeshFunctionSpaces._orientation_element_contract(Int(query_record.element_type),query_space,caller)
             query_cells=reshape(Int32.(query_record.node_tags),length(query_record.node_tags),1)
             return _mixed_cell_orientation(cached,query_cells,1,query_space,query_family,public)
         end
         if cached isa Mesh && _mesh_public_tags(cached)!==nothing
             record=mesh_element_record(cached,tag)
             space=MeshFunctionSpaces._function_space(function_space_type,caller)
-            _,family,_,_=MeshFunctionSpaces._basis_element_contract(Int(record.element_type),space,caller)
+            _,family,_,_=MeshFunctionSpaces._orientation_element_contract(Int(record.element_type),space,caller)
             cells=reshape(Int32.(record.node_tags),length(record.node_tags),1)
             return _mixed_cell_orientation(cached,cells,1,space,family)
         end
@@ -3791,37 +3874,26 @@ function _get_keys_information(type_keys,entity_keys,element_type,
         caller="API.mesh.get_keys_information")
 end
 
-# Cell columns classified on any of the selected entities. `owners` carries the
-# entity tag per column and `dim` is the owning entities' dimension.
-function _mesh_selected_cell_columns(owners::Vector{Int32},dim::Int,
-                                     selected::Set{Tuple{Int,Int32}})
-    return findall(owner->(dim,owner) in selected,owners)
-end
-
 function _create_edges(dim_tags=())
     caller="API.mesh.create_edges"
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        class=_cached_classification_locked(cached)
         if isempty(pairs)
-            LAST_MESH_EDGES[]=_mesh_edge_topology(cached,LAST_MESH_EDGES[])
+            # Edges are numbered at their first use while walking the entities
+            # by dimension and tag, as `createEdges` does.
+            LAST_MESH_EDGES[]=_mesh_edge_topology_in_entity_order(
+                cached,class,LAST_MESH_EDGES[])
             return nothing
         end
-        class=_cached_classification_locked(cached)
         class===nothing && throw(ArgumentError(
             "$caller: entity-selective topology creation requires mesh " *
             "classification metadata; pass an empty collection for the " *
             "complete cache"))
-        selected=_mesh_selected_entities(
-            _model_locked(),class,pairs,caller)
-        replacement=LAST_MESH_EDGES[]
-        for (msh,dim,_,cells,owners) in _cache_catalog(cached,class)
-            columns=_mesh_selected_cell_columns(owners,dim,selected)
-            isempty(columns) && continue
-            replacement=_mesh_edge_topology_for_cells(
-                cached,replacement,cells[:,columns],Int(msh))
-        end
-        LAST_MESH_EDGES[]=replacement
+        _mesh_selected_entities(_model_locked(),class,pairs,caller)
+        LAST_MESH_EDGES[]=_mesh_edge_topology_in_entity_order(
+            cached,class,LAST_MESH_EDGES[];selected=pairs)
         nothing
     end
 end
@@ -3831,26 +3903,19 @@ function _create_faces(dim_tags=())
     return lock(STATE_LOCK) do
         cached=_cached_mesh_locked(caller)
         pairs=_mesh_parse_dim_tags(dim_tags,caller)
+        class=_cached_classification_locked(cached)
         if isempty(pairs)
-            LAST_MESH_FACES[]=_mesh_face_topology(cached,LAST_MESH_FACES[])
+            LAST_MESH_FACES[]=_mesh_face_topology_in_entity_order(
+                cached,class,LAST_MESH_FACES[])
             return nothing
         end
-        class=_cached_classification_locked(cached)
         class===nothing && throw(ArgumentError(
             "$caller: entity-selective topology creation requires mesh " *
             "classification metadata; pass an empty collection for the " *
             "complete cache"))
-        selected=_mesh_selected_entities(
-            _model_locked(),class,pairs,caller)
-        replacement=LAST_MESH_FACES[]
-        for (msh,dim,_,cells,owners) in _cache_catalog(cached,class)
-            dim>=2 || continue
-            columns=_mesh_selected_cell_columns(owners,dim,selected)
-            isempty(columns) && continue
-            replacement=_mesh_face_topology_for_cells(
-                cached,replacement,cells[:,columns],Int(msh))
-        end
-        LAST_MESH_FACES[]=replacement
+        _mesh_selected_entities(_model_locked(),class,pairs,caller)
+        LAST_MESH_FACES[]=_mesh_face_topology_in_entity_order(
+            cached,class,LAST_MESH_FACES[];selected=pairs)
         nothing
     end
 end
@@ -4013,25 +4078,79 @@ function _mesh_entity_node_positions(class::_MeshClassification,
     return findall(==(key),class.node_entities)
 end
 
-# Ordered node indices for one entity: its own classified nodes first, then
-# the transitive boundary entities' nodes breadth-first with a visited set,
-# matching Gmsh's `includeBoundary` emission order.
-function _mesh_entity_nodes_with_boundary(class::_MeshClassification,
-                                          dim::Int,tag::Int32)
-    order=Int[]
-    seen=Set{Tuple{Int,Int32}}()
-    queue=Tuple{Int,Int32}[(dim,tag)]
-    while !isempty(queue)
-        key=popfirst!(queue)
-        key in seen && continue
-        push!(seen,key)
-        append!(order,_mesh_entity_node_positions(class,key))
-        key[1]>0 || continue
-        for boundary in get(class.boundaries,key,Int32[])
-            push!(queue,(key[1]-1,boundary))
+# Boundary entities whose nodes Gmsh's `_getAdditionalNodesOnBoundary` appends
+# after an entity's own nodes, in its order: the Surfaces of a Volume as
+# listed; then the Curves — as listed for a Surface, in first-use order across
+# the Surfaces for a Volume (`GRegion::edges`); then the Points — begin and end
+# for a Curve (both, even when they coincide), and for a Surface or Volume the
+# tag-ordered set of its Curves' Points (`GFace::vertices`, `GRegion::vertices`).
+# `children(dim, tag)` returns the unsigned boundary tags of one entity.
+function _boundary_entities_gmsh_order(children::F,dim::Int,tag::Integer) where F
+    surfaces=dim==3 ? collect(Int,children(3,tag)) : Int[]
+    curves=Int[]
+    if dim==2
+        append!(curves,children(2,tag))
+    elseif dim==3
+        for surface in surfaces, curve in children(2,surface)
+            curve in curves || push!(curves,curve)
         end
     end
+    points=Int[]
+    if dim==1
+        append!(points,children(1,tag))
+    else
+        for curve in curves
+            append!(points,children(1,curve))
+        end
+        sort!(unique!(points))
+    end
+    return surfaces,curves,points
+end
+
+# Ordered node indices for one entity: its own classified nodes first, then
+# its boundary entities' nodes in Gmsh's `includeBoundary` emission order.
+function _mesh_entity_nodes_with_boundary(class::_MeshClassification,
+                                          dim::Int,tag::Int32)
+    order=_mesh_entity_node_positions(class,(dim,tag))
+    surfaces,curves,points=_boundary_entities_gmsh_order(dim,tag) do child_dim,child
+        get(class.boundaries,(child_dim,Int32(child)),Int32[])
+    end
+    for (child_dim,tags) in ((2,surfaces),(1,curves),(0,points)), child in tags
+        append!(order,_mesh_entity_node_positions(class,(child_dim,Int32(child))))
+    end
     return order
+end
+
+# Parametric value Gmsh reports for a boundary node of a discrete Curve that
+# has no geometry (`reparamMeshVertexOnEdge` with `discreteEdge::parBounds`):
+# the begin Point's node is at 0 and the end Point's node at the upper bound,
+# which for an empty discretization is `double(size_t(0) - 1)`.
+const _DISCRETE_CURVE_END_PARAMETER=Float64(typemax(UInt64))
+function _discrete_curve_end_points(model::GeoModel,tag::Integer)
+    record=get(model.discrete,(1,Int(tag)),nothing)
+    record===nothing && return 0,0
+    points=Int[bound[2] for bound in record.boundary if bound[1]==0]
+    length(points)>=2 && return abs(points[1]),abs(points[2])
+    length(points)==1 || return 0,0
+    return points[1]>0 ? (points[1],0) : (0,-points[1])
+end
+
+# Parameters Gmsh reports for a node of the boundary entity `owner` when the
+# queried discrete Curve or Surface `(dim, tag)` has no geometry: a Surface
+# answers `(-1, -1)` (`discreteFace::parFromPoint` finds no parametrization),
+# a Curve answers the bound of the end the node sits on, begin first.
+function _append_discrete_boundary_parameter!(values::Vector{Float64},model::GeoModel,
+                                              dim::Int,tag::Integer,owner)
+    record=get(model.discrete,(dim,Int(tag)),nothing)
+    (record===nothing || record.geometry_parametrized) && return values
+    if dim==2
+        push!(values,-1.0,-1.0)
+    elseif dim==1 && owner[1]==0
+        begin_point,end_point=_discrete_curve_end_points(model,tag)
+        owner[2]==begin_point ? push!(values,0.0) :
+            owner[2]==end_point && push!(values,_DISCRETE_CURVE_END_PARAMETER)
+    end
+    return values
 end
 
 # Entities of `dimension` known to the classification: any entity that owns
@@ -4076,6 +4195,9 @@ function _mesh_entity_parameters(model::GeoModel,mesh::Union{Mesh,MixedMesh,P2Tr
             elseif !haskey(model.discrete,(dim,tag))
                 append!(values,_api_model_parametrization(model,dim,tag,
                     collect(@view mesh.coords[:,index])))
+            else
+                _append_discrete_boundary_parameter!(values,model,dim,tag,
+                    class.node_entities[index])
             end
         end
         return values
@@ -4349,29 +4471,27 @@ function _append_record_nodes!(tags,coordinates,parameters,record,
     return nothing
 end
 
-# Append nodes of the transitive boundary-entity closure of `record`. Each
-# boundary entity contributes once, in depth-first declaration order; nodes
-# carry `query_dim` copies of -1.0 as parameters (Gmsh pads lower-dimensional
-# parametric coordinates with -1 on `include_boundary` queries).
+# Append the nodes of the declared boundary entities of the discrete entity
+# `(query_dim, entity)` in Gmsh's `_getAdditionalNodesOnBoundary` order (see
+# `_boundary_entities_gmsh_order`). A Surface query pads each of them with
+# `(-1, -1)` and a Curve query reports its end bounds (see
+# `_append_discrete_boundary_parameter!`); a Volume query has no parameters.
 function _append_record_boundary_nodes!(tags,coordinates,parameters,
-                                        m::GeoModel,record,query_dim::Int,
+                                        m::GeoModel,query_dim::Int,entity::Integer,
                                         parametric::Bool)
-    seen=Set{Tuple{Int,Int}}()
-    stack=reverse!(collect(record.boundary))
-    while !isempty(stack)
-        popped=pop!(stack)
-        key=(popped[1],abs(popped[2]))
-        key in seen && continue
-        push!(seen,key)
-        boundary_record=_model_mesh_record(m,key[1],key[2])
+    surfaces,curves,points=_boundary_entities_gmsh_order(query_dim,entity) do dim,tag
+        declared=get(m.discrete,(dim,Int(tag)),nothing)
+        declared===nothing ? Int[] :
+            Int[abs(bound[2]) for bound in declared.boundary if bound[1]==dim-1]
+    end
+    for (dim,children) in ((2,surfaces),(1,curves),(0,points)), child in children
+        boundary_record=_model_mesh_record(m,dim,child)
         boundary_record===nothing && continue
         for i in eachindex(boundary_record.node_tags)
             push!(tags,UInt64(boundary_record.node_tags[i]))
             append!(coordinates,@view(boundary_record.node_coords[:,i]))
-            parametric && append!(parameters,fill(-1.0,query_dim))
-        end
-        for entry in Iterators.reverse(boundary_record.boundary)
-            push!(stack,entry)
+            parametric && _append_discrete_boundary_parameter!(
+                parameters,m,query_dim,entity,(dim,child))
         end
     end
     return nothing
@@ -4618,8 +4738,8 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                 _append_record_nodes!(
                     node_tags,coordinates,parameters,record,parametric;query_dim=dimension)
                 boundary && _append_record_boundary_nodes!(
-                    node_tags,coordinates,parameters,model,record,
-                    dimension,parametric)
+                    node_tags,coordinates,parameters,model,
+                    dimension,entity,parametric)
                 return node_tags,coordinates,parameters
             end
             if cached===nothing
@@ -4705,7 +4825,7 @@ function _get_nodes(dim=-1,tag=-1,include_boundary=false,
                 node_tags,coordinates,parameters,record,parametric;query_dim=dimension)
             if boundary
                 haskey(model.discrete,(edim,etag)) ?
-                    _append_record_boundary_nodes!(node_tags,coordinates,parameters,model,record,dimension,parametric) :
+                    _append_record_boundary_nodes!(node_tags,coordinates,parameters,model,dimension,etag,parametric) :
                     _append_native_boundary_nodes!(node_tags,coordinates,parameters,model,cached,dimension,etag,parametric)
             end
         end
@@ -4860,9 +4980,15 @@ function _get_embedded(dim,tag)
         entity=_mesh_query_integer(tag,caller,"tag")
         typemin(Int32)<=entity<=typemax(Int32) || throw(ArgumentError(
             "$caller: unknown $(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
+        # `gmsh::model::mesh::getEmbedded` looks the entity up only for a
+        # Surface or a Volume: a Point or a Curve embeds nothing, known or not.
+        dimension<2 && return Tuple{Int32,Int32}[]
         # Like _mesh_classified_entity, entities materialized only through the
-        # classification snapshot (implicit primitive boundaries) also resolve.
-        known=haskey(_mesh_entity_dictionary(model,dimension),entity)
+        # classification snapshot (implicit primitive boundaries) also resolve,
+        # and so do discrete entities and entities that only carry a mesh.
+        known=haskey(_mesh_entity_dictionary(model,dimension),entity) ||
+              haskey(model.discrete,(dimension,entity)) ||
+              haskey(model.meshing.attached,(dimension,entity))
         if !known
             cached=LAST_MESH[]
             class=cached===nothing ? nothing :
@@ -7949,7 +8075,10 @@ function _get_periodic(dim,tags)
     (tags isa AbstractVector || tags isa Tuple) || throw(ArgumentError(
         "$caller: tags must be a vector or tuple of entity tags"))
     return _with_model() do current
-        dictionary=_mesh_entity_dictionary(current,dimension)
+        # A mesh loaded with a `$Periodic` section carries its relations as
+        # links of the cache; they answer before the model's own constraints.
+        cached=LAST_MESH[]
+        links=cached isa MixedMesh ? cached.periodic_links : Elements.MixedPeriodicLink[]
         point_parents=if dimension==0
             Model._model_periodic_endpoint_forest(current,
                 [constraint for constraint in
@@ -7962,10 +8091,13 @@ function _get_periodic(dim,tags)
         for tag in tags
             (tag isa Integer && !(tag isa Bool) &&
              typemin(Int32)<=tag<=typemax(Int32) &&
-             haskey(dictionary,Int(tag))) || throw(ArgumentError(
+             _model_entity_known(current,dimension,Int(tag))) || throw(ArgumentError(
                 "$caller: unknown " *
                 "$(_MESH_ENTITY_LABELS[dimension+1])[$tag]"))
-            if point_parents!==nothing
+            link=findfirst(link->link.dim==dimension && link.slave_entity==tag,links)
+            if link!==nothing
+                push!(masters,Int32(links[link].master_entity))
+            elseif point_parents!==nothing
                 relation=get(point_parents,Int(tag),nothing)
                 push!(masters,relation===nothing ? Int32(tag) :
                       Int32(relation[1]))
@@ -8924,6 +9056,21 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
             history===nothing || return Model._model_periodic_uid_query(history,include_high_order)
         end
         cached=LAST_MESH[]
+        if cached isa MixedMesh && !isempty(cached.periodic_links) && dim!=2
+            # Relations read from a `$Periodic` section: Gmsh returns every
+            # node pair of the section together with its affine transform.
+            caller="API.mesh.get_periodic_nodes"
+            dimension=_mesh_query_integer(dim,caller,"dim")
+            slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
+            for link in cached.periodic_links
+                link.dim==dimension && link.slave_entity==slave || continue
+                public=_mesh_public_tags(cached)
+                return (master_entity=Int32(link.master_entity),
+                    slave_nodes=_cache_node_tags(public,link.slave_nodes),
+                    master_nodes=_cache_node_tags(public,link.master_nodes),
+                    affine=link.affine===nothing ? Float64[] : collect(link.affine))
+            end
+        end
         if cached===nothing
             caller="API.mesh.get_periodic_nodes"
             dimension=_mesh_query_integer(dim,caller,"dim")
@@ -8999,7 +9146,11 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
                     class=_cached_classification_locked(cached)
                     s=_periodic_surface_catalog(cached,class,slave,caller).primary
                     m=_periodic_surface_catalog(cached,class,link.master_entity,caller).primary
-                    [a in s && b in m for (a,b) in zip(link.slave_nodes,link.master_nodes)]
+                    # A file saved without the Surface's elements gives no
+                    # catalog to tell primary from high-order pairs; the
+                    # section's pairs are then returned as read, like Gmsh.
+                    isempty(s) || isempty(m) ? trues(length(link.slave_nodes)) :
+                        [a in s && b in m for (a,b) in zip(link.slave_nodes,link.master_nodes)]
                 end
                 return (master_entity=link.master_entity,
                     slave_nodes=_cache_node_tags(public,link.slave_nodes[keep]),
@@ -9030,6 +9181,19 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
                 slave_nodes=_cache_node_tags(public,mapping.slave_nodes),
                 master_nodes=_cache_node_tags(public,mapping.master_nodes),
                 affine=mapping.affine===nothing ? Float64[] : collect(mapping.affine))
+        end
+        let caller="API.mesh.get_periodic_nodes"
+            # An entity that is its own mesh master answers `(tag, [], [], [])`
+            # in Gmsh, whatever its dimension or element order.
+            dimension=_mesh_query_integer(dim,caller,"dim")
+            0<=dimension<=3 || throw(ArgumentError("$caller: dim is out of range"))
+            slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
+            if !haskey(current.periodic,(dimension,slave))
+                _model_entity_known(current,dimension,slave) || throw(ArgumentError(
+                    "$caller: unknown entity ($dimension,$slave)"))
+                return (master_entity=Int32(slave),slave_nodes=UInt64[],
+                    master_nodes=UInt64[],affine=Float64[])
+            end
         end
         if include_high_order && (_high_order_overlay(cached)!==nothing ||
                 any(block->msh_spec(block[1]).order>1,_cache_native_blocks(cached)))
@@ -9062,6 +9226,8 @@ include("APICellPlacement.jl")
 include("APICellOrder.jl")
 include("APICellReference.jl")
 include("APICellInverse.jl")
+include("APIEntityOrder.jl")
+include("APIPointLocation.jl")
 include("APICellQuality.jl")
 include("APICellPyramidQuality.jl")
 include("APICellBezier.jl")
@@ -9197,6 +9363,29 @@ function _tagged_periodic_keys(m,cached,class,msh,function_space_type,entity,fla
     return Int32(mapping.master_entity),types,copy(types),keys,masters,coordinates,slave_coordinates
 end
 
+# Periodic keys of an entity whose relation was read from a `$Periodic`
+# section. As in `gmsh::model::mesh::getPeriodicKeys`, the master coordinates
+# are written into the first coordinate array and the entity's own into the
+# second, and a node without a partner keeps its own tag.
+function _linked_periodic_keys(cached,class,msh,entity,link,flag)
+    pairing=Dict(zip(link.slave_nodes,link.master_nodes))
+    nodes=Int32[]
+    block=_mesh_element_block(cached,msh)
+    if block!==nothing
+        _,cells=block
+        owners=get(class.cell_entities,msh,Int32[])
+        for column in axes(cells,2)
+            owners[column]==entity && append!(nodes,@view cells[:,column])
+        end
+    end
+    matched=Int32[get(pairing,node,node) for node in nodes]
+    types=zeros(Int32,length(nodes))
+    return Int32(link.master_entity),types,copy(types),
+        _cache_node_tags(class.public_tags,nodes),_cache_node_tags(class.public_tags,matched),
+        flag ? vec(cached.coords[:,matched]) : Float64[],
+        flag ? vec(cached.coords[:,nodes]) : Float64[]
+end
+
 function _get_periodic_keys_native_lookup_live(element_type,function_space_type,tag,
                             return_coord=true)
     caller="API.mesh.get_periodic_keys"
@@ -9207,8 +9396,6 @@ function _get_periodic_keys_native_lookup_live(element_type,function_space_type,
     end
     function_space_type isa AbstractString || throw(ArgumentError(
         "$caller: functionSpaceType must be a string"))
-    function_space_type in ("Lagrange","IsoParametric") || throw(ArgumentError(
-        "$caller: periodic keys support Lagrange and IsoParametric function spaces"))
     entity_tag=_mesh_query_integer(tag,caller,"tag")
     flag=_mesh_query_bool(return_coord,caller,"return_coord")
     dimension=spec.dim
@@ -9219,10 +9406,21 @@ function _get_periodic_keys_native_lookup_live(element_type,function_space_type,
         _model_entity_known(m,dimension,Int(entity_tag)) || throw(ArgumentError(
             "$caller: unknown entity ($dimension,$entity_tag)"))
         constraint=get(m.periodic,(dimension,Int(entity_tag)),nothing)
-        constraint===nothing && return Int32(entity_tag),Int32[],Int32[],UInt64[],UInt64[],Float64[],Float64[]
         cached=LAST_MESH[]
         class=cached===nothing ? nothing :
               _cached_classification_locked(cached)
+        link=cached isa MixedMesh ? findfirst(link->link.dim==dimension &&
+            link.slave_entity==entity_tag,cached.periodic_links) : nothing
+        # Gmsh answers an entity that is its own mesh master before it looks at
+        # the function space; only a periodic entity restricts the space.
+        constraint===nothing && link===nothing &&
+            return Int32(entity_tag),Int32[],Int32[],UInt64[],UInt64[],Float64[],Float64[]
+        function_space_type in ("Lagrange","IsoParametric") || throw(ArgumentError(
+            "$caller: periodic keys support Lagrange and IsoParametric function spaces"))
+        if link!==nothing && class!==nothing
+            return _linked_periodic_keys(cached,class,msh_type,Int(entity_tag),
+                cached.periodic_links[link],flag)
+        end
         if dimension==1 && cached isa MixedMesh && class!==nothing && class.public_tags!==nothing
             return _tagged_periodic_keys(m,cached,class,msh_type,function_space_type,
                 entity_tag,flag,caller)

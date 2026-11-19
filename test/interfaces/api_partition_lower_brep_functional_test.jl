@@ -6,10 +6,10 @@ const CORNERS=[0. 1. 0. 0. 0.;0. 0. 1. 0. 0.;0. 0. 0. 1. -1.]
 const EXTERIOR=UInt64[11 12 13 11 13 12;12 13 11 13 12 11;14 14 14 15 15 15]
 const TETS=UInt64[11 11;12 13;13 12;14 15]
 const FACES=((1,3,2),(1,2,4),(2,3,4),(3,1,4))
-# Curve tag, actual Line2 cells (stored directions), declared signed Point bounds.
-const CURVES=[(41,[(11,12)],[1,-2]),(42,[(12,13)],[2,-3]),(43,[(13,11)],[3,-1]),
-    (44,[(11,14)],[1,-4]),(45,[(12,14)],[2,-4]),(46,[(13,14)],[3,-4]),
-    (47,[(11,15)],[1,-5]),(48,[(12,15)],[2,-5]),(49,[(13,15)],[3,-5])]
+# Curve tag, actual Line2 cells (stored directions), declared begin and end Points.
+const CURVES=[(41,[(11,12)],[1,2]),(42,[(12,13)],[2,3]),(43,[(13,11)],[3,1]),
+    (44,[(11,14)],[1,4]),(45,[(12,14)],[2,4]),(46,[(13,14)],[3,4]),
+    (47,[(11,15)],[1,5]),(48,[(12,15)],[2,5]),(49,[(13,15)],[3,5])]
 # Surface tag, EXTERIOR column, declared signed Curve boundary.
 const SURFACES=[(31,1,[41,45,-44]),(32,2,[42,46,-45]),(33,3,[43,44,-46]),
     (34,4,[-43,49,-47]),(35,5,[-42,48,-49]),(36,6,[-41,47,-48])]
@@ -128,9 +128,9 @@ end
             @test A.model.get_partitions(1,curve_children[curve])==parts
         end
         @test Set(A.model.get_boundary([(1,curve_children[41])],false,true,false))==
-            Set([(0,point_children[1]),(0,-point_children[2])])
+            Set([(0,point_children[1]),(0,point_children[2])])
         @test Set(A.model.get_boundary([(1,curve_children[46])],false,true,false))==
-            Set([(0,point_children[3]),(0,-point_children[4])])
+            Set([(0,point_children[3]),(0,point_children[4])])
         @test Set(A.model.get_boundary([(2,surface_children[31])],false,true,false))==
             Set([(1,curve_children[41]),(1,curve_children[45]),(1,-curve_children[44])])
         @test Set(A.model.get_boundary([(2,surface_children[34])],false,true,false))==
@@ -200,7 +200,7 @@ end
             (2,31),(2,32),(2,33),(2,34),(2,35),(2,36),(3,11)]
         @test A.model.get_number_of_partitions()==0
         @test A.mesh.get_elements()==original
-        @test Set(A.model.get_boundary([(1,44)],false,true,false))==Set([(0,1),(0,-4)])
+        @test Set(A.model.get_boundary([(1,44)],false,true,false))==Set([(0,1),(0,4)])
         @test Set(A.model.get_boundary([(2,31)],false,true,false))==Set([(1,41),(1,45),(1,-44)])
         @test A.model.get_entities_for_physical_group(1,210)==[41,44]
         @test A.model.get_entities_for_physical_group(0,110)==[1]
@@ -219,8 +219,9 @@ end
             path=joinpath(directory,"declared.msh");A.write(path)
             A.model.add("imported lower BRep");A.open(path)
         end
-        # Signed declared bounds survive the MSH4 transport.
-        @test A.model.get_boundary([(1,41)],false,true,false)==[(0,1),(0,-2)]
+        # Declared bounds survive the MSH4 transport: begin and end Points of a
+        # Curve (never signed, as in Gmsh 4.15.2) and signed Curves and Surfaces.
+        @test A.model.get_boundary([(1,41)],false,true,false)==[(0,1),(0,2)]
         @test A.model.get_boundary([(2,31)],false,true,false)==[(1,41),(1,45),(1,-44)]
         @test A.model.get_boundary([(3,11)],false,true,false)==
             [(2,31),(2,32),(2,33),(2,34),(2,35),(2,36)]
@@ -242,7 +243,7 @@ end
         region2=only(tag for (_,tag) in A.model.get_entities(3)
             if A.model.get_parent(3,tag)==(3,11) && A.model.get_partitions(3,tag)==[2])
         @test Set(A.model.get_boundary([(1,curve_children[41])],false,true,false))==
-            Set([(0,point_children[1]),(0,-point_children[2])])
+            Set([(0,point_children[1]),(0,point_children[2])])
         @test Set(A.model.get_boundary([(2,surface_children[31])],false,true,false))==
             Set([(1,curve_children[41]),(1,curve_children[45]),(1,-curve_children[44])])
         @test Set(abs.(last.(A.model.get_boundary([(2,interface)],false,true,false))))==
@@ -261,7 +262,7 @@ end
             (1,41),(1,42),(1,43),(1,44),(1,45),(1,46),(1,47),(1,48),(1,49),
             (2,31),(2,32),(2,33),(2,34),(2,35),(2,36),(3,11)]
         @test A.mesh.get_elements()==original
-        @test A.model.get_boundary([(1,44)],false,true,false)==[(0,1),(0,-4)]
+        @test A.model.get_boundary([(1,44)],false,true,false)==[(0,1),(0,4)]
         @test closed_region(11)
     finally
         A.finalize()
@@ -323,23 +324,23 @@ end
             occursin("do not cover its complete border",sprint(showerror,caught))
         @test snapshot()==before
         # A declared Curve cell that is not on the Surface border is foreign.
-        fixture!(curves=[CURVES...,(50,[(14,15)],[4,-5])],
+        fixture!(curves=[CURVES...,(50,[(14,15)],[4,5])],
             surfaces=[(31,1,[41,45,-44,50]),SURFACES[2:end]...])
         caught=try partition!(710);nothing catch error;error end
         @test caught isa ArgumentError &&
             occursin("must lie on the actual Surface border",sprint(showerror,caught))
         # An undeclared Curve is unbound.
-        fixture!(curves=[CURVES...,(50,[(14,15)],[4,-5])])
+        fixture!(curves=[CURVES...,(50,[(14,15)],[4,5])])
         caught=try partition!(710);nothing catch error;error end
         @test caught isa ArgumentError &&
             occursin("unbound lower Curves",sprint(showerror,caught))
         # A shared Line2 support is a duplicate role.
-        fixture!(curves=[CURVES[1],(50,[(11,12)],[1,-2]),CURVES[2:end]...])
+        fixture!(curves=[CURVES[1],(50,[(11,12)],[1,2]),CURVES[2:end]...])
         caught=try partition!(710);nothing catch error;error end
         @test caught isa ArgumentError &&
             occursin("repeats a Curve cell support",sprint(showerror,caught))
         # A Point bound whose cell is not on the Curve end is inconsistent.
-        fixture!(curves=[(41,[(11,12)],[3,-2]),CURVES[2:end]...])
+        fixture!(curves=[(41,[(11,12)],[3,2]),CURVES[2:end]...])
         caught=try partition!();nothing catch error;error end
         @test caught isa ArgumentError &&
             occursin("does not lie on the actual Curve end",sprint(showerror,caught))
@@ -361,7 +362,7 @@ end
         @test caught isa ArgumentError &&
             occursin("signed start and end Point boundaries",sprint(showerror,caught))
         # A branched Curve chain cannot bind endpoints.
-        fixture!(curves=[(41,[(11,12),(11,13),(12,13)],[1,-3]),CURVES[4:end]...],
+        fixture!(curves=[(41,[(11,12),(11,13),(12,13)],[1,3]),CURVES[4:end]...],
             surfaces=[(31,1,[41,45,-44]),(32,2,[46,-45]),(33,3,[44,-46]),
                 (34,4,[49,-47]),(35,5,[48,-49]),(36,6,[47,-48])])
         caught=try partition!();nothing catch error;error end
@@ -446,8 +447,8 @@ function mixed_fixture!(;region_bounds=[31,32,33,34,35,36,37,38,39],
     A.finalize();A.initialize();A.model.add("mixed hex pyr")
     A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
     for tag in (1,2,5,6);A.model.add_discrete_entity(0,tag);end
-    A.model.add_discrete_entity(1,41,[1,-2]);A.model.add_discrete_entity(1,42,[2,-6])
-    A.model.add_discrete_entity(1,43,[6,-5]);A.model.add_discrete_entity(1,44,[5,-1])
+    A.model.add_discrete_entity(1,41,[1,2]);A.model.add_discrete_entity(1,42,[2,6])
+    A.model.add_discrete_entity(1,43,[6,5]);A.model.add_discrete_entity(1,44,[5,1])
     A.model.add_discrete_entity(2,31);A.model.add_discrete_entity(2,32,[41,42,43,44])
     for tag in 33:39;A.model.add_discrete_entity(2,tag);end
     A.model.add_discrete_entity(3,11,region_bounds)
@@ -546,7 +547,7 @@ end
         @test A.model.get_partitions(0,point_children[5])==[1,2]
         @test A.model.get_partitions(0,point_children[1])==[1]
         @test Set(A.model.get_boundary([(1,curve_children[43])],false,true,false))==
-            Set([(0,point_children[6]),(0,-point_children[5])])
+            Set([(0,point_children[6]),(0,point_children[5])])
         @test closed_mixed_region(region1) && closed_mixed_region(region2)
         for (tag,uid,edge) in ((41,701,[1,2]),(42,702,[2,6]),(43,703,[6,5]),(44,704,[5,1]))
             ids,nodes=family(1,curve_children[tag],1)
@@ -1048,9 +1049,9 @@ function junction_fixture!(;declared=false,fan=false)
     else
         if declared
             for tag in (7,8,9);A.model.add_discrete_entity(0,tag);end
-            A.model.add_discrete_entity(1,40,[7,-8])
-            A.model.add_discrete_entity(1,41,[8,-9])
-            A.model.add_discrete_entity(1,42,[9,-7])
+            A.model.add_discrete_entity(1,40,[7,8])
+            A.model.add_discrete_entity(1,41,[8,9])
+            A.model.add_discrete_entity(1,42,[9,7])
             A.model.add_discrete_entity(2,30,[-40,-41,-42])
             A.model.add_discrete_entity(2,31,[40,41,42])
             A.model.add_discrete_entity(3,11,[30,31])
@@ -1133,7 +1134,8 @@ end
             Set([Tuple(UInt64[1,2])])
         bounds=A.model.get_boundary([(1,jseam)],false,true,false)
         @test sort([abs(v) for (_,v) in bounds])==sort(jpoints)
-        @test count(v->v>0,(v for (_,v) in bounds))==1
+        # Begin and end Point, unsigned as in Gmsh 4.15.2.
+        @test length(bounds)==2 && all(v>0 for (_,v) in bounds)
         rims=sort!(collect(tag for (_,tag) in A.model.get_entities(1)
             if length(A.model.get_partitions(1,tag))==2))
         @test [A.model.get_partitions(1,tag) for tag in rims]==[[1,2],[1,3]]
@@ -1238,8 +1240,8 @@ function coincident_fixture!(;rim=false,one_sided=false)
     A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
     if rim
         for tag in (1,2,4);A.model.add_discrete_entity(0,tag);end
-        A.model.add_discrete_entity(1,40,[1,-2]);A.model.add_discrete_entity(1,41,[2,-4])
-        A.model.add_discrete_entity(1,42,[4,-1])
+        A.model.add_discrete_entity(1,40,[1,2]);A.model.add_discrete_entity(1,41,[2,4])
+        A.model.add_discrete_entity(1,42,[4,1])
         A.model.add_discrete_entity(2,30,[40,41,42])
     else
         A.model.add_discrete_entity(2,30)

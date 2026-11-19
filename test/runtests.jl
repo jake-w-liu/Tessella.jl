@@ -270,6 +270,9 @@ include("functional/fixtures.jl")
         "structured/transfinite_composite_sides_test.jl",
         "geometry/extrude_full_turn_unstructured_test.jl",
         "fields/geo_extend_context_field_test.jl",
+        "interfaces/api_gmsh_model_queries_test.jl",
+        "interfaces/api_gmsh_element_queries_test.jl",
+        "interfaces/api_gmsh_point_location_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

@@ -10,7 +10,7 @@ or quadrangles. Lookups return detached Gmsh-shaped tag and orientation arrays.
 module MeshEntityTopology
 
 using ..MeshTypes: Mesh, nnodes
-using ..Elements: MixedMesh, ElementBlock, msh_num_nodes
+using ..Elements: MixedMesh, ElementBlock, msh_num_nodes, msh_type, MSH_CATALOG
 
 const _SEGMENT_EDGES=((1,2),)
 const _TRIANGLE_EDGES=((1,2),(2,3),(3,1))
@@ -31,8 +31,39 @@ const _PRISM_QUADRANGLE_FACES=((1,2,5,4),(1,4,6,3),(2,3,6,5))
 const _PYRAMID_TRIANGLE_FACES=((1,2,5),(4,1,5),(2,3,5),(3,4,5))
 const _PYRAMID_QUADRANGLE_FACES=((1,4,3,2),)
 
+# `MElement::getFaceSolin` of Gmsh 4.15.2: the face order and vertex order the
+# hierarchical key queries register faces with. A prism lists its quadrangles
+# first; a triangle and a pyramid keep `getFace`.
+const _QUADRANGLE_SOLIN_FACES=((1,2,4,3),)
+const _TETRAHEDRON_SOLIN_FACES=((1,2,3),(1,2,4),(1,3,4),(2,3,4))
+const _HEXAHEDRON_SOLIN_FACES=((1,2,4,3),(1,2,5,6),(1,4,5,8),
+                               (2,3,6,7),(4,3,8,7),(5,6,8,7))
+const _PRISM_SOLIN_FACES=((1,2,4,5),(1,3,4,6),(2,3,5,6),(1,2,3),(4,5,6))
+
+# The edges and faces of an element of any order are those of its primary
+# vertices (`MElement::getEdge`, `MElement::getFace`), so every catalog type
+# maps to the first-order type of its family. Types without edges map to 0.
+function _primary_pattern_type(element_type::Int)
+    1<=element_type<=7 && return element_type
+    8<=element_type<=14 && return element_type-7
+    spec=get(MSH_CATALOG,element_type,nothing)
+    (spec===nothing || spec.family===:pnt || spec.family===:trih) && return 0
+    return Int(msh_type(spec.family,1))
+end
+
+function _solin_face_patterns(element_type::Int)
+    primary=_primary_pattern_type(element_type)
+    primary==2 && return _TRIANGLE_FACES
+    primary==3 && return _QUADRANGLE_SOLIN_FACES
+    primary==4 && return _TETRAHEDRON_SOLIN_FACES
+    primary==5 && return _HEXAHEDRON_SOLIN_FACES
+    primary==6 && return _PRISM_SOLIN_FACES
+    primary==7 && return (_PYRAMID_TRIANGLE_FACES...,_PYRAMID_QUADRANGLE_FACES...)
+    return ()
+end
+
 @inline function _simplex_edge_patterns(element_type::Int)
-    8<=element_type<=14 && (element_type-=7)
+    element_type=_primary_pattern_type(element_type)
     element_type==1 && return _SEGMENT_EDGES
     element_type==2 && return _TRIANGLE_EDGES
     element_type==3 && return _QUADRANGLE_EDGES
@@ -44,7 +75,7 @@ const _PYRAMID_QUADRANGLE_FACES=((1,4,3,2),)
 end
 
 @inline function _simplex_face_patterns(element_type::Int,face_type::Int)
-    8<=element_type<=14 && (element_type-=7)
+    element_type=_primary_pattern_type(element_type)
     if face_type==3
         element_type==2 && return _TRIANGLE_FACES
         element_type==4 && return _TETRAHEDRON_FACES
@@ -262,8 +293,8 @@ end
 
 function _append_generated_edges!(replacement::MeshEdgeTopology,
                                   cells::AbstractMatrix{Int32},patterns,
-                                  element_type::Int)
-    @inbounds for cell in axes(cells,2),pattern in patterns
+                                  element_type::Int,columns=axes(cells,2))
+    @inbounds for cell in columns,pattern in patterns
         _add_generated_edge!(
             replacement.nodes,replacement.identifiers,replacement.tags,
             replacement.used_tags,cells[pattern[1],cell],
@@ -354,8 +385,9 @@ function _mesh_triangle_topology_for_cells(
     return replacement
 end
 
-function _append_generated_faces!(replacement,cells,patterns,element_type)
-    for cell in axes(cells,2), face in patterns
+function _append_generated_faces!(replacement,cells,patterns,element_type,
+                                  columns=axes(cells,2))
+    for cell in columns, face in patterns
         if length(face)==3
             _add_generated_face!(replacement.triangle_nodes,
                 replacement.triangle_identifiers,replacement.triangle_tags,
@@ -376,9 +408,26 @@ function _mesh_face_topology_for_cells(
     cells::AbstractMatrix{Int32},element_type::Int)
     element_type in (2,4,9,11) && return _mesh_triangle_topology_for_cells(
         mesh,topology,cells,element_type)
+    return _mesh_face_topology_for_patterns(mesh,topology,cells,element_type,
+        _simplex_face_patterns(element_type,3),_simplex_face_patterns(element_type,4))
+end
+
+# Faces the hierarchical key queries register: every face of each cell, in
+# `getFaceSolin` order and vertex order.
+function _mesh_face_topology_for_solin_cells(
+    mesh::Union{Mesh,MixedMesh},topology::Union{Nothing,MeshFaceTopology},
+    cells::AbstractMatrix{Int32},element_type::Int)
+    return _mesh_face_topology_for_patterns(mesh,topology,cells,element_type,
+        _solin_face_patterns(element_type),())
+end
+
+# Extend the face catalog with the faces of `cells`, cell by cell, in the
+# order `triangles` then `quadrangles` list them (either tuple may mix both
+# face sizes). The catalog is returned unchanged when it already holds them.
+function _mesh_face_topology_for_patterns(
+    mesh::Union{Mesh,MixedMesh},topology::Union{Nothing,MeshFaceTopology},
+    cells::AbstractMatrix{Int32},element_type::Int,triangles,quadrangles)
     caller="mesh_face_topology_for_cells"
-    triangles=_simplex_face_patterns(element_type,3)
-    quadrangles=_simplex_face_patterns(element_type,4)
     isempty(triangles) && isempty(quadrangles) && throw(ArgumentError(
         "$caller: element type $element_type has no supported linear faces"))
     size(cells,1)==msh_num_nodes(element_type) || throw(ArgumentError(
@@ -410,8 +459,6 @@ end
 function _mixed_topology_block(block,caller)
     block isa ElementBlock || throw(ArgumentError(
         "$caller: special-element connectivity is unsupported"))
-    (1<=block.msh<=15 || isempty(block.nodes)) ||
-        throw(ArgumentError("$caller: unsupported non-linear element type $(block.msh)"))
     return block
 end
 

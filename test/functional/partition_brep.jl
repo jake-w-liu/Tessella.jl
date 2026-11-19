@@ -28,7 +28,7 @@ end
         A.finalize();A.initialize();A.model.add("declared partition")
         A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
         A.model.add_discrete_entity(0,1);A.model.add_discrete_entity(0,3)
-        A.model.add_discrete_entity(1,41,[1,-3]);A.model.add_discrete_entity(1,42,[3,-1])
+        A.model.add_discrete_entity(1,41,[1,3]);A.model.add_discrete_entity(1,42,[3,1])
         A.model.add_discrete_entity(2,30,[41,42]);A.model.add_discrete_entity(2,31,[-41,-42])
         A.model.add_discrete_entity(3,11,[30,31])
         coordinates=[0. 1. 0. 0. 0.;0. 0. 1. 0. 0.;0. 0. 0. 1. -1.]
@@ -54,7 +54,7 @@ end
               A.model.get_partitions(1,children[1][41])==[1,2] &&
               A.model.get_partitions(1,children[1][42])==[1,2]
         @test Set(A.model.get_boundary([(1,children[1][41])],false,true,false))==
-            Set([(0,children[0][1]),(0,-children[0][3])])
+            Set([(0,children[0][1]),(0,children[0][3])])
         @test Set(A.model.get_boundary([(2,children[2][30])],false,true,false))==
             Set([(1,children[1][41]),(1,children[1][42])])
         types,ids,nodes=A.mesh.get_elements(1,children[1][41])
@@ -68,12 +68,13 @@ end
             allequal(sign.(last.(bounds)))
         A.mesh.unpartition()
         @test A.model.get_entities()==[(0,1),(0,3),(1,41),(1,42),(2,30),(2,31),(3,11)]
-        # MSH4 transport keeps signed non-partition bounds; the imported
-        # declared topology partitions through the unchanged certificate.
+        # MSH4 transport keeps the begin and end Points; like Gmsh 4.15.2,
+        # get_boundary never signs Point tags. The imported declared topology
+        # partitions through the unchanged certificate.
         A.option("Mesh.MshFileVersion",4.1);A.option("Mesh.SaveAll",1)
         path=tempname()*".msh";A.write(path)
         A.model.add("imported declared partition");A.open(path);rm(path)
-        @test A.model.get_boundary([(1,41)],false,true,false)==[(0,1),(0,-3)] &&
+        @test A.model.get_boundary([(1,41)],false,true,false)==[(0,1),(0,3)] &&
             A.model.get_boundary([(2,30)],false,true,false)==[(1,41),(1,42)]
         A.option("Mesh.PartitionCreateTopology",1)
         A.mesh.partition(2,[601:606...,701:703...,801,802,501,502],
@@ -83,7 +84,7 @@ end
         @test A.model.get_number_of_partitions()==2 &&
             A.model.get_partitions(1,child41)==[1,2]
         A.mesh.unpartition()
-        @test A.model.get_boundary([(1,41)],false,true,false)==[(0,1),(0,-3)]
+        @test A.model.get_boundary([(1,41)],false,true,false)==[(0,1),(0,3)]
     finally
         A.finalize()
     end
@@ -97,7 +98,7 @@ end
         A.finalize();A.initialize();A.model.add("parallel partition")
         A.option("General.Terminal",0);A.option("Mesh.Renumber",0)
         A.model.add_discrete_entity(0,1);A.model.add_discrete_entity(0,3)
-        A.model.add_discrete_entity(1,41,[1,-3]);A.model.add_discrete_entity(1,42,[3,-1])
+        A.model.add_discrete_entity(1,41,[1,3]);A.model.add_discrete_entity(1,42,[3,1])
         A.model.add_discrete_entity(2,30,[41,42]);A.model.add_discrete_entity(2,31,[-41,-42])
         A.model.add_discrete_entity(3,11,[30,31])
         coordinates=[0. 1. 0. 0. 0.;0. 0. 1. 0. 0.;0. 0. 0. 1. -1.]
