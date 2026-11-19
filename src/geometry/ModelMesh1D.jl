@@ -886,6 +886,15 @@ function _model_curve_grade_params(m::GeoModel,curve::Integer,t0::Float64,
         return _model_native_line_grade_params(m,Int(curve),options,caller;
                                                _native_producer,_birth_rows=_native_producer)
     end
+    occ=get(m.curve_geometry,curve,nothing)
+    if occ isa NamedTuple && hasproperty(occ,:occ) && occ.occ===:line &&
+            hasproperty(occ,:dir) && t0==occ.t0 && t1==occ.t1 && t1>t0 &&
+            first(m.curves[curve])!=last(m.curves[curve]) &&
+            _point_store===nothing && _l1_bounds===nothing && !_skip_filter &&
+            !_model_curve_aniso_grading(m,curve)
+        return _model_occ_line_grade_params(m,Int(curve),occ,options,caller;
+            _native_producer,_birth_rows=_native_producer)
+    end
     return (Base.inferencebarrier(_model_curve_grade_params_general)(m,curve,t0,t1,options,caller;
         _native_producer,_point_store,_l1_bounds,_skip_filter))::Vector{Float64}
 end

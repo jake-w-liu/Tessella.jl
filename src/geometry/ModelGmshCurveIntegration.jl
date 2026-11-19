@@ -302,3 +302,95 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     end
     return _birth_rows ? _ModelNativeCurveGrade(params,rows,count) : params
 end
+
+# A straight OpenCASCADE edge through the same `meshGEdge` port as a built-in
+# Line. Upstream grades it in the edge's own parameter (arc length from the
+# line origin, over `[t0,t1]`) and reads the speed from `OCCEdge::firstDer`,
+# the analytic `D1` — only the built-in kernel differentiates numerically.
+# The generic curve kernel differentiated numerically and inverted the
+# primitive by a convex combination, which left the nodes of a uniformly
+# sized edge up to 2e-12 off Gmsh's (and its `0.3` one ulp off even with the
+# exact speed): enough to change the frontal mesh of every face the edge
+# bounds. The scalar `F_Lc` arm only; the directional one keeps the generic
+# kernel.
+function _model_occ_line_grade_params(m::GeoModel,curve::Int,occ,
+        options::_ModelMesh1DOptions,caller;_native_producer::Bool=false,
+        _birth_rows::Bool=false)
+    a,b=m.curves[curve]
+    t0=Float64(occ.t0);t1=Float64(occ.t1)
+    gamma=t->_occ_line_point(occ,t)
+    direction=occ.dir
+    speed=sqrt(direction[1]*direction[1]+direction[2]*direction[2]+
+               direction[3]*direction[3])
+    isfinite(speed) && speed>0 || throw(ArgumentError(
+        "$caller: OpenCASCADE Line[$curve] has no direction"))
+    inner=options.inner_field
+    cert_fields=_model_curve_certificate_fields(m,curve,options,caller)
+    minimum=_model_minimum_curve_segments(m,curve,options,caller)
+    force_odd=m.meshing.recombine_algo!=0 && m.meshing.recombine_all
+    odd_nodes=m.meshing.recombine_algo!=0 && (m.meshing.recombine_all ||
+        any(face->haskey(m.meshing.recombine,(2,face)),_model_curve_faces(m,curve)))
+    cert_gamma=u->_model_curve_point(m,curve,u,caller)
+    runopts=options
+    scale=1.0
+    local params,count,rows
+    done=false
+    for _attempt in 1:8
+        evaluate=let current_runopts=runopts
+            function(t,at_begin,at_end)
+                point=gamma(t)
+                endpoint=at_begin ? _model_vertex_bgm(m,a,point,current_runopts,caller;_native_producer) :
+                         at_end ? _model_vertex_bgm(m,b,point,current_runopts,caller;_native_producer) : GMSH_MAX_SIZE
+                h=min(endpoint,_model_curve_bgm(m,curve,t,point,t0,t1,current_runopts,caller;_native_producer))
+                lc=speed/h
+                isfinite(lc) && lc>0 || throw(ArgumentError(
+                    "$caller: OpenCASCADE Line density is nonpositive or not representable"))
+                return _IntegrationPoint(t,lc,0.0,speed,h)
+            end
+        end
+        points=_gmsh_curve_integration(evaluate,t0,t1,options.integration_precision,caller)
+        try
+            mass=_gmsh_curve_smooth_primitive!(points,caller)
+            nedge=_gmsh_edge_count(mass,minimum,10_000_000,caller)
+            if odd_nodes && iseven(nedge+1) && mass>0.75
+                nedge<10_000_000 || throw(ArgumentError("$caller: OpenCASCADE Line edge count exceeds capacity"))
+                nedge+=1
+            end
+            params=_gmsh_curve_parameters(points,nedge+1,caller)
+            coordinates=NTuple{3,Float64}[gamma(t) for t in params]
+            field=_ModelCurveEntityField(m,runopts,String(caller))
+            size_function=let current_runopts=runopts
+                t->_model_curve_bgm(m,curve,t,gamma(t),t0,t1,current_runopts,caller;_native_producer)
+            end
+            count=length(params)-2
+            rows=_birth_rows ? collect(eachindex(params)) : nothing
+            _filter_close_points!(coordinates,params,gamma,field,(1,curve),
+                                  minimum,false,force_odd,size_function,caller;row_map=rows)
+            if isempty(cert_fields)
+                done=true
+            else
+                worst=0.0
+                for (face,cert) in cert_fields
+                    previous=cert_gamma(params[1])
+                    for u in Iterators.drop(params,1)
+                        point=cert_gamma(u)
+                        worst=max(worst,metric_edge_length(cert,previous,point;
+                                                         entity=(2,face)))
+                        previous=point
+                    end
+                end
+                if worst<=1.0
+                    done=true
+                else
+                    scale=max(scale*1.02,worst*worst)
+                    runopts=_mesh1d_options_with_inner_field(options,
+                        _model_curve_tightened_grading(inner,cert_fields,scale))
+                end
+            end
+        finally
+            _gmsh_curve_close_points!(points)
+        end
+        done && break
+    end
+    return _birth_rows ? _ModelNativeCurveGrade(params,rows,count) : params
+end

@@ -7781,8 +7781,7 @@ function _mesh_model_surface_unstructured_once(m::GeoModel,t::Int,forced,min_ang
         geometry!==nothing && hasproperty(geometry,:occ) && geometry.occ===:plane)
     fullquad=_model_surface_recombined(m,t) && m.meshing.recombine_algo in (2,3)
     experimental=_model_surface_recombined(m,t) && m.meshing.recombine_algo==4
-    if algorithm==3 || (native_plane && (fullquad || experimental)) || (_return_surface_production && native_plane &&
-                        !_model_factory_surface_encoding(m,t))
+    if algorithm==3 || (native_plane && (fullquad || experimental)) || (_return_surface_production && native_plane)
         options=_model_algorithm_size_options(m,_mesh1d_options,caller)
         production=_gmsh_native_initial_surface(m,t,options,_mesh_input,
             _mesh_node_high_water,caller;algorithm,size_field,
