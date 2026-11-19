@@ -363,33 +363,95 @@ end
 
 # Reusable containers of `_gmsh3_compatible`: one cavity shell is examined
 # per insertion, so its vertex and edge tables are emptied rather than rebuilt.
-struct _GmshShellScratch
-    vertices::Set{Int32}
-    edges::Dict{NTuple{2,Int32},Int}
+# The shell holds a few dozen triangles, so its vertices and edges live in two
+# small open-addressing tables whose slots are valid for one call (`epoch`):
+# nothing is hashed through `Set`/`Dict` and nothing is cleared.
+mutable struct _GmshShellScratch
+    epoch::UInt32
+    vertex::Vector{Int32}
+    vertex_epoch::Vector{UInt32}
+    edge::Vector{UInt64}
+    edge_count::Vector{UInt8}
+    edge_epoch::Vector{UInt32}
 end
-_GmshShellScratch()=_GmshShellScratch(Set{Int32}(),Dict{NTuple{2,Int32},Int}())
+_GmshShellScratch()=_GmshShellScratch(UInt32(0),zeros(Int32,256),zeros(UInt32,256),
+    zeros(UInt64,256),zeros(UInt8,256),zeros(UInt32,256))
+
+function _gmsh3_shell_reset!(scratch::_GmshShellScratch,triangles::Int)
+    # Both tables stay at most a quarter full: 3 corners and 3 edge uses a triangle.
+    capacity=length(scratch.vertex)
+    if capacity<12triangles
+        capacity=nextpow(2,12triangles)
+        scratch.vertex=zeros(Int32,capacity);scratch.vertex_epoch=zeros(UInt32,capacity)
+        scratch.edge=zeros(UInt64,capacity);scratch.edge_count=zeros(UInt8,capacity)
+        scratch.edge_epoch=zeros(UInt32,capacity);scratch.epoch=UInt32(0)
+    elseif scratch.epoch==typemax(UInt32)
+        fill!(scratch.vertex_epoch,UInt32(0));fill!(scratch.edge_epoch,UInt32(0))
+        scratch.epoch=UInt32(0)
+    end
+    scratch.epoch+=UInt32(1)
+    return nothing
+end
+
+@inline _gmsh3_edge_code(u::Int32,v::Int32)=u<=v ? (UInt64(reinterpret(UInt32,u))<<32)|UInt64(reinterpret(UInt32,v)) :
+    (UInt64(reinterpret(UInt32,v))<<32)|UInt64(reinterpret(UInt32,u))
+
+# Slot of `node` in the vertex table; `found` tells whether it was recorded this call.
+@inline function _gmsh3_shell_vertex_slot(scratch::_GmshShellScratch,node::Int32)
+    mask=length(scratch.vertex)-1
+    slot=Int((reinterpret(UInt32,node)*0x9e3779b1)>>7)&mask
+    @inbounds while scratch.vertex_epoch[slot+1]==scratch.epoch
+        scratch.vertex[slot+1]==node && return slot+1,true
+        slot=(slot+1)&mask
+    end
+    return slot+1,false
+end
+
+@inline function _gmsh3_shell_edge_slot(scratch::_GmshShellScratch,code::UInt64)
+    mask=length(scratch.edge)-1
+    slot=Int((code*0x9e3779b97f4a7c15)>>40)&mask
+    @inbounds while scratch.edge_epoch[slot+1]==scratch.epoch
+        scratch.edge[slot+1]==code && return slot+1,true
+        slot=(slot+1)&mask
+    end
+    return slot+1,false
+end
 
 function _gmsh3_compatible(T,point,lc,protected_faces,protected_edges,
                            scratch::_GmshShellScratch=_GmshShellScratch())
-    shell_vertices=scratch.vertices;shell_edges=scratch.edges
-    empty!(shell_vertices);empty!(shell_edges)
-    for (a,b,c,_) in T.boundary
+    _gmsh3_shell_reset!(scratch,length(T.boundary))
+    epoch=scratch.epoch
+    nvertices=0;nedges=0
+    @inbounds for (a,b,c,_) in T.boundary
         for node in (a,b,c)
-            push!(shell_vertices,node)
+            slot,found=_gmsh3_shell_vertex_slot(scratch,node)
+            if !found
+                scratch.vertex[slot]=node;scratch.vertex_epoch[slot]=epoch
+                nvertices+=1
+            end
             p=_pt(T,node)
             hypot(p[1]-point[1],p[2]-point[2],p[3]-point[3])<.05lc && return false
         end
         for (u,v) in ((a,b),(b,c),(c,a))
-            key=_edgekey(u,v)
-            shell_edges[key]=get(shell_edges,key,0)+1
+            slot,found=_gmsh3_shell_edge_slot(scratch,_gmsh3_edge_code(u,v))
+            if found
+                # A third triangle on an edge: the shell is not a surface.
+                scratch.edge_count[slot]==0x02 && return false
+                scratch.edge_count[slot]=0x02
+            else
+                scratch.edge[slot]=_gmsh3_edge_code(u,v);scratch.edge_epoch[slot]=epoch
+                scratch.edge_count[slot]=0x01
+                nedges+=1
+            end
         end
     end
-    all(==(2),values(shell_edges)) || return false
-    length(shell_vertices)-length(shell_edges)+length(T.boundary)==2 || return false
+    # Every edge on exactly two triangles, and the Euler characteristic of a sphere.
+    3length(T.boundary)==2nedges || return false
+    nvertices-nedges+length(T.boundary)==2 || return false
     for t in T.cavity,slot in 1:4
         # A replacement must keep every preexisting vertex and every typed
         # embedded face. The input's original node labels remain usable.
-        _vert(T,t,slot) in shell_vertices || return false
+        last(_gmsh3_shell_vertex_slot(scratch,_vert(T,t,slot))) || return false
         face=_face(T,t,slot);nb=_nbr(T,t,slot)
         (_sort3t(face...) in protected_faces && nb!=0 &&
          T.mark[nb]==T.epoch) && return false
@@ -404,7 +466,7 @@ function _gmsh3_compatible(T,point,lc,protected_faces,protected_edges,
         for i in 1:3,j in i+1:4
             u=vertices[i];v=vertices[j]
             ((u,v) in protected_edges || (v,u) in protected_edges) || continue
-            haskey(shell_edges,_edgekey(u,v)) || return false
+            last(_gmsh3_shell_edge_slot(scratch,_gmsh3_edge_code(u,v))) || return false
         end
     end
     return true
