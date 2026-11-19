@@ -10276,6 +10276,10 @@ function _geo_sync_meshing_options!(m::GeoModel,context::_GeoNumericContext)
     m.meshing.lc_extend_from_boundary=_geo_signed_gmsh_int_value(something(
         _geo_option_number(context,"Mesh",0,"MeshSizeExtendFromBoundary"),1.0),
         "execute_geo: Mesh.MeshSizeExtendFromBoundary")
+    # Like the API session generator: OCC primitive and Boolean solids fill
+    # from their own boundary Surface meshes (sizes honoured, Regions conform
+    # to the published Surfaces) instead of the analytic tessellation.
+    m.meshing.conforming_solids=true
     # `PView::list` snapshot — `Merge`/`Include` `.pos` payloads and
     # `Plugin(...).Run` products accumulate on the execution context in load
     # order; boundary-layer `Extrude`'s `Using View[i]` indexes this list at
