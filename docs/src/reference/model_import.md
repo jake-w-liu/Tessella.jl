@@ -37,6 +37,19 @@ owners. Parsing, synchronization and bounding-context updates occur on
 detached state before publication. File suffix aliases are case insensitive,
 and filenames are passed directly to the reader as data.
 
+Like Gmsh, any 2.x file (2.0, 2.1, 2.2) is read with the MSH 2 layout and any
+version above 4.0 (4.1, 4.2, ...) with the MSH 4.1 layout; MSH 4.0 itself has a
+different layout and is rejected. Old-style MSH 2 partition numbers become
+partition entities as in `GModel::convertOldPartitioningToNewOne`. The geometry
+carrier of an imported mesh is not validated as a fresh mesh: inverted or flat
+tetrahedra, hanging nodes, non-manifold surface patches and zero-area triangles
+open exactly as in Gmsh, while non-finite coordinates and repeated cells are
+still rejected. Bounding boxes of loaded entities follow `GEntity::bounds`
+(a Point is its coordinate, other entities use their element vertices, and an
+entity without elements has an empty box). `view.get_model_data_full` returns
+Gmsh's `(dataType, tags, data, time, numComponents)` shape next to the flat
+`view.get_model_data` triple.
+
 MSH 2.2 and 4.1 imports accept ASCII and binary files through the existing
 literal mesh importer. They retain supported actual public UIDs, entity owners,
 physical names, periodic pairs, partition parents/memberships, ghost records,
