@@ -699,6 +699,10 @@ function _model_occ_trimmed_face_measure(kernel,id)
             rec.radius)
         return A,_occ3_scale(M,1.0/A)
     end
+    if occ===:sphere
+        J=_model_occ_sphere_face_integrals(kernel,id)
+        J===nothing || return _model_occ_sphere_face_measure(rec,J)
+    end
     # Generic parametric base: sample the pcurve boundary at each edge's
     # resolution, triangulate the uv domain, integrate |p_u×p_v| with a
     # three-point rule over 4×-split subtriangles.
@@ -730,6 +734,97 @@ function _model_occ_trimmed_face_measure(kernel,id)
     A>_OCC_CONFUSION || throw(ErrorException(
         "OCC.get_mass: trimmed face has zero area"))
     return A,_occ3_scale(M,1.0/A)
+end
+
+# ---- sphere patches --------------------------------------------------
+#
+# A trimmed sphere face p(u,v)=C+R·n̂, n̂=cos v(cos u·X+sin u·Y)+sin v·Z, has
+# dA=R²cos v·du·dv. Every domain moment of n̂ that the area, the divergence
+# volume and their first moments need reduces by Green's theorem to a
+# boundary line integral ∬_D f du dv = ∮_{∂D} P du with ∂P/∂v = −f:
+#   1·cos v          → −sin v
+#   n̂ₓ,n̂ᵧ ·cos v     → −(cos u, sin u)·(v/2+sin 2v/4)
+#   n̂_z·cos v        → −sin²v/2
+#   n̂ᵢn̂ⱼ·cos v       → products of (cos u, sin u) with −(sin v−sin³v/3),
+#                       cos³v/3, −sin³v/3
+# so the measures are exact to the boundary quadrature — the pole's
+# degenerate edge contributes through its own du — instead of a
+# triangulated-domain rule. Returns `nothing` for a wire that winds around
+# the axis without a seam (no planar contour to orient) or lacks a pcurve;
+# the caller then keeps the triangulated rule.
+const _OCC_SPH_INTEGRALS=(:I0,:Ix,:Iy,:Iz,:Txx,:Txy,:Tyy,:Txz,:Tyz,:Tzz)
+
+function _model_occ_sphere_face_integrals(kernel,fid)
+    shape=kernel.shapes[fid]; rec=shape.geometry.geometry
+    haskey(rec,:pcurves) || return nothing
+    total=zeros(10)
+    for (wi,wire_id) in enumerate(shape.children)
+        uses=kernel.shapes[wire_id].geometry.uses
+        acc=zeros(10); turn=0.0
+        for (eid,rev) in uses
+            entry=get(rec.pcurves,kernel.shape_tags[eid][2],nothing)
+            entry===nothing && return nothing
+            eg=kernel.shapes[eid].geometry.geometry
+            pc=rev && entry.rev!==nothing ? entry.rev : entry.fwd
+            pc===nothing && return nothing
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            for k in 1:length(cuts)-1
+                a=cuts[k];h=(cuts[k+1]-a)/2;mid=a+h
+                for i in 1:4, sgn in (-1,1)
+                    t=mid+sgn*h*_OCC_GL_T[i]
+                    (u,v),(du,_)=_occ_pcurve_d1(pc,t)
+                    w=_OCC_GL_W[i]*h*du
+                    su,cu=_gm_sincos(u); sv,cv=_gm_sincos(v)
+                    q=v/2+sv*cv/2          # ∫cos²v dv
+                    c3=sv-sv*sv*sv/3       # ∫cos³v dv
+                    turn+=w
+                    acc[1]+=w*(-sv)
+                    acc[2]+=w*(-cu*q)
+                    acc[3]+=w*(-su*q)
+                    acc[4]+=w*(-sv*sv/2)
+                    acc[5]+=w*(-cu*cu*c3)
+                    acc[6]+=w*(-su*cu*c3)
+                    acc[7]+=w*(-su*su*c3)
+                    acc[8]+=w*(cu*cv*cv*cv/3)
+                    acc[9]+=w*(su*cv*cv*cv/3)
+                    acc[10]+=w*(-sv*sv*sv/3)
+                end
+            end
+        end
+        abs(turn)>1.0 && return nothing
+        # outer wire positive, holes negative, whichever way each winds
+        sgn=(wi==1 ? 1.0 : -1.0)*(acc[1]>=0 ? 1.0 : -1.0)
+        total.+=sgn.*acc
+    end
+    total[1]>0 || return nothing
+    return NamedTuple{_OCC_SPH_INTEGRALS}(Tuple(total))
+end
+
+# Area and centroid of a trimmed sphere face from its boundary integrals.
+function _model_occ_sphere_face_measure(rec,J)
+    R=rec.radius;X,Y,Z,C=rec.X,_occ_frame_y(rec),rec.axis,rec.center
+    A=R*R*J.I0
+    n1=ntuple(k->X[k]*J.Ix+Y[k]*J.Iy+Z[k]*J.Iz,3)
+    return A,ntuple(k->C[k]+R*n1[k]/J.I0,3)
+end
+
+# Divergence contributions (V, M) = (∬p·n̂ dA/3, ∬p(p·n̂)dA) of a trimmed
+# sphere face for the outward radial normal.
+function _model_occ_sphere_face_div(rec,J)
+    R=rec.radius;X,Y,Z,C=rec.X,_occ_frame_y(rec),rec.axis,rec.center
+    cl=(_dot3(C,X),_dot3(C,Y),_dot3(C,Z))
+    n1=(J.Ix,J.Iy,J.Iz)
+    cn=cl[1]*n1[1]+cl[2]*n1[2]+cl[3]*n1[3]          # ∬C·n̂ cos v
+    V=R*R*(cn+R*J.I0)/3
+    tc=(J.Txx*cl[1]+J.Txy*cl[2]+J.Txz*cl[3],
+        J.Txy*cl[1]+J.Tyy*cl[2]+J.Tyz*cl[3],
+        J.Txz*cl[1]+J.Tyz*cl[2]+J.Tzz*cl[3])       # ∬n̂(C·n̂) cos v
+    world(a)=ntuple(k->X[k]*a[1]+Y[k]*a[2]+Z[k]*a[3],3)
+    wn=world(n1);wt=world(tc)
+    R2=R*R
+    M=ntuple(k->R2*(C[k]*cn+R*C[k]*J.I0+R*wt[k]+R2*wn[k]),3)
+    return V,M
 end
 
 # CDT of the sampled pcurve boundary — shared scaffold for the trimmed-face
@@ -1524,6 +1619,19 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
                 V+=σ*_model_occ_torus_face_div(kernel,fid)
             end
             continue
+        end
+        if occ===:sphere && haskey(rec,:pcurves)
+            J=_model_occ_sphere_face_integrals(kernel,fid)
+            if J!==nothing
+                # boundary integrals for the outward radial normal; a
+                # left-handed frame's natural normal is the inward one
+                h=_dot3(_occ_cross(rec.X,_occ_frame_y(rec)),rec.axis)>=0 ?
+                    1.0 : -1.0
+                Vp,Mp=_model_occ_sphere_face_div(rec,J)
+                V+=σ*h*Vp
+                want_centroid && (M=_occ3_add(M,_occ3_scale(Mp,σ*h)))
+                continue
+            end
         end
         if haskey(rec,:pcurves) &&
             occ!==:cylinder && occ!==:plane
