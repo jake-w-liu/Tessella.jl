@@ -6170,7 +6170,11 @@ function _geo_occ_thru_sections_run(m::GeoModel,wire_tags,
     kernel=_geo_occ_prepare_kernel!(m)
     out=try
         tags=Int[_geo_occ_wire_tag!(m,wt,kernel,caller) for wt in wire_tags]
-        Model._model_occ_thru_sections!(m,-1,tags;make_ruled=ruled)
+        # the bare `ThruSections{wires}` term lofts a shell, not a solid
+        # (Gmsh.y: `addThruSections(-1, wires, false, …)`); only the tagged
+        # definition makes a solid. Open section wires are legal here.
+        Model._model_occ_thru_sections!(m,-1,tags;make_solid=false,
+                                        make_ruled=ruled)
     catch err
         err isa InterruptException && rethrow()
         err isa ArgumentError || rethrow()
