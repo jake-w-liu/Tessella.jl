@@ -267,6 +267,7 @@ include("functional/fixtures.jl")
         "interfaces/api_geo_sweep_test.jl",
         "geometry/extrude_lateral_orientation_test.jl",
         "geometry/geo_occ_extrude_numbering_test.jl",
+        "structured/transfinite_composite_sides_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

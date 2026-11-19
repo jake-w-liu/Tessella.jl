@@ -8357,10 +8357,13 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
     haskey(m.meshing.transfinite_surfaces, surf) || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
     spec,signed_curves,curve_points,nside,allow_warped,junctions,
-        project_plane,sphere_center,_=
+        project_plane,sphere_center,_,composite=
             _transfinite_surface_sides(m,surf,caller;_mesh_input)
     nside==4 || throw(ArgumentError(
         "$caller: Incompatible surface $surf in transfinite volume $volume"))
+    composite===nothing || throw(ArgumentError(
+        "$caller: transfinite Volume[$volume] face Surface[$surf] chains " *
+        "several curves on one side, which volume faces do not support"))
     # `_transfinite_surface_sides` already welds every chain end to the
     # shared vertex coordinates — the volume kernel's bitwise shared-edge
     # certification relies on the same weld.
@@ -8821,10 +8824,13 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
         surf=abs(signed_surface)
         haskey(m.meshing.transfinite_surfaces,surf) || throw(ArgumentError(
             "$caller: Incompatible surface $surf in transfinite volume $t"))
-        spec,signed_curves,curve_points,nside,_,junctions,_,_,ruled_tri=
+        spec,signed_curves,curve_points,nside,_,junctions,_,_,ruled_tri,composite=
             _transfinite_surface_sides(m,surf,caller;_mesh_input)
         nside==3 || nside==4 || throw(ArgumentError(
             "$caller: Incompatible surface $surf in transfinite volume $t"))
+        composite===nothing || throw(ArgumentError(
+            "$caller: transfinite Volume[$t] face Surface[$surf] chains " *
+            "several curves on one side, which volume faces do not support"))
         faces_data[index]=(;surf,spec,signed_curves,curve_points,nside,
                            junctions,ruled_tri)
         nside==3 && push!(tri_faces,index)
@@ -9280,7 +9286,15 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     signed_curves=[s for s in m.loops[only(loops)]
                    if !(abs(s) in m.meshing.degenerated)]
     nside=length(signed_curves)
-    nside in (3,4) || throw(ArgumentError(
+    # Upstream `MeshTransfiniteSurface` walks the boundary vertices and cuts
+    # the loop at the 3 or 4 explicit corners, so a side may chain several
+    # curves (tutorial t6: `Transfinite Surface{1} = {1,2,3,4}` on a
+    # six-curve loop).
+    composite_sides=nside>4 || (nside==4 && length(spec.corners)==3)
+    composite_sides && !(length(spec.corners) in (3,4)) && throw(ArgumentError(
+        "$caller: transfinite Surface[$t] with $nside boundary curves requires " *
+        "3 or 4 explicit corners"))
+    nside in (3,4) || composite_sides || throw(ArgumentError(
         "$caller: transfinite Surface[$t] requires a 3- or 4-curve boundary " *
         "after skipping degenerated curves (got $nside)"))
     curve_points=Vector{Vector{NTuple{3,Float64}}}(undef,nside)
@@ -9318,7 +9332,13 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     end
     junctions=Int[signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
                   for signed in signed_curves]
-    if !isempty(spec.corners)
+    composite=nothing
+    if composite_sides
+        curve_points,composite=_transfinite_composite_sides(
+            m,t,signed_curves,curve_points,spec.corners,caller)
+        nside=length(spec.corners)
+        junctions=collect(Int,spec.corners)
+    elseif !isempty(spec.corners)
         curve_points=_apply_pinned_surface_corners(
             m,t,signed_curves,curve_points,spec.corners,nside,caller)
         junctions=collect(Int,spec.corners)
@@ -9344,7 +9364,7 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     # corner list matching the natural junction order is a no-op and stays
     # supported).
     sphere_center=nothing
-    if nside==4 && kind==:ruled
+    if nside==4 && kind==:ruled && composite===nothing
         gens=m.loops[only(loops)]
         sphere_center=_ruled_sphere_center(m,t,gens,caller)
         if sphere_center!==nothing
@@ -9433,7 +9453,81 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         end
     end
     return spec,signed_curves,curve_points,nside,allow_warped,junctions,
-           project_plane,sphere_center,ruled_tri
+           project_plane,sphere_center,ruled_tri,composite
+end
+
+# Sides of a transfinite boundary cut at explicit corners: each side chains
+# the loop curves from one corner to the next, traversed forward or backward
+# around the loop as the corner order requires. Returns the side point chains
+# and `(curves, reversed)`: per side the curves oriented along the side, and
+# whether the corner frame runs against the loop.
+function _transfinite_composite_sides(m::GeoModel,t::Int,signed_curves,
+                                      curve_points,corners,caller)
+    n=length(signed_curves)
+    starts=Int[signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+               for signed in signed_curves]
+    allunique(corners) && all(c->c in starts,corners) || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] corners $corners must be boundary " *
+        "junction Points $starts"))
+    position=Dict(p=>k for (k,p) in enumerate(starts))
+    offsets=[mod(position[c]-position[corners[1]],n) for c in corners]
+    forward=issorted(offsets)
+    backward=offsets[1]==0 && issorted(offsets[2:end];rev=true)
+    forward || backward || throw(ArgumentError(
+        "$caller: transfinite Surface[$t] corner list order is inconsistent " *
+        "with the curve loop orientation"))
+    # Backward traversal walks reversed curves: curve k ends at starts[k].
+    order=forward ? [mod1(position[corners[1]]+i,n) for i in 0:n-1] :
+        [mod1(position[corners[1]]-1-i,n) for i in 0:n-1]
+    sides=Vector{Vector{NTuple{3,Float64}}}()
+    side_curves=Vector{Vector{Int}}()
+    side_counts=Vector{Vector{Int}}()
+    corner_set=Set(corners)
+    for k in order
+        signed=forward ? signed_curves[k] : -signed_curves[k]
+        points=forward ? curve_points[k] : reverse(curve_points[k])
+        head=signed>0 ? m.curves[signed][1] : m.curves[-signed][2]
+        if head in corner_set
+            push!(sides,copy(points));push!(side_curves,[signed])
+            push!(side_counts,[length(points)])
+        else
+            append!(sides[end],points[2:end]);push!(side_curves[end],signed)
+            push!(side_counts[end],length(points))
+        end
+    end
+    length(sides)==length(corners) || throw(ErrorException(
+        "$caller: transfinite Surface[$t] composite sides lost a corner"))
+    return sides,(curves=side_curves,counts=side_counts,reversed=!forward)
+end
+
+# Retag the kernel's boundary segments of a composite transfinite face by the
+# curve each segment lies on (the kernels tag one curve per side).
+function _transfinite_composite_retag!(kernel,m::GeoModel,curve_points,composite)
+    owner=Dict{Tuple{NTuple{3,Float64},NTuple{3,Float64}},Int32}()
+    for (side,curves) in enumerate(composite.curves)
+        chain=curve_points[side];k=1
+        for (signed,count) in zip(curves,composite.counts[side])
+            curve=abs(signed)
+            for i in k:k+count-2
+                owner[(chain[i],chain[i+1])]=Int32(curve)
+                owner[(chain[i+1],chain[i])]=Int32(curve)
+            end
+            k+=count-1
+        end
+    end
+    retag!(nodes,tags,coords)=for column in axes(nodes,2)
+        a=Int(nodes[1,column]);b=Int(nodes[2,column])
+        pa=(coords[1,a],coords[2,a],coords[3,a]);pb=(coords[1,b],coords[2,b],coords[3,b])
+        tags[column]=owner[(pa,pb)]
+    end
+    if kernel isa Mesh
+        retag!(kernel.segs,kernel.seg_tag,kernel.coords)
+    else
+        for block in kernel.blocks
+            block.msh==1 && retag!(block.nodes,block.tags,kernel.coords)
+        end
+    end
+    return kernel
 end
 
 # Keeps only the dim-2 cell blocks of a transfinite surface kernel result —
@@ -9534,6 +9628,15 @@ function _transfinite_surface_smoothing(m::GeoModel,t::Int)
     return max(Int(m.meshing.native_smoothing)-1,0)
 end
 
+# Side tags/keys of a transfinite face: one curve per side, or every curve of
+# a composite side in traversal order (`_transfinite_composite_sides`).
+_transfinite_side_tags(m,signed_curves,junctions,composite,caller)=
+    composite===nothing ? _model_transfinite_side_tags(m,signed_curves,junctions,caller) :
+        Tuple(abs(first(curves)) for curves in composite.curves)
+_transfinite_side_keys(m,signed_curves,junctions,composite,caller)=
+    composite===nothing ? _model_transfinite_side_keys(m,signed_curves,junctions,caller) :
+        Tuple(vcat(composite.curves...))
+
 function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                    param_sizes::Dict{Tuple{Int,Float64},
                                                     Float64},
@@ -9550,7 +9653,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
             _geometry_points)
     end
     spec,signed_curves,curve_points,nside,allow_warped,junctions,project_plane,
-        sphere_center,ruled_tri=_transfinite_surface_sides(m,t,caller;_mesh_input,
+        sphere_center,ruled_tri,composite=_transfinite_surface_sides(m,t,caller;_mesh_input,
             _geometry_points=_return_surface_production ? nothing : _geometry_points)
     if nside==3
         s1,s2,s3=curve_points
@@ -9578,35 +9681,36 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
             if recombined
                 mesh_transfinite_triangle_patch(
                     s1,s2,s3;arrangement=spec.arrangement,
-                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
+                    side_tags=_transfinite_side_tags(m,signed_curves,junctions,composite,caller),
                     project=project)
             else
                 mesh_transfinite_triangle(
                     s1,s2,s3;arrangement=spec.arrangement,
-                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
+                    side_tags=_transfinite_side_tags(m,signed_curves,junctions,composite,caller),
                     project=project)
             end
         else
             if recombined
                 mesh_transfinite_triangle_collapsed_patch(
                     s1,s2,s3;arrangement=spec.arrangement,
-                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
+                    side_tags=_transfinite_side_tags(m,signed_curves,junctions,composite,caller),
                     allow_corner_rotation=isempty(spec.corners),
                     project=project)
             else
                 mesh_transfinite_triangle_collapsed(
                     s1,s2,s3;arrangement=spec.arrangement,
-                    side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
+                    side_tags=_transfinite_side_tags(m,signed_curves,junctions,composite,caller),
                     allow_corner_rotation=isempty(spec.corners),
                     project=project)
             end
         end
+        composite===nothing || _transfinite_composite_retag!(kernel,m,curve_points,composite)
         # The entity cache stores the untagged cell complex; boundary
         # curves are not meshed by generate(2).
         mesh=kernel isa MixedMesh ?
             _surface_part_strip(kernel,caller,t) :
             Mesh(kernel.coords;tris=kernel.tris)
-        _transfinite_tri_frame_reversed(m,signed_curves,junctions,caller,t) &&
+        (composite===nothing ? _transfinite_tri_frame_reversed(m,signed_curves,junctions,caller,t) : composite.reversed) &&
             (mesh=_reversed_surface_mesh(mesh,caller,t))
         # Upstream never Laplace-smooths a transfinite face; its three-corner
         # `transfinite3` smoother is not implemented here.
@@ -9614,7 +9718,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
         return _return_surface_production && _mesh_input!==nothing ?
             _model_transfinite_surface_production(m,t,kernel,mesh,_mesh_input,
                 _mesh_node_high_water,param_sizes,caller;size_field,_geometry_points,
-                side_keys=_model_transfinite_side_keys(m,signed_curves,junctions,caller),
+                side_keys=_transfinite_side_keys(m,signed_curves,junctions,composite,caller),
                 producer_parameters=_model_transfinite_projection_parameters(project,mesh,caller)) : mesh
     end
     if isempty(spec.corners)
@@ -9630,7 +9734,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     smoothing=_transfinite_surface_smoothing(m,t)
     kernel=if _model_surface_recombined(m,t)
         mesh_transfinite_quad_patch(bottom,right,top,left;
-                                     side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
+                                     side_tags=_transfinite_side_tags(m,signed_curves,junctions,composite,caller),
                                     arrangement=spec.arrangement,
                                     allow_warped=allow_warped,
                                     project_plane=project_plane,
@@ -9638,17 +9742,18 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
                                     smoothing=smoothing)
     else
         mesh_transfinite_patch(bottom,right,top,left;
-                                     side_tags=_model_transfinite_side_tags(m,signed_curves,junctions,caller),
+                                     side_tags=_transfinite_side_tags(m,signed_curves,junctions,composite,caller),
                                arrangement=spec.arrangement,
                                allow_warped=allow_warped,
                                project_plane=project_plane,
                                interpolate=interpolate,
                                smoothing=smoothing)
     end
+    composite===nothing || _transfinite_composite_retag!(kernel,m,curve_points,composite)
     mesh=kernel isa MixedMesh ?
         _surface_part_strip(kernel,caller,t) :
         Mesh(kernel.coords;tris=kernel.tris)
-    _transfinite_quad_frame_reversed(m,signed_curves,junctions,caller,t) &&
+    (composite===nothing ? _transfinite_quad_frame_reversed(m,signed_curves,junctions,caller,t) : composite.reversed) &&
         (mesh=_reversed_surface_mesh(mesh,caller,t))
     mesh=_consume_surface_attributes(m,t,mesh,caller;laplacian=false)
     L=length(bottom)-1;H=length(right)-1
@@ -9657,7 +9762,7 @@ function _transfinite_surface_mesh(m::GeoModel,t::Int,
     return _return_surface_production && _mesh_input!==nothing ?
         _model_transfinite_surface_production(m,t,kernel,mesh,_mesh_input,
             _mesh_node_high_water,param_sizes,caller;size_field,_geometry_points,
-            side_keys=_model_transfinite_side_keys(m,signed_curves,junctions,caller),
+            side_keys=_transfinite_side_keys(m,signed_curves,junctions,composite,caller),
             birth_rows,producer_parameters) : mesh
 end
 
