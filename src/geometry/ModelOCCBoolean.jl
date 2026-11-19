@@ -753,6 +753,7 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
             # on each face there, while cut returns the object whole and
             # intersect's bare curve filters out below minDim
             sheets && (op===:difference || op===:intersection) && continue
+            _brep_faces_apart(reps[i],fI,reps[j],fJ) && continue
             for s in _brep_face_sections(fI,fJ,caller)
                 spansI=_brep_trim_section(reps[i],fI,s.pcA,s.closed,tol;
                                           scrv=s.curve)

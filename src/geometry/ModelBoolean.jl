@@ -835,53 +835,104 @@ function _brep_fit_conic_pc(sg,partner,curve)
     c=curve.c
     mscale=max(1.0,abs(c[1]),abs(c[2]),abs(c[3]),
                curve.kind===:circle ? curve.r : curve.rx)
-    tolfit=1e-10*mscale
-    n=64
-    while n<=4096
-        θs=Float64[_OCC_TWO_PI*i/n for i in 0:n]
-        pts=NTuple{2,Float64}[
-            _brep_surface_uv(sg,_brep_curve_eval(curve,θ)) for θ in θs]
-        _brep_unwrap_v!(_brep_unwrap_u!(pts,uper),vper)
-        duv=Vector{NTuple{2,Float64}}(undef,n+1)
-        for i in 1:n+1
-            V=_brep_conic_d1(curve,θs[i])
-            _,bu,bv=_occ_surface_d1(sg,pts[i][1],pts[i][2])
-            a=_b3dot(bu,bu);b=_b3dot(bu,bv);d=_b3dot(bv,bv)
-            det=a*d-b*b
-            # chart singularity (pole, apex) on the conic
-            det>1e-12*a*d || return nothing
-            r1=_b3dot(V,bu);r2=_b3dot(V,bv)
-            duv[i]=((d*r1-b*r2)/det,(a*r2-b*r1)/det)
+    tolfit=1e-9*mscale
+    # exact chart point (on the branch nearest `ref`) and chart velocity
+    function node(θ,ref)
+        u,v=_brep_surface_uv(sg,_brep_curve_eval(curve,θ))
+        if ref!==nothing
+            uper>0 && (u+=uper*round((ref[1]-u)/uper))
+            vper>0 && (v+=vper*round((ref[2]-v)/vper))
         end
-        duv[end]=duv[1]
-        knots,deg,cps=_hermite_bspline_2d(θs,pts,duv)
+        V=_brep_conic_d1(curve,θ)
+        _,bu,bv=_occ_surface_d1(sg,u,v)
+        a=_b3dot(bu,bu);b=_b3dot(bu,bv);d=_b3dot(bv,bv)
+        det=a*d-b*b
+        # chart singularity (pole, apex) on the conic
+        det>1e-12*a*d || return nothing
+        r1=_b3dot(V,bu);r2=_b3dot(V,bv)
+        return (θ,(u,v),((d*r1-b*r2)/det,(a*r2-b*r1)/det))
+    end
+    # cubic Hermite point of the interval between two nodes
+    function hermite(n0,n1,θ)
+        h=n1[1]-n0[1];t=(θ-n0[1])/h
+        h00=(1+2t)*(1-t)^2;h10=t*(1-t)^2;h01=t*t*(3-2t);h11=t*t*(t-1)
+        return (h00*n0[2][1]+h10*h*n0[3][1]+h01*n1[2][1]+h11*h*n1[3][1],
+                h00*n0[2][2]+h10*h*n0[3][2]+h01*n1[2][2]+h11*h*n1[3][2])
+    end
+    # The trace's fourth derivative peaks where the conic nears a chart
+    # singularity, so the nodes are placed by bisection: an interval is
+    # split until its Hermite cubic lifts onto the conic within `tolfit`.
+    # A uniform layout needs ten times the knots for the same accuracy, and
+    # every consumer of the trace pays for each of them.
+    nodes=Vector{Any}(undef,0)
+    first_node=node(0.0,nothing)
+    first_node===nothing && return nothing
+    push!(nodes,first_node)
+    for i in 1:16
+        nd=node(_OCC_TWO_PI*i/16,nodes[end][2])
+        nd===nothing && return nothing
+        push!(nodes,nd)
+    end
+    i=1
+    while i<length(nodes)
+        n0=nodes[i];n1=nodes[i+1]
         worst=0.0
-        for i in 1:n
-            for frac in (0.25,0.5,0.75)
-                θ=fma(θs[i+1]-θs[i],frac,θs[i])
-                uv=_occ_spl2d_eval(knots,deg,cps,θ)
-                worst=max(worst,_b3dist(
-                    _brep_surface_eval(sg,uv[1],uv[2]),
-                    _brep_curve_eval(curve,θ)))
-            end
-            worst>tolfit && break
+        for frac in (0.25,0.5,0.75)
+            θ=fma(n1[1]-n0[1],frac,n0[1])
+            uv=hermite(n0,n1,θ)
+            worst=max(worst,_b3dist(_brep_surface_eval(sg,uv[1],uv[2]),
+                                    _brep_curve_eval(curve,θ)))
         end
         if worst<=tolfit
-            turn=(pts[end][1]-pts[1][1],pts[end][2]-pts[1][2])
-            ts3=Float64[];p3=NTuple{2,Float64}[];d3=NTuple{2,Float64}[]
-            for k in -1:1, i in (k==-1 ? 1 : 2):n+1
-                push!(ts3,θs[i]+k*_OCC_TWO_PI)
-                push!(p3,(pts[i][1]+k*turn[1],pts[i][2]+k*turn[2]))
-                push!(d3,duv[i])
-            end
-            knots,deg,cps=_hermite_bspline_2d(ts3,p3,d3)
-            return (spl2d=(knots,deg,cps),
-                    lvl2d=(uv->fld(_brep_surface_eval(sg,uv[1],uv[2]))),
-                    per2d=_OCC_TWO_PI)
+            i+=1
+            continue
         end
-        n*=2
+        (n1[1]-n0[1]<1e-5 || length(nodes)>2048) && return nothing
+        mid=(n0[1]+n1[1])/2
+        nd=node(mid,hermite(n0,n1,mid))
+        nd===nothing && return nothing
+        insert!(nodes,i+1,nd)
     end
-    return nothing
+    n=length(nodes)-1
+    turn=(nodes[end][2][1]-nodes[1][2][1],nodes[end][2][2]-nodes[1][2][2])
+    ts3=Float64[];p3=NTuple{2,Float64}[];d3=NTuple{2,Float64}[]
+    for k in -1:1, i in (k==-1 ? 1 : 2):n+1
+        nd=nodes[i]
+        push!(ts3,nd[1]+k*_OCC_TWO_PI)
+        push!(p3,(nd[2][1]+k*turn[1],nd[2][2]+k*turn[2]))
+        push!(d3,i==n+1 ? nodes[1][3] : nd[3])
+    end
+    knots,deg,cps=_hermite_bspline_2d(ts3,p3,d3)
+    return (spl2d=(knots,deg,cps),
+            lvl2d=(uv->fld(_brep_surface_eval(sg,uv[1],uv[2]))),
+            per2d=_OCC_TWO_PI)
+end
+
+# A plane face bounded by straight edges lies in the convex hull of its
+# vertices: with every vertex strictly inside the ball it cannot meet the
+# sphere. A box inside a sphere then needs no sections at all — six circle
+# traces used to be built and trimmed away again.
+function _brep_plane_face_in_ball(S,f,sp)
+    r2=(sp.radius*(1-1e-9))^2
+    for wire in f.wires, (eidx,_,_) in wire
+        e=S.edges[eidx]
+        e.curve.kind===:line || return false
+        for v in (e.v1,e.v2)
+            d=_b3(S.pts[v],sp.center)
+            _b3dot(d,d)<r2 || return false
+        end
+    end
+    return true
+end
+
+# Face pairs that provably do not meet, decided from the faces themselves
+# before their carrier surfaces are intersected.
+function _brep_faces_apart(Sa,fa,Sb,fb)
+    fa.sg.occ===:plane && fb.sg.occ===:sphere &&
+        return _brep_plane_face_in_ball(Sa,fa,fb.sg)
+    fa.sg.occ===:sphere && fb.sg.occ===:plane &&
+        return _brep_plane_face_in_ball(Sb,fb,fa.sg)
+    return false
 end
 
 # ── tensor-patch × analytic-surface sections ────────────────────────────────
@@ -5384,6 +5435,7 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
                 _brep_planes_coincident(fa.sg,fb.sg)
             push!(coinc,(ia,ib));continue
         end
+        _brep_faces_apart(A,fa,B,fb) && continue
         for s in _brep_face_sections(fa,fb,caller)
             # trim each section on both faces; intersect the kept span sets
             spansA=_brep_trim_section(A,fa,s.pcA,s.closed,tol;
@@ -5904,6 +5956,7 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 push!(coinc,(i,fi,j,fj))
                 continue
             end
+            _brep_faces_apart(Si,fI,Sj,fJ) && continue
             for s in _brep_face_sections(fI,fJ,caller)
                 spansI=_brep_trim_section(Si,fI,s.pcA,s.closed,tol;
                                           scrv=s.curve)

@@ -754,6 +754,24 @@ end
 # the caller then keeps the triangulated rule.
 const _OCC_SPH_INTEGRALS=(:I0,:Ix,:Iy,:Iz,:Txx,:Txy,:Tyy,:Txz,:Tyz,:Tzz)
 
+_occ_sphere_conic_panels(t0,t1)=(n=max(1,ceil(Int,abs(t1-t0)/(π/16)));
+    Float64[t0+(t1-t0)*i/n for i in 0:n])
+
+# Chart data of the sphere `rec` at parameter `t` of a circle or ellipse
+# edge record lying on it: (sin u, cos u, sin v, cos v, v, du/dt).
+function _occ_sphere_conic_chart(rec,eg,t)
+    s,c=_gm_sincos(t)
+    rx,ry=eg.occ===:circle ? (eg.r,eg.r) : (eg.rx,eg.ry)
+    Yc=_occ_circle_y(eg)
+    p=ntuple(k->eg.center[k]+rx*c*eg.X[k]+ry*s*Yc[k]-rec.center[k],3)
+    dp=ntuple(k->-rx*s*eg.X[k]+ry*c*Yc[k],3)
+    Ys=_occ_frame_y(rec)
+    x=_dot3(p,rec.X);y=_dot3(p,Ys);z=_dot3(p,rec.axis)
+    dx=_dot3(dp,rec.X);dy=_dot3(dp,Ys)
+    ρ2=x*x+y*y;ρ=sqrt(ρ2);R=sqrt(ρ2+z*z)
+    return y/ρ,x/ρ,z/R,ρ/R,atan(z,ρ),(x*dy-y*dx)/ρ2
+end
+
 function _model_occ_sphere_face_integrals(kernel,fid)
     shape=kernel.shapes[fid]; rec=shape.geometry.geometry
     haskey(rec,:pcurves) || return nothing
@@ -768,14 +786,27 @@ function _model_occ_sphere_face_integrals(kernel,fid)
             pc=rev && entry.rev!==nothing ? entry.rev : entry.fwd
             pc===nothing && return nothing
             t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
-            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            # An exact conic edge whose chart trace is only a fit (a circle
+            # that is no parallel or meridian) is integrated on the conic
+            # itself: chart point and du come from the 3-D point and
+            # velocity, so the measure does not inherit the fit tolerance.
+            exact=hasproperty(_brep_pc_unneg(pc)[1],:spl2d) &&
+                get(eg,:occ,nothing) in (:circle,:ellipse)
+            cuts=exact ? _occ_sphere_conic_panels(t0,t1) :
+                _model_occ_pcurve_measure_panels(pc,t0,t1)
             for k in 1:length(cuts)-1
                 a=cuts[k];h=(cuts[k+1]-a)/2;mid=a+h
                 for i in 1:4, sgn in (-1,1)
                     t=mid+sgn*h*_OCC_GL_T[i]
-                    (u,v),(du,_)=_occ_pcurve_d1(pc,t)
-                    w=_OCC_GL_W[i]*h*du
-                    su,cu=_gm_sincos(u); sv,cv=_gm_sincos(v)
+                    local w,su,cu,sv,cv,v
+                    if exact
+                        su,cu,sv,cv,v,du=_occ_sphere_conic_chart(rec,eg,t)
+                        w=_OCC_GL_W[i]*h*du
+                    else
+                        (u,v),(du,_)=_occ_pcurve_d1(pc,t)
+                        w=_OCC_GL_W[i]*h*du
+                        su,cu=_gm_sincos(u); sv,cv=_gm_sincos(v)
+                    end
                     q=v/2+sv*cv/2          # ∫cos²v dv
                     c3=sv-sv*sv*sv/3       # ∫cos³v dv
                     turn+=w
