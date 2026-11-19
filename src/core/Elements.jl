@@ -278,6 +278,12 @@ const _VOLUME_CELL_FACES = Dict{Int,Vector{NTuple{N,Int} where N}}(
 
 abstract type AbstractElementBlock end
 
+# Marks storage whose producer certifies every invariant the public
+# constructors check. Used by the incremental mesh authority, which appends to
+# storage it validated row by row and must not copy or rescan it per append.
+struct _TrustedMixedStorage end
+const _TRUSTED_MIXED_STORAGE=_TrustedMixedStorage()
+
 """One homogeneous block: `nodes` is `nnodes × ncells` (1-based indices)."""
 struct ElementBlock <: AbstractElementBlock
     msh::Int
@@ -316,6 +322,10 @@ struct ElementBlock <: AbstractElementBlock
         end
         return new(Int(msh),N,T)
     end
+    # A producer that has already validated its own storage hands it over
+    # without the copy and the per-cell checks above.
+    ElementBlock(::_TrustedMixedStorage,msh::Int,nodes::Matrix{Int32},tags::Vector{Int32})=
+        new(msh,nodes,tags)
 end
 
 """A 1-based reference to a cell in a [`MixedMesh`](@ref); `(0,0)` means absent."""
@@ -1268,6 +1278,18 @@ struct MixedMesh
         _assert_mixed_structure(mesh,"MixedMesh")
         return mesh
     end
+    # Storage certified by its producer: no copy and no structural rescan.
+    MixedMesh(::_TrustedMixedStorage,C::Matrix{Float64},
+              B::Vector{MixedElementBlock},
+              names::Dict{Tuple{Int,Int},String},
+              data::Union{Nothing,MixedEntityData},
+              elementary_entities::Union{Nothing,Vector{Vector{Int32}}},
+              periodic_links::Vector{MixedPeriodicLink},
+              ancillary_sections::Vector{MshAncillarySection},
+              data_sections::Vector{MshDataSection},
+              partition_data::Union{Nothing,MixedPartitionData})=
+        new(C,B,names,data,elementary_entities,periodic_links,
+            ancillary_sections,data_sections,partition_data)
     function MixedMesh(coords::AbstractMatrix{<:Real}, blocks::AbstractVector;
                        physical_names=Dict{Tuple{Int,Int},String}(),entity_data=nothing,
                        elementary_entities=nothing,

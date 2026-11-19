@@ -173,6 +173,30 @@ function _model_mesh_has_native_sources(m)
     return false
 end
 
+# One entity's product: the rows it owns or references, in private-rank order,
+# and its cells per block. `selected` lists (block, columns) in block order.
+function _model_mesh_owner_product(mesh::MixedMesh,owner,owned,selected,private_rank,caller)
+    data=mesh.entity_data
+    referenced=Set(owned)
+    for (bi,columns) in selected,node in mesh.blocks[bi].nodes[:,columns]
+        0<node<=nnodes(mesh) || throw(ArgumentError(
+            "$caller: entity $owner references an invalid actual node row"))
+        push!(referenced,node)
+    end
+    # Each product touches its own rows/connectivity. Allocating a global
+    # mask and map per entity makes sparse many-entity imports quadratic.
+    rows=sort!(collect(referenced);by=row->private_rank[row])
+    mapping=Dict(row=>Int32(index) for (index,row) in enumerate(rows))
+    blocks=ElementBlock[];tags=Vector{UInt64}[]
+    for (bi,columns) in selected
+        block=mesh.blocks[bi]
+        local_nodes=map(row->mapping[row],block.nodes[:,columns])
+        push!(blocks,ElementBlock(block.msh,local_nodes,block.tags[columns]))
+        push!(tags,copy(data.external_element_tags[bi][columns]))
+    end
+    return _ModelMeshProduct(owner,rows,blocks,tags)
+end
+
 function _model_mesh_authority(mesh::MixedMesh,done=();caller="mesh authority",
                                private_rank=collect(UInt64,1:nnodes(mesh)),
                                carrier=mesh,carrier_rows=collect(Int32,1:nnodes(mesh)),
@@ -222,24 +246,8 @@ function _model_mesh_authority(mesh::MixedMesh,done=();caller="mesh authority",
     end
     products=Dict{Tuple{Int,Int32},_ModelMeshProduct}()
     for (owner,selected) in selections
-        referenced=Set(get(owned_rows,owner,Int32[]))
-        for (bi,columns) in selected,node in mesh.blocks[bi].nodes[:,columns]
-            0<node<=nnodes(mesh) || throw(ArgumentError(
-                "$caller: entity $owner references an invalid actual node row"))
-            push!(referenced,node)
-        end
-        # Each product touches its own rows/connectivity. Allocating a global
-        # mask and map per entity makes sparse many-entity imports quadratic.
-        rows=sort!(collect(referenced);by=row->private_rank[row])
-        mapping=Dict(row=>Int32(index) for (index,row) in enumerate(rows))
-        blocks=ElementBlock[];tags=Vector{UInt64}[]
-        for (bi,columns) in selected
-            block=mesh.blocks[bi]
-            local_nodes=map(row->mapping[row],block.nodes[:,columns])
-            push!(blocks,ElementBlock(block.msh,local_nodes,block.tags[columns]))
-            push!(tags,copy(data.external_element_tags[bi][columns]))
-        end
-        products[owner]=_ModelMeshProduct(owner,rows,blocks,tags)
+        products[owner]=_model_mesh_owner_product(mesh,owner,
+            get(owned_rows,owner,Int32[]),selected,private_rank,caller)
     end
     completed=Set{Tuple{Int,Int32}}((Int(dim),Int32(tag)) for (dim,tag) in done)
     bindings=_model_mesh_carrier_cell_tags(mesh,carrier,carrier_cells,caller)
@@ -247,6 +255,8 @@ function _model_mesh_authority(mesh::MixedMesh,done=();caller="mesh authority",
         Dict{Tuple{Int,Int32},Union{Mesh,MixedMesh}}(),carrier,Int32.(carrier_rows),
         Dict{Tuple{Int,Int32},Vector{Int32}}(),bindings)
 end
+
+include("ModelMeshAuthorityLog.jl")
 
 # Product metadata retains the declarations it uses and their boundary,
 # embedding and parent closure. Copying every declaration for every sparse
@@ -491,7 +501,27 @@ function _model_surface_constructor_input(production,actual::MixedMesh,
 end
 
 function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthority,inputs;
-        caller="Surface constructor input",only=nothing)
+        caller="Surface constructor input",only=nothing,shared::Bool=false,known::Bool=false)
+    if shared
+        # An authority taken from a log already shares its entity tables across
+        # appends, so the pass's own table is bound as it is instead of being
+        # copied per Surface. `known` says the other owners were checked
+        # against this log before; its products only grow, so they still hold.
+        only!==nothing && inputs isa Dict{Tuple{Int,Int32},MixedMesh} || throw(ArgumentError(
+            "$caller: a shared Surface constructor table needs the one new owner"))
+        for (owner,constructor) in (known ? (haskey(inputs,only) ? (only=>inputs[only],) : ()) : inputs)
+            owner[1]==2 && haskey(authority.products,owner) || throw(ArgumentError(
+                "$caller: Surface constructor input refers to absent actual entity $owner"))
+            if owner==only
+                actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
+                    producer_order=true,first_order=true)
+                _model_surface_constructor_binding(actual,constructor,caller)
+            end
+        end
+        return _ModelMeshAuthority(authority.mesh,authority.products,authority.done,
+            authority.private_rank,authority.native_inputs,authority.carrier,authority.carrier_rows,
+            authority.producer_rows,authority.carrier_cells,inputs)
+    end
     bound=Dict{Tuple{Int,Int32},MixedMesh}()
     for (owner,constructor) in inputs
         owner[1]==2 && haskey(authority.products,owner) || throw(ArgumentError(

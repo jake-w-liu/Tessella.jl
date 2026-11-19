@@ -1909,13 +1909,95 @@ function _higher_volume_spawn_input(assembly,m,done;ranks,old_supports,
     end
 end
 
+# The serial Surface pass publishes each merged product to the next producer.
+# Rebuilding the authority from the whole assembly for every Surface is
+# quadratic in the model, so the pass mirrors the assembly in a mesh log
+# (ModelMeshAuthorityLog.jl) and appends what each merge added. `cells`,
+# `last` and `edits` record the assembly state the log mirrors: any change to
+# an existing row since then discards the log, and the merge falls back to the
+# full rebuild and seeds a new one.
+mutable struct _HigherLiveAuthority
+    log::Union{Nothing,Model._ModelMeshLog}
+    cells::Int
+    last::Union{Nothing,_Dim01Cell}
+    edits::Int
+    inputs_known::Bool
+end
+_HigherLiveAuthority()=_HigherLiveAuthority(nothing,0,nothing,0,false)
+
+# Seed the log from `authority`, the complete authority of the assembly as it
+# stands, and return the log's own authority of the same content. An authority
+# the log cannot extend is returned unchanged and the pass stays on the full
+# rebuild until a later seed succeeds.
+function _higher_live_seed!(live::_HigherLiveAuthority,assembly,authority)
+    live.log=nothing;live.inputs_known=false
+    mesh=authority.mesh
+    # Every assembly node is a row only while no retired support is dropped;
+    # rows then equal assembly positions and stay so under appends.
+    (mesh!==nothing && nnodes(mesh)==length(assembly.nodes) &&
+     (isempty(assembly.nodes) || mesh.entity_data.external_node_tags[end]==assembly.nodes[end].tag)) ||
+        return authority
+    log=Model._model_mesh_log(authority;caller=assembly.caller)
+    (log!==nothing && log.cells==length(assembly.cells)) || return authority
+    seeded=Model._model_mesh_log_authority!(log,authority.done)
+    seeded===nothing && return authority
+    Model._MODEL_MESH_LOG_VERIFY[] && !Model._model_mesh_same(seeded,authority) &&
+        throw(ErrorException("$(assembly.caller): seeded mesh log differs from its authority"))
+    live.log=log;live.cells=length(assembly.cells);live.edits=assembly.edits
+    live.last=isempty(assembly.cells) ? nothing : assembly.cells[end]
+    return seeded
+end
+
+# Append what the merge of Surface `tag` added to the assembly and bind its
+# producer rows: the authority `_higher_assembly_authority` followed by
+# `_higher_bind_producer_rows` would build, or `nothing` when the log does not
+# mirror the assembly any more or cannot take the addition.
+function _higher_live_advance!(live::_HigherLiveAuthority,assembly,m,done,ranks,previous,
+                               tag,mesh,mapping)
+    log=live.log
+    log===nothing && return nothing
+    live.log=nothing
+    (log.valid && live.edits==assembly.edits && previous.mesh!==nothing &&
+     previous.products===log.products && previous.producer_rows===log.producer_rows &&
+     previous.done===log.done && nnodes(previous.mesh)==log.nodes &&
+     length(assembly.nodes)>=log.nodes && length(assembly.cells)>=live.cells &&
+     (live.cells==0 || assembly.cells[live.cells]===live.last)) || return nothing
+    for position in log.nodes+1:length(assembly.nodes)
+        node=assembly.nodes[position]
+        # A discrete entity's declared bounds follow the nodes it owns.
+        haskey(m.discrete,(node.owner[1],Int(node.owner[2]))) && return nothing
+        rank=ranks===nothing ? UInt64(position) : get(ranks,node.tag,UInt64(0))
+        Model._model_mesh_log_node!(log,node.point,node.owner,node.parameter,node.tag,rank) ||
+            return nothing
+    end
+    for position in live.cells+1:length(assembly.cells)
+        cell=assembly.cells[position]
+        Model._model_mesh_log_cell!(log,cell.msh,cell.owner[2],cell.nodes,cell.physical,cell.tag) ||
+            return nothing
+    end
+    owner=(2,Int32(tag))
+    authority=Model._model_mesh_log_authority!(log,done,owner)
+    authority===nothing && return nothing
+    # Rows are assembly positions, so the part's rows are its mapping.
+    rows=Vector{Int32}(undef,length(mapping))
+    copyto!(rows,mapping)
+    _higher_bound_rows_check(authority,mesh,rows,tag,assembly.caller)
+    # A Surface without cells or owned nodes has no product to extend; the
+    # full path gives it an empty one that lasts until the next rebuild.
+    Model._model_mesh_log_producer_rows!(log,owner,rows) || return nothing
+    live.log=log;live.cells=length(assembly.cells);live.edits=assembly.edits
+    live.last=isempty(assembly.cells) ? nothing : assembly.cells[end]
+    Model._MODEL_MESH_LOG_APPENDS[]+=1
+    return authority
+end
+
 # Merge one concrete producer without widening its mesh and ownership types.
 function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,discarded,done;
         emitted,source_nodes,geometry_cells,native_orphan_births,curve_births,
         parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
         periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
         metric_surface,constructor_inputs,size_field,native_recombine_events,
-        unvalidated_inputs=nothing,lines=nothing)
+        unvalidated_inputs=nothing,live=nothing,lines=nothing)
             alternate=produced isa Model._ModelSurfaceGeometryProduction ? produced.geometry : nothing
             source_binding=produced isa Model._ModelSurfaceGeometryProduction ? produced.production :
                 produced isa Model._ModelSurfaceProduction ? produced : nothing
@@ -1979,9 +2061,26 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                     (source_binding!==nothing && !isempty(source_binding.source_node_updates))
                 ranks===nothing || _higher_complete_ranks!(ranks,assembly)
                 previous_input=input
-                input=_higher_assembly_authority(assembly,m,done;ranks,old_supports)
-                input=_higher_bind_producer_rows(input,assembly,[(tag,mesh,class,mapping)],
-                    previous_input)
+                # With `live`, the authority is extended by what this merge
+                # appended; the full rebuild runs when the log cannot follow,
+                # and seeds a new log for the merges after it.
+                expected=live!==nothing && live.log!==nothing && Model._MODEL_MESH_LOG_VERIFY[] ?
+                    _higher_bind_producer_rows(_higher_assembly_authority(assembly,m,done;ranks,old_supports),
+                        assembly,[(tag,mesh,class,mapping)],previous_input) : nothing
+                advanced=live===nothing ? nothing : _higher_live_advance!(live,assembly,m,done,
+                    ranks,previous_input,tag,mesh,mapping)
+                if advanced===nothing
+                    input=_higher_assembly_authority(assembly,m,done;ranks,old_supports)
+                    input=_higher_bind_producer_rows(input,assembly,[(tag,mesh,class,mapping)],
+                        previous_input)
+                    live===nothing || (input=_higher_live_seed!(live,assembly,input))
+                else
+                    expected===nothing || Model._model_mesh_same(expected,advanced) ||
+                        throw(ErrorException("$(assembly.caller): incremental authority of " *
+                            "Surface[$tag] differs from the full rebuild"))
+                    input=advanced
+                end
+                shared=live!==nothing && live.log!==nothing
                 if source_binding!==nothing
                     transfinite_events=source_binding.constructor_mesh===nothing &&
                         isempty(source_binding.element_tags) &&
@@ -2020,8 +2119,12 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                     input=Model._model_mesh_with_surface_constructor_inputs(input,constructor_inputs;
                         caller=assembly.caller)
                 else
+                    # A log authority binds the pass's own table: its entity
+                    # tables are shared across merges already.
                     input=Model._model_mesh_with_surface_constructor_inputs(input,constructor_inputs;
-                        caller=assembly.caller,only=(2,Int32(tag)))
+                        caller=assembly.caller,only=(2,Int32(tag)),shared,
+                        known=shared && live.inputs_known)
+                    shared && (live.inputs_known=true)
                     unvalidated_inputs[]=true
                 end
                 if tag in unmerged_nonew_sources
@@ -2137,6 +2240,10 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
             dirty=parallel_dirty,precise=GmshLibm._win_cli_precision(),
             size_field=size_field))
     end
+    # The serial pass extends one authority; detached producers keep snapshots
+    # of their own, which a shared log cannot give them.
+    live=parallel_units===nothing && volume_forward===nothing ? _HigherLiveAuthority() : nothing
+    live===nothing || (input=_higher_live_seed!(live,assembly,input))
     lines=_HigherLineCells()
     for (ui,tags) in enumerate(units)
         work=parallel_units===nothing ? nothing : parallel_units[ui]
@@ -2174,7 +2281,7 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
                 parallel_dirty,periodic_pairs,geometry_alternates,geometry_birth,geometry_parts,
                 periodic_masters,ordinary_sources,unmerged_nonew_sources,ranks,old_supports,
                 metric_surface,constructor_inputs,size_field,native_recombine_events,
-                unvalidated_inputs,lines))::
+                unvalidated_inputs,live,lines))::
                 Tuple{Model._ModelMeshAuthority,Union{Nothing,Model._ExtrudeNoNewScope}}
         end
         # State this unit left behind that a later detached produce still
