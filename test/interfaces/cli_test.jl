@@ -409,8 +409,10 @@ Physical Volume("domain", 72) = {1};
         @test read(point_mesh_size_input,String)==_POINT_MESH_SIZE_CLI_GEO
         point_mesh_size=read_msh(point_mesh_size_output).mesh
         @test validate(point_mesh_size).ok
+        # Gmsh 4.15.2 writes the same 17 nodes and 22 triangles (identical
+        # coordinates and triangle vertex sets) for this script.
         @test mesh_crc(point_mesh_size).sha==
-              "132a95502bc83280cca1771f2440076d1d8d9bb59199c3b979b638991a8cff58"
+              "8a67d9438df20ec8bbf33536ec089b59c458e61d9902bc8c93e0e2f27aaa8c22"
 
         points_of_input=joinpath(directory,"point-mesh-size-points-of.geo")
         points_of_output=joinpath(directory,"point-mesh-size-points-of.msh")
@@ -577,13 +579,16 @@ end
         end
         @test occursin("Error   : '$input', line 2: Unknown variable 'undef'",err)
 
-        # Syntax errors carry the same prefix; execution continues to `-2`.
+        # Syntax errors carry the same prefix; execution continues to `-2`
+        # and the mesh is written, then the run fails: Gmsh 4.15.2's batch
+        # main ends with `Msg::Exit(0)`, which exits with
+        # `_atLeastOneErrorInRun` (1 here) after `CreateOutputFile`.
         write(input,"Point(1) = {0, 0, 0, 1};\na = 1 +;\n"*
                     "Point(2) = {1, 0, 0, 1};\n")
         output=joinpath(directory,"diag.msh")
         err=mktemp() do errpath,errstream
             redirect_stderr(errstream) do
-                @test main([input,"-2","-o",output])==output
+                @test_throws ArgumentError main([input,"-2","-o",output])
             end
             flush(errstream);read(errpath,String)
         end
