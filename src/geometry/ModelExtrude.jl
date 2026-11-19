@@ -1949,7 +1949,7 @@ function _extrude_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         end
     end
     for r in _extrude_quadtri_regions(m,t,caller)
-        seam=_extrude_quadtri_seam_index(m,r,caller)
+        seam=_extrude_quadtri_seam_index(m,r,caller;_mesh_input)
         seam===nothing && continue
         for i in 1:nnode
             grid[i,nlev]=_extrude_quadtri_snap_seam(seam,grid[i,nlev],caller)
@@ -2083,7 +2083,7 @@ end
 # `pos.find` folding the duplicate position onto the same vertex.
 function _extrude_volume_columns(m::GeoModel,t::Int,src::Int,srcmesh,
                                  params::_GeoExtrudeParams,spec,us,
-                                 caller::AbstractString)
+                                 caller::AbstractString;_mesh_input=nothing)
     nlev=length(us)
     nn=nnodes(srcmesh)
     scoords=srcmesh.coords
@@ -2096,7 +2096,7 @@ function _extrude_volume_columns(m::GeoModel,t::Int,src::Int,srcmesh,
             cols[l,i]=_extrude_level_at(spec,p,us[l],transforms,l)
         end
     end
-    seam=_extrude_quadtri_seam_index(m,t,caller)
+    seam=_extrude_quadtri_seam_index(m,t,caller;_mesh_input)
     if seam!==nothing
         for i in 1:nn
             cols[nlev,i]=_extrude_quadtri_snap_seam(seam,cols[nlev,i],caller)
@@ -2207,7 +2207,8 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     ensured===nothing || (spec=ensured)
     us=_extrude_level_us(params)
     nlev=length(us)
-    cols=_extrude_volume_columns(m,t,src,srcmesh,params,spec,us,caller)
+    cols=_extrude_volume_columns(m,t,src,srcmesh,params,spec,us,caller;
+                                 _mesh_input=input)
     source_tags=srcmesh isa MixedMesh && srcmesh.entity_data!==nothing ?
         srcmesh.entity_data.external_node_tags : UInt64[]
     source_used=falses(nnodes(srcmesh))

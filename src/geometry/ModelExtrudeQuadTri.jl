@@ -89,10 +89,15 @@ end
 # mesh. A spatial hash provides the same coincidence lookup without an O(N²)
 # nearest-point pass, and keeps the seam identical in volume and lateral parts.
 function _extrude_quadtri_seam_index(m::GeoModel,r::Int,
-                                     caller::AbstractString)
+                                     caller::AbstractString;_mesh_input=nothing)
     root=_extrude_quadtri_closing_root(m,r,caller)
     root==0 && return nothing
-    mesh=mesh_model_surface(m,root;_boundary_regrade=false)
+    # The closing row welds onto the root face's *actual* mesh: the retained
+    # product (the same fallback `_extrude_volume_sweep` reads its source
+    # through), not a fresh remesh that need not reproduce an unstructured
+    # face.
+    input=_mesh_input===nothing ? m.meshing.mesh_authority : _mesh_input
+    mesh=mesh_model_surface(m,root;_mesh_input=input,_boundary_regrade=false)
     tolerance=_coherence_eps(m)
     origin=nnodes(mesh)==0 ? (0.0,0.0,0.0) :
         (mesh.coords[1,1],mesh.coords[2,1],mesh.coords[3,1])
