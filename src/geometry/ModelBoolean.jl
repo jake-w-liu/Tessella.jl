@@ -3656,7 +3656,40 @@ end
 # ordinary span boundary instead).
 _brep_pc_native_periodic(pc) =
     hasproperty(pc,:neg2d) ? _brep_pc_native_periodic(pc.neg2d[1]) :
-    (hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d))
+    (hasproperty(pc,:circ2d) || hasproperty(pc,:ellips2d) ||
+     hasproperty(pc,:per2d))
+
+# A closed section's merged spans come back on the [0,2π) turn, but a chart
+# trace that is not itself a closed curve is valid on one turn only: each
+# half of a great circle through a sphere's poles is the meridian line
+# v=±θ+const for the θ on which |v|≤π/2. Move every span to the turn on which
+# both traces lie in their faces; without this the half whose valid turn is
+# not the first evaluated outside the sphere's chart and its arc was lost.
+function _brep_relift_spans(spans,Sa,fa,pca,Sb,fb,pcb,tol)
+    (_brep_pc_native_periodic(pca) && _brep_pc_native_periodic(pcb)) &&
+        return spans
+    function inface(S,f,pc,t)
+        dlo,dhi=_brep_pc_domain(pc)
+        (t<dlo-tol || t>dhi+tol) && return false
+        uper=_brep_uperiod(f.sg)
+        ulo=_brep_face_ubase(S.edges,f)
+        uv=_brep_wrap_u(_brep_pc_eval(pc,t),ulo,uper)
+        return _brep_uv_in_face(S.edges,f,uv,tol) ||
+               _brep_uv_on_wire(S.edges,f,pc,uv,tol)
+    end
+    out=Tuple{Float64,Float64}[]
+    for (lo,hi) in spans
+        shift=0.0
+        for cand in (0.0,_OCC_TWO_PI,-_OCC_TWO_PI)
+            m=(lo+hi)/2+cand
+            if inface(Sa,fa,pca,m) && inface(Sb,fb,pcb,m)
+                shift=cand;break
+            end
+        end
+        push!(out,(lo+shift,hi+shift))
+    end
+    return out
+end
 
 function _brep_intersect_spans(spansA,spansB,closed,tol,caller;pc=nothing)
     if !closed
@@ -4178,6 +4211,20 @@ function _brep_coinc_imprints!(S,O,fidx,oidx,es_S,es_O,sec_cuts,imps,
         push!(imps,(eidx=eidx,pc=mpc,neg=neg,crv=e.curve))
     end
     return nothing
+end
+
+# Does a section span lie on operand edge `e`? Sharing the carrier curve is
+# not enough: a meridian plane cuts a sphere along the seam's great circle,
+# but only the half on the seam's side is the seam edge — the other half
+# shares both endpoints (the poles) and is an ordinary section arc. The
+# span's midpoint decides.
+function _brep_span_on_edge(sec,e,tol)
+    lo,hi=sec.spans[1]
+    pm=_brep_curve_eval(sec.curve,(lo+hi)/2)
+    tm=_brep_curve_param(e.curve,pm,(e.t0+e.t1)/2)
+    tm===nothing && return false
+    elo,ehi=minmax(e.t0,e.t1)
+    return elo-tol<=tm<=ehi+tol
 end
 
 # Winner-edge parameter sub-spans for a degenerate-section span (lo,hi),
@@ -4828,6 +4875,17 @@ function _brep_merge_union_faces(kept,comp,tol,caller)
     return out
 end
 
+# Are two arcs the two uses of one seam edge — constant-u traces a whole
+# chart period apart?
+function _brep_seam_pair(a,b,uper,tol)
+    uper>0 || return false
+    (hasproperty(a.pc,:lin2d) && hasproperty(b.pc,:lin2d)) || return false
+    a0,a1=_brep_pc_urange(a.pc,a.t0,a.t1)
+    b0,b1=_brep_pc_urange(b.pc,b.t0,b.t1)
+    (abs(a1-a0)<tol && abs(b1-b0)<tol) || return false
+    return abs(abs(a0-b0)-uper)<=10tol
+end
+
 function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
     reps=Int[];gid=zeros(Int,length(kept))
     for (i,s) in enumerate(kept)
@@ -4850,13 +4908,21 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
             while uf[x]!=x; uf[x]=uf[uf[x]];x=uf[x] end
             x
         end
-        keyowner=Dict{Any,Int}()
+        uperg=_brep_uperiod(kept[reps[g]].sg)
+        keyowner=Dict{Any,Tuple{Int,Any}}()
         for mi in mem,w in kept[mi].wires,ar in w
-            o=get(keyowner,ar.key,0)
-            if o==0
-                keyowner[ar.key]=mi
+            o=get(keyowner,ar.key,nothing)
+            if o===nothing
+                keyowner[ar.key]=(mi,ar)
             else
-                ra,rb=findr(mi),findr(o)
+                # the two uses of the carrier's own seam edge bound the
+                # chart from opposite ends. Only a fuse continues a face
+                # across its seam (Gmsh simplifies fuse results —
+                # `Geometry.OCCBooleanSimplify` — and nothing else); a
+                # common keeps the pieces on either side as separate faces
+                # sharing the seam edge, like OCC's
+                same_uses && _brep_seam_pair(o[2],ar,uperg,tol) && continue
+                ra,rb=findr(mi),findr(o[1])
                 ra!=rb && (uf[ra]=rb)
             end
         end
@@ -4870,7 +4936,6 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
         # is internal — the members' domains are contiguous across the
         # slit: group them. Same-side traces are duplicate-domain
         # artifacts the merge certificates reject anyway.
-        uperg=_brep_uperiod(kept[reps[g]].sg)
         if uperg>0
             for (ix,mi) in enumerate(mem),jx in ix+1:length(mem)
                 mj=mem[jx]
@@ -4887,6 +4952,8 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
                         ub0,ub1=_brep_pc_urange(bb.pc,bb.t0,bb.t1)
                         abs(ub1-ub0)<tol || continue
                         abs(abs(ua0-ub0)-uperg)>10tol && continue
+                        # one seam edge used on both sides is no slit pair
+                        same_uses && aa.key==bb.key && continue
                         vb0,vb1=_brep_pc_vrange(bb.pc,bb.t0,bb.t1)
                         min(va1,vb1)-max(va0,vb0)>tol || continue
                         sb=(wj==1)==bb.fwd ? 1 : -1
@@ -5213,6 +5280,8 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
             merged=_brep_intersect_spans(spansA,spansB,s.closed,tol,
                                          caller;pc=s.pcA)
             isempty(merged) && continue
+            s.closed && (merged=_brep_relift_spans(merged,A,fa,s.pcA,
+                                                   B,fb,s.pcB,tol))
             push!(sections,(curve=s.curve,closed=s.closed,pcA=s.pcA,
                             pcB=s.pcB,fa=ia,fb=ib,spans=merged))
         end
@@ -5730,6 +5799,8 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 merged=_brep_intersect_spans(spansI,spansJ,s.closed,tol,
                                              caller;pc=s.pcA)
                 isempty(merged) && continue
+                s.closed && (merged=_brep_relift_spans(
+                    merged,Si,fI,s.pcA,Sj,fJ,s.pcB,tol))
                 push!(sections,(curve=s.curve,closed=s.closed,pcA=s.pcA,
                                 pcB=s.pcB,oi=i,fa=fi,oj=j,fb=fj,
                                 spans=merged))
@@ -5737,6 +5808,10 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             end
         end
     end
+    # one span per section record: whether a span degenerates onto an
+    # operand edge is decided span by span below
+    sections=NamedTuple[merge(sec,(spans=[span],))
+                        for sec in sections for span in sec.spans]
     # operand edges piercing other operands' faces split those edges
     esplits=[Dict{Int,Vector{Float64}}() for _ in 1:N]
     for i in 1:N
@@ -5777,7 +5852,8 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             efound=0
             for wire in S.faces[k==sec.oi ? sec.fa : sec.fb].wires,
                 (eidx,_,_) in wire
-                if _brep_same_curve3d(sec.curve,S.edges[eidx].curve,tol)
+                if _brep_same_curve3d(sec.curve,S.edges[eidx].curve,tol) &&
+                        _brep_span_on_edge(sec,S.edges[eidx],tol)
                     efound=eidx;break
                 end
             end

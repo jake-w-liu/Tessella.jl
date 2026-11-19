@@ -761,6 +761,8 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                 merged=_brep_intersect_spans(spansI,spansJ,s.closed,tol,
                                              caller)
                 isempty(merged) && continue
+                s.closed && (merged=_brep_relift_spans(
+                    merged,reps[i],fI,s.pcA,reps[j],fJ,s.pcB,tol))
                 push!(sections,(curve=s.curve,closed=s.closed,pcA=s.pcA,
                                 pcB=s.pcB,oi=i,fa=fi,oj=j,fb=fj,
                                 spans=merged))
@@ -1269,6 +1271,12 @@ function _occ_shared_rim_keys(specs,tol)
         else
             continue
         end
+        # two arcs of one closed conic can share both endpoints and still be
+        # different edges — the two halves of a great circle between a
+        # sphere's poles; the same segment also shares its midpoint
+        pm1=_brep_vertex_eval(a1.crv,(a1.vt0+a1.vt1)/2)
+        pm2=_brep_vertex_eval(a2.crv,(a2.vt0+a2.vt1)/2)
+        _b3dist(pm1,pm2)<1e-6*max(1.0,_b3norm(pm1)) || continue
         get(ENV,"BREP_DEBUG_RIM","")=="1" &&
             println("DBGRIM unite x=$x y=$y d=$d kx=$(a1.key) ky=$(a2.key) cx=$(get(counts,a1.key,0)) cy=$(get(counts,a2.key,0))")
         ra,pa=findr(x);rb,pb=findr(y)
