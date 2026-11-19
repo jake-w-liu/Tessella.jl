@@ -357,16 +357,22 @@ function _model_mesh_product(authority::_ModelMeshAuthority,dim::Int,tag::Int;
     if produced!==nothing
         # Normal PLC input follows the actual face producer vector. NoNew
         # consumers keep the separate private-rank order above.
-        inverse=zeros(Int32,nnodes(source));inverse[produced]=Int32.(1:length(produced))
+        # The inverse covers the producer rows only: a mesh-sized table per
+        # product makes a pass over many entities quadratic.
+        checkbounds(source.coords,1,produced)
+        inverse=Dict{Int32,Int32}();sizehint!(inverse,length(produced))
+        for (index,row) in enumerate(produced)
+            inverse[row]=Int32(index)
+        end
         # Product rows also list owned vertices with no cell incidence (an
         # AddNodes orphan or a retained predecessor row). They have no
         # connectivity to reorder and drop out through rows=produced below;
         # only a used row missing its producer binding invalidates the source.
         for block in blocks,node in block.nodes
-            inverse[rows[node]]>0 || throw(ArgumentError(
+            get(inverse,rows[node],Int32(0))>0 || throw(ArgumentError(
                 "$caller: actual entity $(product.owner) changed without a complete producer row binding"))
         end
-        mapping=inverse[rows]
+        mapping=Int32[get(inverse,row,Int32(0)) for row in rows]
         blocks=ElementBlock[ElementBlock(block.msh,mapping[block.nodes],block.tags)
                             for block in blocks]
         rows=produced
