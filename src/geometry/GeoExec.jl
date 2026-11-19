@@ -5640,6 +5640,16 @@ function _geo_occ_pipe_face!(m::GeoModel,tag::Int,kernel,caller)
     (g===nothing || !hasproperty(g,:occ)) && throw(ArgumentError(
         "$caller: Surface[$tag] has no OCC geometry record for pipe " *
         "extrusion"))
+    # A Boolean result face stores its pcurves per use — an edge used only
+    # reversed has an empty `fwd` slot. Registry faces carry the edge's
+    # pcurve in `fwd` (publication normalizes the same way); without this
+    # the measures read a `nothing` pcurve (`Mass Volume{…}` after a
+    # `BooleanUnion` threw a MethodError).
+    if hasproperty(g,:pcurves)
+        g=merge(g,(pcurves=Dict{Int,NamedTuple}(
+            c=>Model._model_occ_boolean_pc_entry(entry)
+            for (c,entry) in g.pcurves),))
+    end
     fid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
     Model._model_occ_bind_shape!(kernel,2,tag,fid,
         Model._ModelOCCShape(2,(kind=kind,geometry=g),wire_ids))
