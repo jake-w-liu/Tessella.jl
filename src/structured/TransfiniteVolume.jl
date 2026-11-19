@@ -649,15 +649,19 @@ end
 # (`CREATE_SIM_1` through `CREATE_SIM_6`); also the reference partition the
 # recombined shadow decompositions are certified against.
 function _emit_six_simplex_tets!(tets, coords, node_id,
-                                 nu::Int, nv::Int, nw::Int)
+                                 nu::Int, nv::Int, nw::Int;
+                                 mirror::Bool=false)
     tet_position = 0
+    # `mirror`: Gmsh's (i,j) tab axes are this grid's (v,u) axes — its
+    # left-handed corner frame relabelled to the right-handed kernel frame —
+    # so the `CREATE_SIM` templates read the u/v neighbours swapped.
     @inbounds for k in 0:nw-1, j in 0:nv-1, i in 0:nu-1
         a = node_id(i, j, k)
-        b = node_id(i + 1, j, k)
-        c = node_id(i, j + 1, k)
+        b = mirror ? node_id(i, j + 1, k) : node_id(i + 1, j, k)
+        c = mirror ? node_id(i + 1, j, k) : node_id(i, j + 1, k)
         d = node_id(i, j, k + 1)
-        e = node_id(i + 1, j, k + 1)
-        f = node_id(i, j + 1, k + 1)
+        e = mirror ? node_id(i, j + 1, k + 1) : node_id(i + 1, j, k + 1)
+        f = mirror ? node_id(i + 1, j, k + 1) : node_id(i, j + 1, k + 1)
         g = node_id(i + 1, j + 1, k)
         h = node_id(i + 1, j + 1, k + 1)
         for vertices in ((a, b, c, d), (b, c, d, e), (d, e, c, f),
@@ -775,7 +779,8 @@ function _transfinite_volume_warped_mesh(converted_corners, raw_faces,
                                          npu::Int, npv::Int, npw::Int,
                                          node_count::Int, tet_count::Int,
                                          triangle_count::Int,
-                                         converted_volume_tag::Int32)
+                                         converted_volume_tag::Int32;
+                                         mirror::Bool=false)
     faces = _warped_faces(raw_faces, nu, nv, nw)
     _certify_shared_edges(faces, nu, nv, nw)
     converted_face_tags = _face_tags(raw_face_tags)
@@ -785,7 +790,8 @@ function _transfinite_volume_warped_mesh(converted_corners, raw_faces,
     tri_tags = Vector{Int32}(undef, triangle_count)
     tris = _mesh_transfinite_volume_warped(converted_corners, nu, nv, nw,
                                            faces, node_id, coords, tets,
-                                           tri_tags, converted_face_tags)
+                                           tri_tags, converted_face_tags;
+                                           mirror)
     extracted_boundary, maximum_incidence = boundary_faces(tets)
     maximum_incidence == 2 || throw(ErrorException(
         "mesh_transfinite_volume: constructed tet mesh has face incidence " *
@@ -807,16 +813,59 @@ end
 
 function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
                                          faces, node_id, coords, tets,
-                                         tri_tags_source, face_tags)
+                                         tri_tags_source, face_tags;
+                                         mirror::Bool=false)
     _fill_warped_volume_coords!(coords, corners, faces, nu, nv, nw, node_id)
-    _emit_six_simplex_tets!(tets, coords, node_id, nu, nv, nw) ==
+    _emit_six_simplex_tets!(tets, coords, node_id, nu, nv, nw; mirror) ==
         size(tets, 2) || throw(ErrorException(
         "mesh_transfinite_volume: internal tetrahedron count invariant failed"))
+    mirror && return _mirrored_volume_boundary!(tri_tags_source, tets, coords,
+                                                nu, nv, nw, face_tags)
     tris = Matrix{Int32}(undef, 3, length(tri_tags_source))
     _emit_warped_volume_boundary!(tris, tri_tags_source,
                                   Matrix{Int32}(undef, 4, 0), Int32[],
                                   coords, node_id, nu, nv, nw, face_tags,
                                   nothing)
+    return tris
+end
+
+# Boundary triangles of a mirrored six-tet grid: the tet faces lying in one
+# grid boundary plane, tagged by slot (vmin, umax, vmax, umin, wmin, wmax)
+# and wound outward against the tetrahedron's fourth vertex, in slot order.
+function _mirrored_volume_boundary!(tri_tags, tets, coords,
+                                    nu::Int, nv::Int, nw::Int, face_tags)
+    npu = nu + 1; layer = npu * (nv + 1)
+    function slot_mask(node)
+        index = Int(node) - 1
+        k, rest = divrem(index, layer)
+        j, i = divrem(rest, npu)
+        return (j == 0 ? 0x01 : 0x00) | (i == nu ? 0x02 : 0x00) |
+               (j == nv ? 0x04 : 0x00) | (i == 0 ? 0x08 : 0x00) |
+               (k == 0 ? 0x10 : 0x00) | (k == nw ? 0x20 : 0x00)
+    end
+    faces = [NTuple{3,Int32}[] for _ in 1:6]
+    @inbounds for t in axes(tets, 2)
+        v = (tets[1, t], tets[2, t], tets[3, t], tets[4, t])
+        for (p, q, r, o) in ((1, 2, 3, 4), (1, 2, 4, 3), (1, 3, 4, 2), (2, 3, 4, 1))
+            common = slot_mask(v[p]) & slot_mask(v[q]) & slot_mask(v[r])
+            common == 0 && continue
+            slot = trailing_zeros(common) + 1
+            a, b, c = v[p], v[q], v[r]
+            orient3(_node(coords, a), _node(coords, b), _node(coords, c),
+                    _node(coords, v[o])) > 0 || ((b, c) = (c, b))
+            push!(faces[slot], (a, b, c))
+        end
+    end
+    count = sum(length, faces)
+    count == length(tri_tags) || throw(ErrorException(
+        "mesh_transfinite_volume: mirrored boundary triangle count invariant failed"))
+    tris = Matrix{Int32}(undef, 3, count)
+    position = 0
+    for slot in 1:6, (a, b, c) in faces[slot]
+        position += 1
+        tris[1, position] = a; tris[2, position] = b; tris[3, position] = c
+        tri_tags[position] = face_tags[slot]
+    end
     return tris
 end
 
@@ -1106,7 +1155,8 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
                                  max_nodes=_DEFAULT_MAX_NODES,
                                  max_tets=_DEFAULT_MAX_TETS,
                                  max_boundary_triangles=
-                                     _DEFAULT_MAX_BOUNDARY_TRIANGLES)
+                                     _DEFAULT_MAX_BOUNDARY_TRIANGLES,
+                                 mirror::Bool=false)
     node_limit = _limit(max_nodes, "max_nodes")
     tet_limit = _limit(max_tets, "max_tets")
     triangle_limit = _limit(max_boundary_triangles, "max_boundary_triangles")
@@ -1148,10 +1198,12 @@ function mesh_transfinite_volume(corners, cells=(1, 1, 1);
         "mesh_transfinite_volume: $triangle_count boundary triangles exceed " *
         "max_boundary_triangles=$triangle_limit"))
 
+    mirror && faces === nothing && throw(ArgumentError(
+        "mesh_transfinite_volume: mirror requires the face grids"))
     faces === nothing || return _transfinite_volume_warped_mesh(
         converted_corners, faces, face_tags, nu, nv, nw,
         npu, npv, npw, node_count, tet_count, triangle_count,
-        _tag(volume_tag, "volume_tag"))
+        _tag(volume_tag, "volume_tag"); mirror)
     _certify_affine(converted_corners)
     converted_face_tags = _face_tags(face_tags)
     converted_volume_tag = _tag(volume_tag, "volume_tag")

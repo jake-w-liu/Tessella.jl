@@ -556,10 +556,15 @@ struct _ModelTransfiniteVolumeLayout{I}
     prism::Bool
     compact::Bool
     grid::Union{Nothing,_ModelTransfiniteGridReceipt}
+    # Gmsh's (i,j) tab axes are the kernel's (v,u) axes: the kernel grid is
+    # the right-handed relabelling of a left-handed upstream corner frame.
+    mirror::Bool
 end
 
 _ModelTransfiniteVolumeLayout(index,counts,prism,compact)=
-    _ModelTransfiniteVolumeLayout(index,counts,prism,compact,nothing)
+    _ModelTransfiniteVolumeLayout(index,counts,prism,compact,nothing,false)
+_ModelTransfiniteVolumeLayout(index,counts,prism,compact,grid)=
+    _ModelTransfiniteVolumeLayout(index,counts,prism,compact,grid,false)
 
 function _model_transfinite_volume_index(face_ids,counts,caller;prism=false,compact=false)
     nu,nv,nw=counts
@@ -577,13 +582,14 @@ function _model_transfinite_volume_index(face_ids,counts,caller;prism=false,comp
 end
 
 function _model_transfinite_volume_boundary(mesh,face_ids,counts,caller;
-    prism=false,compact=false,input=nothing,face_tags=nothing,compact_triangles=nothing)
+    prism=false,compact=false,input=nothing,face_tags=nothing,compact_triangles=nothing,
+    mirror=false)
     tags,retained=_model_transfinite_volume_bindings(mesh,face_ids,counts,caller;prism,compact)
     index=_model_transfinite_volume_index(face_ids,counts,caller;prism,compact)
     grid=input===nothing ? nothing :
         _model_transfinite_grid_receipt(input,face_ids,face_tags,counts,caller;
                                        mesh,compact,compact_triangles)
-    return tags,retained,_ModelTransfiniteVolumeLayout(index,counts,prism,compact,grid)
+    return tags,retained,_ModelTransfiniteVolumeLayout(index,counts,prism,compact,grid,mirror)
 end
 
 function _model_transfinite_tet_emission!(nodes,columns,source,mesh,vertices,reverse,caller)
@@ -602,15 +608,20 @@ function _model_transfinite_tet_emission!(nodes,columns,source,mesh,vertices,rev
     return nothing
 end
 
-function _model_transfinite_six_emissions!(nodes,columns,source,mesh,index,i,j,k,reverse,caller)
-    a=_model_transfinite_volume_row(index,i,j,k)
-    b=_model_transfinite_volume_row(index,i+1,j,k)
-    c=_model_transfinite_volume_row(index,i,j+1,k)
-    d=_model_transfinite_volume_row(index,i,j,k+1)
-    e=_model_transfinite_volume_row(index,i+1,j,k+1)
-    f=_model_transfinite_volume_row(index,i,j+1,k+1)
-    g=_model_transfinite_volume_row(index,i+1,j+1,k)
-    h=_model_transfinite_volume_row(index,i+1,j+1,k+1)
+function _model_transfinite_six_emissions!(nodes,columns,source,mesh,index,i,j,k,reverse,caller;
+                                          mirror=false)
+    # `(i,j,k)` is the upstream tab cell; a mirrored layout stores it at the
+    # kernel's `(j,i,k)`.
+    row(x,y,z)=mirror ? _model_transfinite_volume_row(index,y,x,z) :
+        _model_transfinite_volume_row(index,x,y,z)
+    a=row(i,j,k)
+    b=row(i+1,j,k)
+    c=row(i,j+1,k)
+    d=row(i,j,k+1)
+    e=row(i+1,j,k+1)
+    f=row(i,j+1,k+1)
+    g=row(i+1,j+1,k)
+    h=row(i+1,j+1,k+1)
     for vertices in ((a,b,c,d),(b,c,d,e),(d,e,c,f),(b,c,e,g),(c,f,e,g),(e,f,h,g))
         _model_transfinite_tet_emission!(nodes,columns,source,mesh,vertices,reverse,caller)
     end
@@ -622,8 +633,11 @@ function _model_transfinite_volume_emission(mesh,layout,caller;reverse=false)
     rows=Int32[];seen=falses(nnodes(mesh))
     # meshGRegionTransfinite.cpp emits fresh interiors in i,j,k order;
     # repeated collapsed/compact boundary slots name existing logical rows.
-    for i in 0:nu,j in 0:nv,k in 0:nw
-        row=_model_transfinite_volume_row(index,i,j,k)
+    mirror=layout.mirror
+    gnu,gnv=mirror ? (nv,nu) : (nu,nv)
+    for i in 0:gnu,j in 0:gnv,k in 0:nw
+        row=mirror ? _model_transfinite_volume_row(index,j,i,k) :
+            _model_transfinite_volume_row(index,i,j,k)
         0<row<=nnodes(mesh) || throw(ArgumentError("$caller: native TF event has no carrier row"))
         seen[row] && continue
         seen[row]=true;push!(rows,row)
@@ -653,8 +667,9 @@ function _model_transfinite_volume_emission(mesh,layout,caller;reverse=false)
         source[key]=column
     end
     if !layout.prism
-        for i in 0:nu-1,j in 0:nv-1,k in 0:nw-1
-            _model_transfinite_six_emissions!(nodes,columns,source,mesh,index,i,j,k,reverse,caller)
+        for i in 0:gnu-1,j in 0:gnv-1,k in 0:nw-1
+            _model_transfinite_six_emissions!(nodes,columns,source,mesh,index,i,j,k,reverse,caller;
+                mirror)
         end
     elseif !layout.compact
         for j in 0:nv-1,k in 0:nw-1

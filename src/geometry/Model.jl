@@ -8422,8 +8422,10 @@ end
 # with sign +1, then chained by connectivity) — and each top corner is the
 # other end of the one remaining region curve at that bottom corner. The
 # (i,j,k) tab, hence the tetrahedron split, follows this order. Returns
-# `nothing` when the order is not a usable right-handed cube labelling; the
-# caller then keeps its canonical fallback.
+# `(corners, mirror)`: a left-handed upstream frame comes back relabelled
+# right-handed (u and v swapped) with `mirror=true`, so the kernel emits the
+# upstream templates with the axes exchanged. `nothing` when the boundary is
+# not a usable cube labelling; the caller then keeps its canonical fallback.
 function _transfinite_volume_gmsh_corners(m::GeoModel,boundaries,neighbors)
     isempty(boundaries) && return nothing
     face=abs(first(boundaries))
@@ -8461,9 +8463,10 @@ function _transfinite_volume_gmsh_corners(m::GeoModel,boundaries,neighbors)
     end
     s=(bottom...,top...)
     allunique(s) || return nothing
-    orient3(m.points[s[1]],m.points[s[2]],m.points[s[4]],m.points[s[5]])<0 ||
-        return nothing
-    return s
+    sign=orient3(m.points[s[1]],m.points[s[2]],m.points[s[4]],m.points[s[5]])
+    sign<0 && return (s,false)
+    sign>0 || return nothing
+    return ((s[1],s[4],s[3],s[2],s[5],s[8],s[7],s[6]),true)
 end
 
 function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
@@ -8508,8 +8511,9 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
     stored=m.meshing.transfinite_volumes[t]
     gmsh_order=isempty(stored) ?
         _transfinite_volume_gmsh_corners(m,boundaries,neighbors) : nothing
+    mirror=gmsh_order!==nothing && gmsh_order[2]
     ordered=if gmsh_order!==nothing
-        gmsh_order
+        gmsh_order[1]
     elseif isempty(stored)
         s0=corners[1]
         near=sort!(collect(neighbors[s0]))
@@ -8597,15 +8601,17 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
     # Gmsh's `MeshTransfiniteVolume` derives `recombined[i]` from each face's
     # `GFace::recombined()` flag in canonical slot order — `Recombine Surface`
     # attributes and `Mesh.RecombineAll`, never `Recombine Volume`.
+    recombined=quadtri ? true : Tuple(
+        _model_surface_recombined(m,Int(slot_tags[i])) for i in 1:6)
     mesh=mesh_transfinite_volume(
         NTuple{3,Float64}[m.points[p] for p in s],
         (us[1],vs[1],ws[1]);volume_tag=t,faces=Tuple(faces),
-        face_tags=Tuple(slot_tags),
-        recombine=quadtri ? true : Tuple(
-            _model_surface_recombined(m,Int(slot_tags[i])) for i in 1:6))
+        face_tags=Tuple(slot_tags),recombine=recombined,
+        mirror=mirror && recombined isa Tuple && !any(recombined))
     mesh=quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller;_mesh_input) : mesh
     return _return_bindings ? (mesh,_model_transfinite_volume_boundary(
-        mesh,face_ids,(us[1],vs[1],ws[1]),caller;input=_mesh_input,face_tags=slot_tags)) : mesh
+        mesh,face_ids,(us[1],vs[1],ws[1]),caller;input=_mesh_input,face_tags=slot_tags,
+        mirror)) : mesh
 end
 
 # Resolve the actual boundary cells after their independent surface kernels
