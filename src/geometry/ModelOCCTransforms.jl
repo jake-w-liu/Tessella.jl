@@ -238,6 +238,15 @@ function _model_occ_transform_geometry(m::GeoModel,shape,t,caller,what;
     return g
 end
 
+# Does a reflection turn this face's natural normal against the mapped one?
+# Sphere, cylinder and cone frames are mapped vector by vector and become
+# left-handed; a plane carries its normal along and the torus record negates
+# its axis instead, so those two keep their sense.
+function _model_occ_reflection_flips(face::_ModelOCCShape)
+    rec=face.geometry.geometry
+    return rec isa NamedTuple && get(rec,:occ,nothing) in (:sphere,:cylinder,:cone)
+end
+
 # Remap `(child_id, reverse)` use lists and plain child references to the new
 # shape identities.
 function _model_occ_remap_uses(geometry,remap)
@@ -396,6 +405,19 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
         geometry=_model_occ_remap_uses(
             _model_occ_transform_geometry(m,shape,t,caller,what;
                 oldtag=get(oldtags,id,0)),remap)
+        if shape.dimension==-2 && _linear_det(t.linear)<0
+            # A reflection maps a quadric's frame vector by vector, which
+            # leaves it left-handed: the face's natural normal ∂u×∂v then
+            # points against the image of the old one, so the shell has to
+            # use the face the other way round (OpenCASCADE reverses the
+            # faces of a mirrored shape for the same reason). Without it a
+            # mirrored Boolean result measured its curved faces with the
+            # wrong sign: box minus cylinder went from 1.7173 to 2.0942.
+            geometry=merge(geometry,(uses=Tuple{UInt64,Bool}[
+                (new,_model_occ_reflection_flips(kernel.shapes[old]) ? !rev : rev)
+                for ((new,rev),(old,_)) in
+                    zip(geometry.uses,shape.geometry.uses)],))
+        end
         newshapes[remap[id]]=_ModelOCCShape(shape.dimension,geometry,
             UInt64[remap[c] for c in shape.children])
     end

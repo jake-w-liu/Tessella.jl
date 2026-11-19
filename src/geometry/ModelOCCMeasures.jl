@@ -365,7 +365,10 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
         area=abs(wire.raw[1])
         area>_OCC_CONFUSION || continue
         w=(index==1 ? area : -area)/A
-        cu+=w*wire.raw[2]/area; cv+=w*wire.raw[3]/area
+        # the wire's own centroid is moment over area with their common
+        # winding sign — dividing by |area| negated it for a wire wound
+        # clockwise (a mirrored face's circular hole)
+        cu+=w*wire.raw[2]/wire.raw[1]; cv+=w*wire.raw[3]/wire.raw[1]
     end
     c3=_model_occ_plane_eval(rec,cu,cv)
     want_tensor || return A*J,c3,nothing
@@ -1803,7 +1806,10 @@ function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
         area=abs(wire.raw[1])
         area>_OCC_CONFUSION || continue
         w=(index==1 ? area : -area)/A
-        cu+=w*wire.raw[2]/area; cv+=w*wire.raw[3]/area
+        # the wire's own centroid is moment over area with their common
+        # winding sign — dividing by |area| negated it for a wire wound
+        # clockwise (a mirrored face's circular hole)
+        cu+=w*wire.raw[2]/wire.raw[1]; cv+=w*wire.raw[3]/wire.raw[1]
     end
     c2=(cu,cv); a3=_occ3_sub(_model_occ_plane_eval(rec,cu,cv),center)
     if _model_occ_plane_curved(kernel,shape,rec)
