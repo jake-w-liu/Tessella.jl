@@ -832,13 +832,14 @@ function set_point_mesh_size!(m::GeoModel,points,mesh_size)
     end
     (isfinite(size) && size>0) || throw(ArgumentError(
         "$caller: mesh_size must be finite and positive"))
+    # A discrete Point (one read from a mesh file) keeps a prescribed size too.
     for tag in tags
-        haskey(m.points,tag) || throw(ArgumentError(
+        haskey(m.points,tag) || haskey(m.discrete,(0,tag)) || throw(ArgumentError(
             "$caller: unknown Point[$tag]"))
     end
     for tag in tags
         m.point_size[tag]=size
-        _native_geo_kernel_update_point!(m,tag)
+        haskey(m.points,tag) && _native_geo_kernel_update_point!(m,tag)
     end
     return nothing
 end
@@ -2086,22 +2087,26 @@ function embed!(m::GeoModel, dim, tags, target_dim, target_tag)
     (d==0 && td==2) || (d==1 && td==2) || (d==0 && td==3) ||
     (d==1 && td==3) || (d==2 && td==3) || throw(ArgumentError(
         "$caller: supported embeddings are Point/Line In Surface and Point/Line/Surface In Volume (got dim=$d in dim=$td)"))
+    # A discrete Surface or Volume (one read from a mesh file) records its
+    # embedded entities like a geometric one, and they may be discrete too.
+    discrete=!haskey(td==2 ? m.surfaces : m.volumes,tt) && haskey(m.discrete,(td,tt))
     if td==2
-        haskey(m.surfaces,tt) || throw(ArgumentError("$caller: unknown Surface[$tt]"))
+        haskey(m.surfaces,tt) || discrete || throw(ArgumentError("$caller: unknown Surface[$tt]"))
     else
-        haskey(m.volumes,tt) || throw(ArgumentError("$caller: unknown Volume[$tt]"))
+        haskey(m.volumes,tt) || discrete || throw(ArgumentError("$caller: unknown Volume[$tt]"))
     end
     ents=Int[_tag(raw,caller,d) for raw in tags]
     length(unique(ents))==length(ents) || throw(ArgumentError(
         "$caller: embedding contains duplicate entity tags"))
     existing=get(m.embeds,(td,tt),NTuple{2,Int}[])
     for ent in ents
+        known=discrete && haskey(m.discrete,(d,ent))
         if d==0
-            haskey(m.points,ent) || throw(ArgumentError("$caller: unknown Point[$ent]"))
+            haskey(m.points,ent) || known || throw(ArgumentError("$caller: unknown Point[$ent]"))
         elseif d==1
-            haskey(m.curves,ent) || throw(ArgumentError("$caller: unknown Curve[$ent]"))
+            haskey(m.curves,ent) || known || throw(ArgumentError("$caller: unknown Curve[$ent]"))
         else
-            haskey(m.surfaces,ent) || throw(ArgumentError("$caller: unknown Surface[$ent]"))
+            haskey(m.surfaces,ent) || known || throw(ArgumentError("$caller: unknown Surface[$ent]"))
         end
         (d,ent) in existing && throw(ArgumentError(
             "$caller: entity ($d,$ent) already embedded in ($td,$tt)"))

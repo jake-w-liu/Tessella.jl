@@ -248,6 +248,17 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller;
     max_node_tag,max_element_tag=_tagged_mesh_max_tags(staged_model,mesh,table)
     # Renumbering does not lower Gmsh's historical maximum tag counters.
     previous_node,previous_element=_tagged_mesh_max_tags(model,cached,public)
+    if node
+        # `GModel::renumberMeshVertices` first parks every node on tag count+1
+        # when the mesh may be saved partially — physical groups without
+        # Mesh.SaveAll, or Mesh.SaveWithoutOrphans — and the node counter that
+        # `getMaxNodeTag` reports keeps that value.
+        whole=save_all===nothing ? !iszero(OPTIONS["Mesh.SaveAll"]) : save_all
+        partial=!iszero(get(OPTIONS,"Mesh.SaveWithoutOrphans",0.0)) ||
+            (!whole && !isempty(model_physical_groups(model)))
+        first_tag=max(1,Int(get(OPTIONS,"Mesh.FirstNodeTag",1.0)))
+        partial && (max_node_tag=max(max_node_tag,UInt64(first_tag-1+length(order)+1)))
+    end
     return (model=staged_model,mesh=mesh,class=new_class,
         element_tag_map=node ? nothing : mapping,authority=public.authority,
         node_tag_map=node ? mapping : Dict(tag=>tag for tag in public.node_tags),

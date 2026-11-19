@@ -13711,7 +13711,9 @@ function _geo_merge_discrete!(m::GeoModel,mixed::MixedMesh,
             if !(tag in members)
                 push!(members,tag);sort!(members)
             end
-            m.physical_tag_max=max(m.physical_tag_max,Int(ptag))
+            # The groups of a mesh file live on the entities only: Gmsh does
+            # not raise the counter of its geometry kernel for them, so the
+            # next automatic tag follows the largest tag of that dimension.
         end
     end
     # Declared boundary lists attach to the new records only.

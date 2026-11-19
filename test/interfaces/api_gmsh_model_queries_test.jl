@@ -133,4 +133,59 @@ end
     end
 end
 
+@testset "changing a loaded mesh that has physical groups" begin
+    try
+        load("square_phys")
+        # The file carries the groups (0,30), (1,20) and (2,10). An automatic
+        # tag follows the largest tag of its own dimension until groups have
+        # been added through the API, whose counter spans the dimensions; a
+        # negative tag is automatic too.
+        @test A.model.add_physical_group(2,[1])==11
+        @test A.model.add_physical_group(1,[1,2])==21
+        @test A.model.add_physical_group(0,[2])==31
+        @test A.model.add_physical_group(2,[1])==32
+        @test A.model.add_physical_group(1,[3];tag=-7)==33
+        @test A.model.get_physical_groups()==
+            [(0,30),(0,31),(1,20),(1,21),(1,33),(2,10),(2,11),(2,32)]
+        # renumberMeshVertices parks every node on count+1 when physical
+        # groups may restrict what is saved, and getMaxNodeTag keeps it.
+        load("square_phys")
+        @test A.mesh.get_max_node_tag()==4
+        A.mesh.renumber_nodes()
+        @test A.mesh.get_max_node_tag()==5 && A.mesh.get_nodes()[1]==1:4
+        A.mesh.renumber_nodes()
+        @test A.mesh.get_max_node_tag()==5
+        load("square_phys")
+        A.mesh.renumber_nodes([1,2],[2,1])
+        @test A.mesh.get_max_node_tag()==5
+        @test A.mesh.get_nodes(0,1)[1]==[2] && A.mesh.get_nodes(0,2)[1]==[1]
+        load("square_phys");A.option("Mesh.SaveAll",1)
+        A.mesh.renumber_nodes()
+        @test A.mesh.get_max_node_tag()==4
+        load("square_phys");A.option("Mesh.SaveAll",0)
+        A.model.remove_physical_groups()
+        A.mesh.renumber_nodes()
+        @test A.mesh.get_max_node_tag()==4
+        # Discrete entities embed and are embedded; Points are listed first,
+        # by tag, then the Curves in the order they were embedded. A Point or
+        # a Curve embeds nothing, whether it exists or not.
+        load("square_phys")
+        @test isempty(A.mesh.get_embedded(2,1)) && isempty(A.mesh.get_embedded(0,1)) &&
+              isempty(A.mesh.get_embedded(1,99))
+        A.mesh.embed(1,[2],2,1);A.mesh.embed(0,[2],2,1);A.mesh.embed(0,[1],2,1)
+        @test A.mesh.get_embedded(2,1)==[(0,1),(0,2),(1,2)]
+        A.mesh.embed(1,[1],2,1)
+        @test A.mesh.get_embedded(2,1)==[(0,1),(0,2),(1,2),(1,1)]
+        A.model.add_discrete_entity(2,7)
+        @test isempty(A.mesh.get_embedded(2,7))
+        @test_throws ArgumentError A.mesh.get_embedded(2,99)
+        # A discrete Point keeps a prescribed size.
+        @test A.mesh.get_sizes([(0,1),(0,2)])==[0.0,0.0]
+        A.mesh.set_size([(0,1)],0.1)
+        @test A.mesh.get_sizes([(0,1),(0,2)])==[0.1,0.0]
+    finally
+        A.finalize()
+    end
+end
+
 end # module

@@ -1676,9 +1676,18 @@ removed presentation state is cleaned.
 remove_entities(dim_tags,recursive=false)=
     _remove_entities(dim_tags,recursive)
 
-"""Add a Physical group; `tag=0` allocates globally across entity dimensions."""
+"""
+    add_physical_group(dim, tags; tag=0, name="") -> tag
+
+Add a Physical group. `tag=0` — or, as in Gmsh, a negative tag — allocates one
+more than the larger of the largest physical tag of dimension `dim` and the
+largest tag given to a group through this function or a `.geo` script, as
+`gmsh::model::addPhysicalGroup` does: groups read from a mesh file count for
+their own dimension only.
+"""
 add_physical_group(dim,tags;tag=0,name="")=_with_model(invalidate=true) do m
-    add_physical_group!(m,dim,tags;tag=tag,name=name)
+    automatic=tag isa Integer && !(tag isa Bool) && tag<0
+    add_physical_group!(m,dim,tags;tag=automatic ? 0 : tag,name=name)
 end
 
 """Refresh the session geometry context from the current synchronized model."""
@@ -4998,9 +5007,14 @@ function _get_embedded(dim,tag)
         end
         known || throw(ArgumentError(
             "$caller: unknown $(_MESH_ENTITY_LABELS[dimension+1])[$entity]"))
-        return Tuple{Int32,Int32}[Tuple{Int32,Int32}(embedded)
-            for embedded in get(model.embeds,(dimension,entity),
-                                NTuple{2,Int}[])]
+        # Gmsh lists the embedded Points (a set ordered by tag), then the
+        # Curves and the Surfaces in the order they were embedded.
+        embedded=get(model.embeds,(dimension,entity),NTuple{2,Int}[])
+        points=sort!(Int[tag for (child,tag) in embedded if child==0])
+        return Tuple{Int32,Int32}[
+            (Tuple{Int32,Int32}((0,tag)) for tag in points)...,
+            (Tuple{Int32,Int32}(pair) for pair in embedded if pair[1]==1)...,
+            (Tuple{Int32,Int32}(pair) for pair in embedded if pair[1]==2)...]
     end
 end
 
