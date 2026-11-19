@@ -1641,16 +1641,78 @@ synchronize()=_synchronize_native_context()
 """Built-in geometry synchronization for the live model."""
 module geo
 using ...API: _synchronize_native_context,_add_native_geo_point,_add_native_geo_line,
-    _add_native_geo_curve_loop,_add_native_geo_plane_surface
-add_point(x,y,z;meshSize=0.0,tag=-1)=_add_native_geo_point(x,y,z;meshSize,tag)
-add_line(first,last;tag=-1)=_add_native_geo_line(first,last;tag)
-add_curve_loop(curves;tag=-1)=_add_native_geo_curve_loop(curves;tag)
-add_plane_surface(loops;tag=-1)=_add_native_geo_plane_surface(loops;tag)
+    _add_native_geo_curve_loop,_add_native_geo_plane_surface,_native_geo_sweep,
+    _native_geo_extrude_boundary_layer
+# Gmsh's `addPoint(x, y, z, meshSize=0., tag=-1)` order also works positionally.
+add_point(x,y,z,size=0.0,id=-1;meshSize=size,tag=id)=
+    _add_native_geo_point(x,y,z;meshSize,tag)
+add_line(first,last,id=-1;tag=id)=_add_native_geo_line(first,last;tag)
+add_curve_loop(curves,id=-1;tag=id)=_add_native_geo_curve_loop(curves;tag)
+add_plane_surface(loops,id=-1;tag=id)=_add_native_geo_plane_surface(loops;tag)
 synchronize()=_synchronize_native_context()
+"""
+    extrude(dimTags, dx, dy, dz; numElements=[], heights=[], recombine=false)
+
+Built-in `geo.extrude`: translate-extrude the entities and return Gmsh's
+`outDimTags` (`[top, body, laterals...]` per input). `numElements`/`heights`
+attach structured layers.
+"""
+extrude(dimTags,dx,dy,dz;numElements=Int[],heights=Float64[],recombine=false)=
+    _native_geo_sweep(:translate,dimTags,(dx,dy,dz);numElements,heights,
+        recombine,caller="API.model.geo.extrude")
+"""
+    revolve(dimTags, x, y, z, ax, ay, az, angle; numElements=[], heights=[], recombine=false)
+
+Built-in `geo.revolve` about the axis through `(x,y,z)` with direction
+`(ax,ay,az)`; returns `outDimTags`.
+"""
+revolve(dimTags,x,y,z,ax,ay,az,angle;numElements=Int[],heights=Float64[],recombine=false)=
+    _native_geo_sweep(:rotate,dimTags,(x,y,z,ax,ay,az,angle);numElements,heights,
+        recombine,caller="API.model.geo.revolve")
+"""
+    twist(dimTags, x, y, z, dx, dy, dz, ax, ay, az, angle; numElements=[], heights=[], recombine=false)
+
+Built-in `geo.twist`: translate by `(dx,dy,dz)` while rotating about the axis
+through `(x,y,z)`; returns `outDimTags`.
+"""
+twist(dimTags,x,y,z,dx,dy,dz,ax,ay,az,angle;numElements=Int[],heights=Float64[],
+      recombine=false)=
+    _native_geo_sweep(:twist,dimTags,(x,y,z,dx,dy,dz,ax,ay,az,angle);numElements,
+        heights,recombine,caller="API.model.geo.twist")
+"""
+    extrude_boundary_layer(dimTags, numElements=[1], heights=[], recombine=false,
+                           second=false, viewIndex=-1)
+
+Built-in `geo.extrudeBoundaryLayer`: extrude along the smoothed boundary
+normals; `heights` are the cumulative layer thicknesses.
+"""
+extrude_boundary_layer(dimTags,numElements=[1],heights=Float64[],recombine=false,
+                       second=false,viewIndex=-1)=
+    _native_geo_extrude_boundary_layer(dimTags,numElements,heights,recombine,
+        second,viewIndex)
 module mesh
-using ....API: _set_native_geo_transfinite_curve
+using ....API: _set_native_geo_transfinite_curve,_native_geo_mesh_attribute,
+    _native_geo_set_size
+using ....Model
 set_transfinite_curve(tag,num_nodes,mesh_type="Progression",coef=1.0)=
     _set_native_geo_transfinite_curve(tag,num_nodes,mesh_type,coef)
+"Built-in `geo.mesh.setTransfiniteSurface`."
+set_transfinite_surface(tag,arrangement="Left",cornerTags=Int[])=
+    _native_geo_mesh_attribute(m->Model.set_transfinite_surface!(m,tag,arrangement,cornerTags))
+"Built-in `geo.mesh.setTransfiniteVolume`."
+set_transfinite_volume(tag,cornerTags=Int[])=
+    _native_geo_mesh_attribute(m->Model.set_transfinite_volume!(m,tag,cornerTags))
+"Built-in `geo.mesh.setRecombine`."
+set_recombine(dim,tag,angle=45.0)=
+    _native_geo_mesh_attribute(m->Model.set_recombine!(m,dim,tag,angle))
+"Built-in `geo.mesh.setSmoothing`."
+set_smoothing(dim,tag,val)=
+    _native_geo_mesh_attribute(m->Model.set_smoothing!(m,dim,tag,val))
+"Built-in `geo.mesh.setReverse`."
+set_reverse(dim,tag,val=true)=
+    _native_geo_mesh_attribute(m->Model.set_reverse!(m,dim,tag,val))
+"Built-in `geo.mesh.setSize` on Points not yet synchronized."
+set_size(dimTags,size)=_native_geo_set_size(dimTags,size)
 end
 end
 

@@ -1799,12 +1799,14 @@ function extrude_entities!(m::GeoModel,
                            params::Union{Nothing,_GeoExtrudeParams}=nothing,
                            return_lateral::Bool=true,
                            caller::AbstractString="extrude_entities!",
-                           auto_coherence::Integer=true)
+                           auto_coherence::Integer=true,
+                           out_dims::Union{Nothing,Vector{Int}}=nothing)
     all(isfinite,delta) || throw(ArgumentError(
         "$caller: extrusion delta must be finite"))
     return _extrude_entities!(m,entities,_extrude_spec_translate(delta);
                              params=params,return_lateral=return_lateral,
-                             caller=caller,auto_coherence=auto_coherence)
+                             caller=caller,auto_coherence=auto_coherence,
+                             out_dims=out_dims)
 end
 
 """
@@ -1824,11 +1826,13 @@ function revolve_entities!(m::GeoModel,
                            params::Union{Nothing,_GeoExtrudeParams}=nothing,
                            return_lateral::Bool=true,
                            caller::AbstractString="revolve_entities!",
-                           auto_coherence::Integer=true)
+                           auto_coherence::Integer=true,
+                           out_dims::Union{Nothing,Vector{Int}}=nothing)
     spec=_extrude_spec_rotate(axis,origin,angle,caller)
     return _extrude_entities!(m,entities,spec;
                              params=params,return_lateral=return_lateral,
-                             caller=caller,auto_coherence=auto_coherence)
+                             caller=caller,auto_coherence=auto_coherence,
+                             out_dims=out_dims)
 end
 
 """
@@ -1849,12 +1853,22 @@ function twist_entities!(m::GeoModel,
                          params::Union{Nothing,_GeoExtrudeParams}=nothing,
                          return_lateral::Bool=true,
                          caller::AbstractString="twist_entities!",
-                         auto_coherence::Integer=true)
+                         auto_coherence::Integer=true,
+                         out_dims::Union{Nothing,Vector{Int}}=nothing)
     spec=_extrude_spec_translate_rotate(axis,origin,angle,delta,
                                         spline_points,caller)
     return _extrude_entities!(m,entities,spec;
                              params=params,return_lateral=return_lateral,
-                             caller=caller,auto_coherence=auto_coherence)
+                             caller=caller,auto_coherence=auto_coherence,
+                             out_dims=out_dims)
+end
+
+# `ExtrudeShapes` output entry; `dims` (when requested) records each
+# entry's dimension in parallel, the `outDimTags` of the API.
+function _extrude_out!(out::Vector{Int},dims,tag,dim::Int)
+    push!(out,tag)
+    dims===nothing || push!(dims,dim)
+    return nothing
 end
 
 function _extrude_entities!(m::GeoModel,
@@ -1863,7 +1877,8 @@ function _extrude_entities!(m::GeoModel,
                             params::Union{Nothing,_GeoExtrudeParams}=nothing,
                             return_lateral::Bool=true,
                             caller::AbstractString="extrude_entities!",
-                            auto_coherence::Integer=true)
+                            auto_coherence::Integer=true,
+                            out_dims::Union{Nothing,Vector{Int}}=nothing)
     normalized=NTuple{2,Int}[]
     for (dim,tag) in entities
         d=_dimension(dim,caller)
@@ -1886,11 +1901,11 @@ function _extrude_entities!(m::GeoModel,
     out=Int[]
     for (d,tg) in normalized
         if d==0
-            _extrude_point!(m,tg,spec,out,params,caller,auto_coherence)
+            _extrude_point!(m,tg,spec,out,params,caller,auto_coherence,out_dims)
         elseif d==1
-            _extrude_curve!(m,tg,spec,out,params,return_lateral,caller,auto_coherence)
+            _extrude_curve!(m,tg,spec,out,params,return_lateral,caller,auto_coherence,out_dims)
         else
-            _extrude_surface!(m,tg,spec,out,params,return_lateral,caller,auto_coherence)
+            _extrude_surface!(m,tg,spec,out,params,return_lateral,caller,auto_coherence,out_dims)
         end
     end
     return out
@@ -1940,16 +1955,17 @@ function _extrude_point_copy!(m::GeoModel, src::Int, spec,
 end
 
 function _extrude_point!(m::GeoModel, src::Int, spec,
-                         out::Vector{Int}, params, caller,auto_coherence::Integer)
+                         out::Vector{Int}, params, caller,auto_coherence::Integer,
+                         dims=nothing)
     (curve,chapeau)=_extrude_point_copy!(m,src,spec,params,caller)
     if curve===nothing
-        push!(out,src)
+        _extrude_out!(out,dims,src,0)
         return nothing
     end
     maps=_coherence_merge!(m;enabled=!iszero(auto_coherence),
                            remove_degenerated=auto_coherence>1)
-    push!(out,get(maps.points,chapeau,chapeau))
-    haskey(m.curves,curve) && push!(out,curve)
+    _extrude_out!(out,dims,get(maps.points,chapeau,chapeau),0)
+    haskey(m.curves,curve) && _extrude_out!(out,dims,curve,1)
     return nothing
 end
 
@@ -2029,28 +2045,28 @@ end
 
 function _extrude_curve!(m::GeoModel, c::Int, spec,
                          out::Vector{Int}, params, return_lateral::Bool,
-                         caller,auto_coherence::Integer)
+                         caller,auto_coherence::Integer,dims=nothing)
     result=_extrude_curve_lateral!(m,c,spec,params,caller)
     if result===nothing
         # `if(!CurveBeg && !CurveEnd) return ic` — Gmsh returns the signed
         # input tag and leaves the unmerged copy behind.
-        push!(out,c)
+        _extrude_out!(out,dims,c,1)
         return nothing
     end
     (surf,chapeau)=result
     maps=_coherence_merge!(m;enabled=!iszero(auto_coherence),
                            remove_degenerated=auto_coherence>1)
     top=get(maps.curves,chapeau,chapeau)
-    haskey(m.curves,abs(top)) && push!(out,top)
+    haskey(m.curves,abs(top)) && _extrude_out!(out,dims,top,1)
     if haskey(m.surfaces,surf)
-        push!(out,surf)
+        _extrude_out!(out,dims,surf,2)
         # `Geometry.ExtrudeReturnLateralEntities` (default on) appends the
         # lateral generatrices besides the source and top curves. Gmsh's
         # filter compares `abs(record tag)` against the *signed* input, so a
         # negative generatrix keeps its own `-tag` in the result list.
         return_lateral || return nothing
         for g in m.loops[only(m.surfaces[surf])]
-            (abs(g)==c || abs(g)==abs(top)) || push!(out,g)
+            (abs(g)==c || abs(g)==abs(top)) || _extrude_out!(out,dims,g,1)
         end
     end
     return nothing
@@ -2094,7 +2110,7 @@ end
 # re-tag it through a fresh `NEWSURFACE`, and wire the shell.
 function _extrude_surface!(m::GeoModel, is::Int, spec,
                            out::Vector{Int}, params, return_lateral::Bool,
-                           caller,auto_coherence::Integer)
+                           caller,auto_coherence::Integer,dims=nothing)
     tag=abs(is)   # `ps = FindSurface(std::abs(is))`; the sign is metadata-only
     _geo_newreg_alloc!(m,2,caller)   # transient chapeau tag — burned
     # `DuplicateSurface` and the lateral sweep both iterate
@@ -2168,8 +2184,8 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
     maps=_coherence_merge!(m;enabled=!iszero(auto_coherence),
                            remove_degenerated=auto_coherence>1)
     top_out=get(maps.surfaces,top,top)
-    haskey(m.surfaces,top_out) && push!(out,top_out)
-    haskey(m.volumes,vol) && push!(out,vol)
+    haskey(m.surfaces,top_out) && _extrude_out!(out,dims,top_out,2)
+    haskey(m.volumes,vol) && _extrude_out!(out,dims,vol,3)
     # `Geometry.ExtrudeReturnLateralEntities` (default on) appends the
     # volume's boundary surfaces besides the source and top — the same
     # signed comparison Gmsh applies, so `is<0` keeps the `+tag` source
@@ -2178,7 +2194,7 @@ function _extrude_surface!(m::GeoModel, is::Int, spec,
     return_lateral || return nothing
     for s in m.surface_loops[slt]
         side=get(maps.surfaces,abs(s),abs(s))
-        (side==is || side==top_out) || push!(out,side)
+        (side==is || side==top_out) || _extrude_out!(out,dims,side,2)
     end
     return nothing
 end

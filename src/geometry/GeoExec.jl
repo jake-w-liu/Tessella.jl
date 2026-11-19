@@ -5030,7 +5030,8 @@ end
 
 function _geo_boundary_layer_extrude!(m::GeoModel,
                                       entities::AbstractVector{<:NTuple{2,Int}},
-                                      params,blmeta,context,caller)
+                                      params,blmeta,context,caller;
+                                      out_dims::Union{Nothing,Vector{Int}}=nothing)
     for (dim,tag) in entities
         dim in (0,1,2) || throw(ArgumentError(
             "$caller: boundary-layer extrusion of " *
@@ -5216,33 +5217,34 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
                              _params_model=working)
     end
     out=Int[]
+    emit(tag,dim)=(push!(out,tag);out_dims===nothing || push!(out_dims,dim);nothing)
     pcur=0;ccur=0;scur=0
     for (d,e) in entities
         if d==0
             pcur+=1
             dest,curve=point_out[pcur]
-            push!(out,get(maps.points,dest,dest))
-            haskey(m.curves,curve) && push!(out,curve)
+            emit(get(maps.points,dest,dest),0)
+            haskey(m.curves,curve) && emit(curve,1)
         elseif d==1
             ccur+=1
             c,chapeau,surf,_kernel=made[ccur]
             top=get(maps.curves,chapeau,chapeau)
-            haskey(m.curves,abs(top)) && push!(out,top)
+            haskey(m.curves,abs(top)) && emit(top,1)
             haskey(m.surfaces,surf) || continue
-            push!(out,surf)
+            emit(surf,2)
             # `Geometry.ExtrudeReturnLateralEntities` — the connector
             # generatrices. Upstream compares `abs(record tag)` against the
             # *signed* input, so a negative generatrix keeps its own `-tag`.
             iszero(context.extrude_return_lateral) && continue
             for g in m.loops[only(m.surfaces[surf])]
-                (abs(g)==c || abs(g)==abs(top)) || push!(out,g)
+                (abs(g)==c || abs(g)==abs(top)) || emit(g,1)
             end
         else
             scur+=1
             is,(top,vol,laterals)=surf_made[scur]
             top_out=get(maps.surfaces,top,top)
-            haskey(m.surfaces,top_out) && push!(out,top_out)
-            haskey(m.volumes,vol) && push!(out,vol)
+            haskey(m.surfaces,top_out) && emit(top_out,2)
+            haskey(m.volumes,vol) && emit(vol,3)
             # `Geometry.ExtrudeReturnLateralEntities` — every boundary
             # surface in `v->Surfaces` order except those whose absolute
             # tag equals the *signed* input or the chapeau, by absolute
@@ -5253,7 +5255,7 @@ function _geo_boundary_layer_extrude!(m::GeoModel,
                 s2=get(maps.surfaces,abs(s),abs(s))
                 (s2==is || s2==top_out || !haskey(m.surfaces,s2)) &&
                     continue
-                push!(out,s2)
+                emit(s2,2)
             end
         end
     end
