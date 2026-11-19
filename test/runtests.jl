@@ -265,6 +265,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_tensor_surface_mesh_test.jl",
         "geometry/boundary_layer_field_fill_refine_test.jl",
         "interfaces/api_geo_sweep_test.jl",
+        "geometry/extrude_lateral_orientation_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

@@ -308,6 +308,56 @@ function _extrude_quatri!(tris,quads,v0,v1,v2,v3,recombine::Bool,
     return nothing
 end
 
+# +1 when (generatrix tangent) × (sweep direction) agrees with the OCC face
+# normal of lateral Surface `t` at its first non-degenerate grid cell, -1
+# when it opposes it.
+function _extrude_occ_lateral_sign(m::GeoModel,t::Int,grid,closed::Bool,
+                                   nnode::Int,caller::AbstractString)
+    sub(a,b)=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
+    for i in 1:(closed ? nnode : nnode-1),l in 1:size(grid,2)-1
+        i2=closed ? mod1(i+1,nnode) : i+1
+        p0=grid[i,l];p1=grid[i2,l];p2=grid[i,l+1];p3=grid[i2,l+1]
+        (p0==p1 || p0==p2) && continue
+        tangent=sub(p1,p0);sweep=sub(p2,p0)
+        reference=(tangent[2]*sweep[3]-tangent[3]*sweep[2],
+                   tangent[3]*sweep[1]-tangent[1]*sweep[3],
+                   tangent[1]*sweep[2]-tangent[2]*sweep[1])
+        centre=[(p0[k]+p1[k]+p2[k]+p3[k])/4 for k in 1:3]
+        normal=try
+            model_normal(m,t,model_parametrization(m,2,t,centre))
+        catch err
+            err isa InterruptException && rethrow()
+            return 1.0
+        end
+        d=normal[1]*reference[1]+normal[2]*reference[2]+normal[3]*reference[3]
+        return d<0 ? -1.0 : 1.0
+    end
+    return 1.0
+end
+
+# Reorient the cells `_extrude_quatri!` just appended so their normal agrees
+# with `orientation * (v1 - v0) × (v2 - v0)` — the lateral surface normal
+# for the cell `(v0,v1)` at one level and `(v2,v3)` at the next. A collapsed
+# edge falls back to the opposite edge of the cell.
+function _extrude_orient_cell!(tris,quads,ntri::Int,nquad::Int,v0,v1,v2,v3,
+                               orientation::Float64)
+    sub(a,b)=(a[1]-b[1],a[2]-b[2],a[3]-b[3])
+    cross(a,b)=(a[2]*b[3]-a[3]*b[2],a[3]*b[1]-a[1]*b[3],a[1]*b[2]-a[2]*b[1])
+    dot(a,b)=a[1]*b[1]+a[2]*b[2]+a[3]*b[3]
+    tangent=v0==v1 ? sub(v3,v2) : sub(v1,v0)
+    sweep=v0==v2 ? sub(v3,v1) : sub(v2,v0)
+    reference=cross(tangent,sweep)
+    for k in ntri+1:length(tris)
+        a,b,c=tris[k]
+        orientation*dot(cross(sub(b,a),sub(c,a)),reference)<0 && (tris[k]=(a,c,b))
+    end
+    for k in nquad+1:length(quads)
+        a,b,c,d=quads[k]
+        orientation*dot(cross(sub(b,a),sub(c,a)),reference)<0 && (quads[k]=(a,d,c,b))
+    end
+    return nothing
+end
+
 # Emit the swept surface cell lists as a `Mesh` (triangles only) or
 # `MixedMesh` (with quadrangles). Node order is generatrix-node × level,
 # matching upstream's vertex-creation order.
@@ -1909,10 +1959,24 @@ function _extrude_lateral_mesh(m::GeoModel,t::Int,params::_GeoExtrudeParams,
     tris=NTuple{3,NTuple{3,Float64}}[]
     quads=NTuple{4,NTuple{3,Float64}}[]
     recombine=_extrude_quadtri_lateral_recombine(m,t,params,caller)
+    # Upstream `orientMeshGFace` reorients every face mesh along its
+    # geometric normal. A swept lateral surface's loop starts with the signed
+    # generatrix followed by the sweep connector, so that normal is
+    # (signed generatrix tangent) × (sweep direction) cell by cell.
+    orientation=gen_signed<0 ? -1.0 : 1.0
+    # An OCC lateral face carries its own oriented CAD normal (upstream
+    # orients against `GFace::normal`): align the sweep frame with it.
+    geometry=get(m.surface_geometry,t,nothing)
+    if geometry!==nothing && hasproperty(geometry,:occ) && nseg>=1 && nlev>=2
+        orientation=_extrude_occ_lateral_sign(m,t,grid,closed,nnode,caller)
+    end
     for i in 1:nseg,l in 1:nlev-1
         i2=closed ? mod1(i+1,nnode) : i+1
+        ntri=length(tris);nquad=length(quads)
         _extrude_quatri!(tris,quads,grid[i,l],grid[i2,l],
                          grid[i,l+1],grid[i2,l+1],recombine,edges,t,caller)
+        _extrude_orient_cell!(tris,quads,ntri,nquad,grid[i,l],grid[i2,l],
+                              grid[i,l+1],grid[i2,l+1],orientation)
     end
     # `pos` registration order: per generatrix node, per level.
     lookup=Dict{NTuple{3,Float64},Int32}()
