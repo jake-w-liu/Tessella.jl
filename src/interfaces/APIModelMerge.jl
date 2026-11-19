@@ -244,8 +244,10 @@ function merge(filename::AbstractString)
             _model_locked()
             return _list_model_merge!(path,"API.merge")
         end
+        GeoExec._IMPORT_MSH2_PARTITIONS[]=nothing
         plan=_model_merge_prepare(path)
         _model_import_publish!(plan;legacy=true)
+        _model_import_msh2_partitions!()
         return nothing
     end
 end

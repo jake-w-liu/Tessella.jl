@@ -3075,13 +3075,16 @@ mutable struct _MixedReadBucket
     offsets::Vector{Int32}
     parent_tags::Vector{UInt64}
     domain_tags::Vector{NTuple{2,UInt64}}
+    # MSH 2.2 old-style partition number of every cell (0 when the record has
+    # no partition tags); MSH 4.1 carries partitions in its entity blocks.
+    partitions::Vector{Int32}
 end
 
 function _MixedReadBucket(etype::Int)
     record=get(MSH_SPECIAL_RECORDS,etype,nothing)
     offsets=record!==nothing && record.variable ? Int32[1] : Int32[]
     return _MixedReadBucket(Int32[],Int32[],Int32[],UInt64[],offsets,
-                            UInt64[],NTuple{2,UInt64}[])
+                            UInt64[],NTuple{2,UInt64}[],Int32[])
 end
 
 # A view-data section deferred until the mesh is fully parsed: `lines` holds
@@ -3839,7 +3842,7 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                             switch_tags::Bool=false)
     acc=_MixedReadAccum(source_identities!==nothing,factory_context)
     version=0.0
-    binary=false; swap=false; wide=true
+    binary=false; swap=false; wide=true; old_partition=false
     seen_format=false; seen_names=false; seen_entities=false
     seen_nodes=false; seen_elements=false
     phase=Int32(0)  # canonical-section anchor for preserved sections
@@ -3854,8 +3857,19 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
             length(fields)==3 || throw(ArgumentError(
                 "read_mixed_msh: malformed MeshFormat header"))
             version=_msh_float(fields[1],"MeshFormat version")
-            version in (2.2,4.1) || throw(ArgumentError(
-                "read_mixed_msh: unsupported MSH version $version (supported: 2.2, 4.1)"))
+            # Like Gmsh, every 2.x file uses the MSH 2 record layout (2.0 and 2.1
+            # keep a bare partition tag where 2.2 has a count) and every file
+            # from 4.1 on the MSH 4.1 layout. MSH 4.0 has a different layout.
+            if 2.0<=version<3.0
+                old_partition=version<2.2
+                version=2.2
+            elseif 4.0<version<5.0
+                version=4.1
+            else
+                throw(ArgumentError(
+                    "read_mixed_msh: unsupported MSH version $version " *
+                    "(supported: 2.0-2.2 and 4.1)"))
+            end
             file_type=_msh_int(fields[2],"MeshFormat file type")
             file_type in (0,1) || throw(ArgumentError(
                 "read_mixed_msh: MeshFormat file type must be 0 or 1"))
@@ -3935,8 +3949,8 @@ function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Boo
                 "read_mixed_msh: \$Elements appeared before \$Nodes"))
             seen_elements=true
             if version==2.2
-                binary ? _read_mixed_elements_v2_binary!(acc,io,limits,swap;switch_tags) :
-                         _read_mixed_elements_v2!(acc,io,limits;switch_tags)
+                binary ? _read_mixed_elements_v2_binary!(acc,io,limits,swap;switch_tags,old_partition) :
+                         _read_mixed_elements_v2!(acc,io,limits;switch_tags,old_partition)
             else
                 binary ? _read_mixed_elements_v4_binary!(acc,io,limits,swap,wide) :
                          _read_mixed_elements_v4!(acc,io,limits)
@@ -4972,7 +4986,9 @@ end
 function _append_mixed_cell_metadata!(acc,etype::Int,bucket::_MixedReadBucket,layout,
                                       physical::Int32,entity::Int32,
                                       element_tag::UInt64,parent_tag::UInt64,
-                                      domain_tags::NTuple{2,UInt64};source_element_tag=element_tag)
+                                      domain_tags::NTuple{2,UInt64};source_element_tag=element_tag,
+                                      partition::Int32=Int32(0))
+    push!(bucket.partitions,partition)
     push!(bucket.tags,physical)
     push!(bucket.entities,entity)
     push!(bucket.external_tags,element_tag)
@@ -5018,7 +5034,8 @@ end
 function _push_mixed_cell_binary!(acc,etype::Int,physical::Int32,entity::Int32,
                                   element_tag::UInt64,external_nodes,limits;
                                   parent_tag::UInt64=UInt64(0),
-                                  reserve_connectivity::Bool=true,nodevec=nothing)
+                                  reserve_connectivity::Bool=true,nodevec=nothing,
+                                  partition::Int32=Int32(0))
     layout=_msh_element_layout(etype,"binary element")
     layout.variable && throw(ArgumentError(
         "read_mixed_msh: binary MSH 2.2 has no record width for variable-connectivity type $etype"))
@@ -5039,9 +5056,13 @@ function _push_mixed_cell_binary!(acc,etype::Int,physical::Int32,entity::Int32,
         push!(bucket.nodes,internal)
     end
     _append_mixed_cell_metadata!(acc,etype,bucket,layout,physical,entity,element_tag,
-                                 parent_tag,(UInt64(0),UInt64(0)))
+                                 parent_tag,(UInt64(0),UInt64(0));partition)
     return nothing
 end
+
+# Old-style MSH 2.2 partition tag (negative values mark ghost cells).
+@inline _mixed_v2_partition(value::Integer)=
+    Int32(clamp(abs(value),0,typemax(Int32)))
 
 function _mixed_elementary_entity!(acc,value::Int,dim::Int,context::AbstractString)
     0<=value<=typemax(Int32) || throw(ArgumentError(
@@ -5051,7 +5072,8 @@ function _mixed_elementary_entity!(acc,value::Int,dim::Int,context::AbstractStri
     return entity
 end
 
-function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false)
+function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false,
+                                  old_partition::Bool=false)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
     nodevec=_mixed_node_index_vector(acc)
@@ -5066,6 +5088,7 @@ function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false)
             "read_mixed_msh: negative v2 element tag count"))
         physical_value=0
         elementary_value=0
+        partition_value=0
         npart=0
         base_tags=ntags
         first_link=0
@@ -5074,7 +5097,9 @@ function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false)
             value=_msh_record_int!(reader,"v2 element metadata tag")
             i==1 && (physical_value=value)
             i==2 && (elementary_value=value)
-            if i==3 && ntags>3
+            old_partition ? (i==3 && (partition_value=value)) :
+                (i==4 && (partition_value=value))
+            if i==3 && ntags>3 && !old_partition
                 npart=value
                 npart>0 || throw(ArgumentError(
                     "read_mixed_msh: v2 partition count must be positive when present"))
@@ -5139,13 +5164,14 @@ function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false)
         end
         _expect_msh_record_end!(reader,"v2 element record")
         _append_mixed_cell_metadata!(acc,etype,bucket,layout,physical,elementary,element_tag,
-                                     parent_tag,domain_tags)
+                                     parent_tag,domain_tags;
+                                     partition=_mixed_v2_partition(partition_value))
     end
     _expect_msh_end(io,"\$EndElements")
 end
 
 function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
-                                         switch_tags::Bool=false)
+                                         switch_tags::Bool=false,old_partition::Bool=false)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
     # Point elements have the smallest record: an element tag and one node tag.
@@ -5233,7 +5259,9 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
             _push_mixed_cell_binary!(
                 acc,etype,physical,elementary,element_tag,
                 @view(data[first_node:last_node]),limits;
-                parent_tag=parent_tag,reserve_connectivity=false,nodevec=nodevec)
+                parent_tag=parent_tag,reserve_connectivity=false,nodevec=nodevec,
+                partition=old_partition ? (ntags>=3 ? _mixed_v2_partition(data[offset+3]) : Int32(0)) :
+                    ntags>3 ? _mixed_v2_partition(data[offset+4]) : Int32(0))
             offset+=width; nread+=1
         end
     end
@@ -5726,7 +5754,18 @@ function _finish_mixed_read(acc,is_v4::Bool,source_identities=nothing;
         for (tag,row) in acc.node_map
             node_tags[row]=acc.factory===nothing ? tag : acc.external_node_tags[row]
         end
-        source_identities[]=(node_tags=node_tags,
+        # Old-style MSH 2.2 partition numbers (element UID, partition). Like
+        # Gmsh's conversion to partition entities, a file with any partitioned
+        # element assigns the unpartitioned ones to partition 1.
+        element_partitions=Tuple{UInt64,Int32}[]
+        if any(bucket->any(!iszero,bucket.partitions),values(acc.buckets))
+            for (_,bucket) in ordered
+                for (tag,partition) in zip(bucket.external_tags,bucket.partitions)
+                    push!(element_partitions,(tag,iszero(partition) ? Int32(1) : partition))
+                end
+            end
+        end
+        source_identities[]=(node_tags=node_tags,element_partitions=element_partitions,
             element_tags=deepcopy(external_element_tags),is_v4=is_v4,
             element_lookup_primed=element_lookup_primed,node_lookup_primed=node_lookup_primed,
             cell_events=copy(acc.source_cell_events),factory_events=acc.factory===nothing ? nothing :

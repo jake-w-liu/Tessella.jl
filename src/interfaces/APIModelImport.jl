@@ -400,6 +400,26 @@ function _model_import_filename(filename,caller;geo_only=false)
     return String(filename)
 end
 
+# Gmsh's MSH 2.2 reader converts old-style partition numbers into partition
+# entities (`convertOldPartitioningToNewOne` = `PartitionUsingThisSplit` with
+# |partition|, 0 -> 1). The staged reader leaves the per-element numbers here.
+function _model_import_msh2_partitions!()
+    parts=GeoExec._IMPORT_MSH2_PARTITIONS[]
+    GeoExec._IMPORT_MSH2_PARTITIONS[]=nothing
+    parts===nothing && return nothing
+    # Gmsh converts with its own default `Mesh.PartitionCreateTopology=1`
+    # (the session default here is 0), so the interface entities exist.
+    saved=OPTIONS["Mesh.PartitionCreateTopology"]
+    OPTIONS["Mesh.PartitionCreateTopology"]=1.0
+    try
+        _partition(Int(maximum(last,parts)),UInt64[first(p) for p in parts],
+            Int[Int(last(p)) for p in parts])
+    finally
+        OPTIONS["Mesh.PartitionCreateTopology"]=saved
+    end
+    return nothing
+end
+
 """
     open(filename)
 
@@ -450,14 +470,17 @@ function open(filename)
                 !iszero(get(OPTIONS,"Geometry.MatchGeomAndMesh",0.0)) &&
                 _current_slot_index_locked()!=0 &&
                 !isempty(Model.model_entities(current))
+            GeoExec._IMPORT_MSH2_PARTITIONS[]=nothing
             plan=_model_merge_prepare(path)
             # The mesh match reuses the current slot, while opening a new
             # input still clears the previous GEO language namespace.
             _model_import_publish!(plan;legacy=true,preserve_namespace=false)
             return nothing
         end
+        GeoExec._IMPORT_MSH2_PARTITIONS[]=nothing
         plan=_model_import_prepare(path,0)
         _model_import_publish!(plan)
+        _model_import_msh2_partitions!()
         nothing
     end
 end

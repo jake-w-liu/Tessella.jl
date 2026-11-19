@@ -474,6 +474,8 @@ end
 _geo_mesh_switch_tags(context)=
     !iszero(_geo_option_number(context,"Mesh",0,"SwitchElementTags"))
 
+const _IMPORT_MSH2_PARTITIONS=Ref{Any}(nothing)
+
 function _geo_import_mesh_file!(m,context,file,caller)
     _geo_import_cleared_native_factory!(m,context,file,caller) && return nothing
     # `Geometry.MatchGeomAndMesh` — `GeomMeshMatcher::match` grafts the file's
@@ -482,6 +484,10 @@ function _geo_import_mesh_file!(m,context,file,caller)
         return _geo_match_mesh_file!(m,context,file,caller)
     switch_tags=_geo_mesh_switch_tags(context)
     mixed,identities=Elements._read_mixed_msh_with_identities(file;switch_tags)
+    # Old-style MSH 2.2 partition numbers are converted to partition entities
+    # by the API session once the model is published.
+    _IMPORT_MSH2_PARTITIONS[]=isempty(identities.element_partitions) ? nothing :
+        identities.element_partitions
     # Native MSH4 creates ghosts at the live model dimension after ordinary
     # file entities are read, before partition entities are constructed.
     file_dimension=mixed.entity_data===nothing ? -1 :

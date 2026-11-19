@@ -235,6 +235,30 @@ end
         end
     end
 
+    @testset "format versions 2.0, 2.1 and 4.2" begin
+        for version in ("2.0", "2.1", "2.2")
+            # Before 2.2 the third tag is the partition number itself.
+            tags = version == "2.2" ? ([1, 1, 1, 1], [1, 1, 1, 2]) : ([1, 1, 1], [1, 1, 2])
+            opened(partitioned(version, tags)) do
+                @test API.model.get_number_of_partitions() == 2
+            end
+        end
+        opened(replace(NEGATIVE_TET, "4.1 0 8" => "4.2 0 8")) do
+            @test length(API.mesh.get_nodes()[1]) == 4
+        end
+    end
+
+    @testset "old-style MSH 2 partitions become partition entities" begin
+        opened(partitioned("2.2", ([1, 1, 1, 1], [1, 1, 1, 2]))) do
+            @test API.model.get_number_of_partitions() == 2
+            @test API.model.get_partitions(2, 2) == [1]
+            @test API.model.get_partitions(2, 3) == [2]
+            @test API.model.get_parent(2, 2) == (2, 1)
+            @test API.mesh.get_elements(2, 2)[2] == [UInt64[1]]
+            @test API.mesh.get_elements(2, 3)[2] == [UInt64[2]]
+        end
+    end
+
 end
 
 end # module
