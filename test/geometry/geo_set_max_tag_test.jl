@@ -196,15 +196,26 @@ end
     invalid_sources=(
         "SetMaxTag Point(2147483648);"=>"signed 32-bit integer range",
         "SetMaxTag Field(10);"=>"syntax error (Field)",
-        "SetFactory(\"Unknown\");"=>
-            "accepts only \"Built-in\" or \"OpenCASCADE\"",
-        "SetFactory(factoryName);"=>"requires a literal",
+        # Gmsh 4.15.2: `Error: ... Unknown string variable 'factoryName'`.
+        "SetFactory(factoryName);"=>"Unknown string variable 'factoryName'",
     )
     for (source,message) in invalid_sources
         err=_set_max_tag_error(source)
         @test err isa ArgumentError
         @test occursin(message,sprint(showerror,err))
     end
+
+    # An unknown factory name is only a warning in Gmsh 4.15.2
+    # (`Unknown factory "Unknown" - using "Built-in" instead`); the script
+    # continues on the built-in kernel.
+    unknown_factory=_execute_set_max_tag_source(raw"""
+        SetFactory("Unknown");
+        Point(newp) = {0,0,0,1};
+        """)
+    @test isempty(unknown_factory.errors)
+    @test unknown_factory.warnings==
+          ["Unknown factory \"Unknown\" - using \"Built-in\" instead"]
+    @test sort!(collect(keys(unknown_factory.model.points)))==[1]
 
 end
 
