@@ -33,9 +33,11 @@ const _GOPT_SWAP_TABLE=Dict{Int,Tuple{Vector{NTuple{3,Int}},Vector{Vector{Int}}}
            Vector{Int}[collect(Int,triangulation) for triangulation in triangulations])
     for (size,(triangles,triangulations)) in _GOPT_SWAP_PATTERNS)
 
+# `neighbors` is stored inline: a vector per cell was two more heap objects
+# for every tetrahedron of the mesh and for every cell a swap creates.
 mutable struct _GmshOptimizeTet
     vertices::NTuple{4,Int32}
-    neighbors::Vector{Int32}
+    neighbors::NTuple{4,Int32}
     number::UInt64
     physical::Int32
     quality::Float64
@@ -147,8 +149,9 @@ function _gopt_connect!(state,indices)
             if previous===nothing
                 faces[key]=(Int32(index),face)
             elseif previous[1]!=index
-                state.cells[previous[1]].neighbors[previous[2]]=Int32(index)
-                cell.neighbors[face]=previous[1]
+                first_owner=state.cells[previous[1]]
+                first_owner.neighbors=Base.setindex(first_owner.neighbors,Int32(index),previous[2])
+                cell.neighbors=Base.setindex(cell.neighbors,previous[1],face)
             end
         end
     end
@@ -177,8 +180,9 @@ function _gopt_connect_sorted!(state,indices::AbstractUnitRange)
         head=records[position]
         while next<=total && records[next][1]==head[1]
             other=records[next]
-            state.cells[head[2]].neighbors[head[3]]=other[2]
-            state.cells[other[2]].neighbors[other[3]]=head[2]
+            first_owner=state.cells[head[2]];later_owner=state.cells[other[2]]
+            first_owner.neighbors=Base.setindex(first_owner.neighbors,other[2],Int(head[3]))
+            later_owner.neighbors=Base.setindex(later_owner.neighbors,head[2],Int(other[3]))
             next+=1
         end
         position=next
@@ -234,7 +238,7 @@ function _gopt_new_cell!(state,vertices,quality,physical)
     state.element_max=Base.checked_add(state.element_max,UInt64(1))
     length(state.cells)<typemax(Int32) || throw(ArgumentError(
         "native tetrahedron optimization exceeds Int32 storage capacity"))
-    push!(state.cells,_GmshOptimizeTet(vertices,zeros(Int32,4),
+    push!(state.cells,_GmshOptimizeTet(vertices,(Int32(0),Int32(0),Int32(0),Int32(0)),
         state.element_max,physical,quality,false))
     _gopt_note_carriers!(state,vertices,1)
     return Int32(length(state.cells))
@@ -504,6 +508,7 @@ function _gopt_ingest(mesh::Mesh,element_numbers,element_high_water,movable,
         BitVector(movable)
     end
     cells=_GmshOptimizeTet[]
+    sizehint!(cells,size(mesh.tets,2))
     face_carriers=Dict(key=>0 for key in embedded_faces)
     edge_carriers=Dict(key=>0 for key in embedded_edges)
     embedded_verts=Set{Int32}(v for f in embedded_faces for v in f)
@@ -513,7 +518,7 @@ function _gopt_ingest(mesh::Mesh,element_numbers,element_high_water,movable,
     for column in axes(mesh.tets,2)
         vertices=ntuple(slot->mesh.tets[slot,column],4)
         quality,_=_gopt_quality(state,vertices)
-        push!(cells,_GmshOptimizeTet(vertices,zeros(Int32,4),numbers[column],
+        push!(cells,_GmshOptimizeTet(vertices,(Int32(0),Int32(0),Int32(0),Int32(0)),numbers[column],
             mesh.tet_tag[column],quality,false))
         _gopt_note_carriers!(state,vertices,1)
     end

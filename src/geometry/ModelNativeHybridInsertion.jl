@@ -451,7 +451,7 @@ function smooth(product,initial_rows,passes,caller)
         vertices=ntuple(slot->product.mesh.tets[slot,column],4)
         points=ntuple(slot->ntuple(axis->product.mesh.coords[axis,vertices[slot]],3),4)
         quality=product.radii[column]
-        push!(cells,D._GmshOptimizeTet(vertices,fill(Int32(0),4),
+        push!(cells,D._GmshOptimizeTet(vertices,(Int32(0),Int32(0),Int32(0),Int32(0)),
             product.element_numbers[column],Int32(0),quality,false))
     end
     state=D._GmshOptimizeState(copy(product.mesh.coords),cells,product.element_high_water,
