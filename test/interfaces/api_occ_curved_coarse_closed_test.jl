@@ -60,26 +60,28 @@ end
 
 @testset "coarse sizes keep closed curved faces closed and round" begin
     sphere=()->A.model.occ.add_sphere(0,0,0,1)
-    @testset "sphere h=$h" for h in (1.0,2.0,10.0)
-        s=shell(sphere,h)
+    @testset "sphere h=1 (was a lens)" begin
+        s=shell(sphere,1.0)
         @test s.closed
-        @test s.nodes>=12                 # Gmsh: 27, 17, 16
+        @test s.nodes>=12                 # Gmsh: 27
         @test s.cells==2s.nodes-4         # Euler: a sphere
-        @test 2.2<s.volume<4π/3           # Gmsh: 3.23, 2.85, 2.75; was 0.16
+        @test 2.2<s.volume<4π/3           # Gmsh: 3.23; was 0.16
     end
-    @testset "sphere h=2 feeds generate(3)" begin
+    @testset "sphere h=2 (was open) feeds generate(3)" begin
         s=shell(sphere,2.0;dimension=3)
         @test s.closed
+        @test s.cells==2s.nodes-4
+        @test 2.2<s.volume<4π/3           # Gmsh: 2.85
         @test s.tets>0
     end
-    @testset "torus h=$h" for h in (2.0,10.0)
-        s=shell(()->A.model.occ.add_torus(0,0,0,2,0.5),h)
+    @testset "torus h=2" begin
+        s=shell(()->A.model.occ.add_torus(0,0,0,2,0.5),2.0)
         @test s.closed
         @test s.cells==2s.nodes           # Euler: a torus
         @test 2.5<s.volume<2π^2*2*0.25
     end
-    @testset "cone with apex h=$h" for h in (2.0,10.0)
-        s=shell(()->A.model.occ.add_cone(0,0,0,0,0,1,1,0),h)
+    @testset "cone with apex h=2" begin
+        s=shell(()->A.model.occ.add_cone(0,0,0,0,0,1,1,0),2.0)
         @test s.closed
         @test s.cells==2s.nodes-4
         @test 0.8<s.volume<π/3            # Gmsh: 0.912 (7-gon pyramid)

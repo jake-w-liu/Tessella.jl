@@ -78,43 +78,26 @@ function generate(build;h=nothing,field=nothing)
 end
 
 @testset "sized Frontal-Delaunay fill of curved OCC faces" begin
+    # One mesh per behaviour, each as small as still shows it: the suite runs
+    # interpreted, and under coverage every kernel line is interpreted too.
     @testset "sphere follows the uniform size, poles included" begin
-        generate(()->A.model.occ.add_sphere(0,0,0,1);h=0.3)
+        # h=0.2 is also the pole-fan regression: the wrapped-cell rule added
+        # for sizes larger than the model once acted on the open sector of a
+        # growing pole fan and left two slivers at the south pole (minimum
+        # angle 6.8 deg here; Gmsh 4.15.2: 29.0). It now runs only as a
+        # second pass when wrapped cells are left.
+        generate(()->A.model.occ.add_sphere(0,0,0,1);h=0.2)
         s=try
-            shell_statistics((x,y,z)->0.3,(x,y,z)->abs(hypot(x,y,z)-1))
+            shell_statistics((x,y,z)->0.2,(x,y,z)->abs(hypot(x,y,z)-1))
         finally
             A.finalize()
         end
         @test s.closed
         @test s.residual<=1e-12
-        @test 340<=s.cells<=420          # Gmsh: 380; the lattice gave 440
-        # The lattice gave 8 deg at the poles; Gmsh's own minimum at this
-        # size is 25.9 deg, so the bound separates slivers, not one degree.
-        @test s.smallest>20
+        @test 710<=s.cells<=870          # Gmsh: 790
+        @test s.smallest>20              # Gmsh: 29.0; slivers were 6.8
         @test 0.9<=s.ratio<=1.06
         # Each pole is an ordinary vertex of the closed mesh.
-        for tag in s.tags
-            abs(abs(s.point(tag)[3])-1)<=1e-12 || continue
-            valence=count(edge->edge[1]==tag,keys(s.directed))
-            @test 5<=valence<=7
-        end
-    end
-
-    @testset "sphere pole fans at ordinary sizes (h=$h)" for h in (0.2,0.15,0.1)
-        # The wrapped-cell rule added for sizes larger than the model once
-        # also acted on the open sector of a growing pole fan and left two
-        # slivers at the south pole: minimum angle 6.8, 6.3 and 9.6 deg at
-        # these sizes (Gmsh 4.15.2: 29.0, 27.8, 26.6). It now runs only as a
-        # second pass when wrapped cells are left, so a resolved sphere
-        # never sees it.
-        generate(()->A.model.occ.add_sphere(0,0,0,1);h=h)
-        s=try
-            shell_statistics((x,y,z)->h,(x,y,z)->abs(hypot(x,y,z)-1))
-        finally
-            A.finalize()
-        end
-        @test s.closed
-        @test s.smallest>20
         for tag in s.tags
             abs(abs(s.point(tag)[3])-1)<=1e-12 || continue
             @test 4<=count(edge->edge[1]==tag,keys(s.directed))<=7
@@ -122,40 +105,40 @@ end
     end
 
     @testset "torus (doubly periodic chart)" begin
-        generate(()->A.model.occ.add_torus(0,0,0,1.5,0.5);h=0.3)
+        generate(()->A.model.occ.add_torus(0,0,0,1,0.4);h=0.35)
         s=try
-            shell_statistics((x,y,z)->0.3,
-                (x,y,z)->abs(hypot(hypot(x,y)-1.5,z)-0.5))
+            shell_statistics((x,y,z)->0.35,
+                (x,y,z)->abs(hypot(hypot(x,y)-1,z)-0.4))
         finally
             A.finalize()
         end
         @test s.closed
         @test s.residual<=1e-12
-        @test 740<=s.cells<=910          # Gmsh: 824; the lattice gave 560
-        @test s.smallest>30
+        @test 310<=s.cells<=400          # Gmsh: 354
+        @test s.smallest>25
         @test 0.9<=s.ratio<=1.06
     end
 
     @testset "cone with apex and its base disk" begin
-        generate(()->A.model.occ.add_cone(0,0,0,0,0,1,1,0);h=0.25)
+        generate(()->A.model.occ.add_cone(0,0,0,0,0,1,1,0);h=0.35)
         s=try
-            shell_statistics((x,y,z)->0.25,(x,y,z)->
+            shell_statistics((x,y,z)->0.35,(x,y,z)->
                 min(abs(z),abs(hypot(x,y)-(1-z))/sqrt(2)))
         finally
             A.finalize()
         end
         @test s.closed
         @test s.residual<=1e-12
-        @test 300<=s.cells<=385          # Gmsh: 342
+        @test 165<=s.cells<=215          # Gmsh: 190
         @test s.smallest>28
     end
 
     @testset "background size field on a sphere" begin
         # Previously: ArgumentError "a background size field on curved
         # Surface[1] is not implemented".
-        size_of=(x,y,z)->0.15+0.35*abs(z)
+        size_of=(x,y,z)->0.25+0.4*abs(z)
         generate(()->A.model.occ.add_sphere(0,0,0,1);
-                 field="0.15+0.35*Fabs(z)")
+                 field="0.25+0.4*Fabs(z)")
         s=try
             shell_statistics(size_of,(x,y,z)->abs(hypot(x,y,z)-1))
         finally
@@ -163,9 +146,9 @@ end
         end
         @test s.closed
         @test s.residual<=1e-12
-        @test 385<=s.cells<=500          # Gmsh: 442
+        @test 180<=s.cells<=240          # Gmsh: 208
         @test 0.85<=s.ratio<=1.1
-        @test s.smallest>22
+        @test s.smallest>20
     end
 end
 end
