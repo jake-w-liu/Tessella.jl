@@ -6673,6 +6673,30 @@ end
 function _sorted_tet_faces(tets::AbstractMatrix{<:Integer})
     nt = size(tets, 2)
     faces = Vector{NTuple{3,Int32}}(undef, 4 * nt)
+    lowest = typemax(Int); highest = typemin(Int)
+    @inbounds for t in 1:nt, k in 1:4
+        v = Int(tets[k, t])
+        v < lowest && (lowest = v); v > highest && (highest = v)
+    end
+    if nt > 0 && lowest >= 0 && highest < (1 << 21)
+        # Three rows below 2^21 pack into one UInt64 whose order is the order
+        # of the sorted triples, and UInt64 keys sort by radix: a final volume
+        # mesh has its face table built several times, and comparing triples
+        # was a third of generate(3) on a box.
+        keys = Vector{UInt64}(undef, 4 * nt)
+        pack(f) = (UInt64(f[1]) << 42) | (UInt64(f[2]) << 21) | UInt64(f[3])
+        @inbounds for t in 1:nt
+            a = Int32(tets[1, t]); b = Int32(tets[2, t]); c = Int32(tets[3, t]); d = Int32(tets[4, t])
+            keys[4t-3] = pack(_sort3t(b, c, d)); keys[4t-2] = pack(_sort3t(a, c, d))
+            keys[4t-1] = pack(_sort3t(a, b, d)); keys[4t] = pack(_sort3t(a, b, c))
+        end
+        sort!(keys)
+        @inbounds for i in eachindex(keys)
+            key = keys[i]
+            faces[i] = (Int32(key >> 42), Int32((key >> 21) & 0x1fffff), Int32(key & 0x1fffff))
+        end
+        return faces
+    end
     @inbounds for t in 1:nt
         a = Int32(tets[1, t]); b = Int32(tets[2, t]); c = Int32(tets[3, t]); d = Int32(tets[4, t])
         faces[4t-3] = _sort3t(b, c, d); faces[4t-2] = _sort3t(a, c, d)
