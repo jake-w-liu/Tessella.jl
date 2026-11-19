@@ -506,6 +506,29 @@ by the returned arena. Coordinate predicates do not define node identity.
 function recover_convex(kernel,facets;seed=1)
     faces=NTuple{3,Int32}[Tuple(Int32.(face)) for face in facets]
     isempty(faces) && throw(Unsupported("a closed PLC facet list is required"))
+    # The scan below tests every point against every facet plane, and on a
+    # surface that is not convex it runs until it reaches a facet with points
+    # on both sides. Such a surface has a reflex edge, which the two facets
+    # on it show at once: look at each facet's three neighbours first.
+    if all(face->length(unique(face))==3 && all(node->0<node<=kernel.count,face),faces)
+        across=Dict{Tuple{Int32,Int32},Int32}()
+        for face in faces,index in 1:3
+            # Keyed by the directed edge; a consistently oriented neighbour
+            # traverses it the other way.
+            across[(face[index],face[mod(index,3)+1])]=face[mod(index+1,3)+1]
+        end
+        for face in faces
+            positive=false;negative=false
+            for index in 1:3
+                opposite=get(across,(face[mod(index,3)+1],face[index]),Int32(0))
+                opposite==0 && continue
+                sign=orient3(kernel.points[face[1]],kernel.points[face[2]],
+                    kernel.points[face[3]],kernel.points[opposite])
+                positive|=sign>0;negative|=sign<0
+            end
+            positive && negative && throw(Unsupported("nonconvex/outside PLC points require native carving"))
+        end
+    end
     edge_counts=Dict{Tuple{Int32,Int32},Int}()
     wanted=Set{NTuple{3,Int32}}()
     for face in faces
