@@ -8003,17 +8003,16 @@ function _geo_assign_color_option!(context::_GeoNumericContext,family::String,
 end
 
 # `x.ColorTable = {colors}` — Gmsh writes the color table of `View[i]` where
-# `i` is the bracket index (the family name is ignored); `.geo` execution
-# never has a view, so the faithful result is "View[i] does not exist".
+# `i` is the bracket index (the family name is ignored). `GetColorTable`
+# falls back to the reference view options when no such view exists, so the
+# assignment never fails (examples/post_processing/lowmem-anim.geo); the
+# table is display state only.
 function _geo_assign_color_table!(context::_GeoNumericContext,family::String,
                                   index_src,rhs::String,
                                   caller::AbstractString)
-    index=index_src===nothing ? 0 :
+    index_src===nothing ||
         _geo_int_value(_geo_eval_numeric(index_src,context,
             "$caller view index"),"$caller view index")
-    context.soft_unknown_reads || throw(ArgumentError(
-        "$caller: View[$index] does not exist"))
-    _geo_yyerror!(context,"View[$index] does not exist")
     return nothing
 end
 

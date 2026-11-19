@@ -1477,6 +1477,10 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             # `Geometry.OldNewReg` option.
             m.old_newreg=!iszero(something(_geo_option_number(
                 context,"Geometry",0,"OldNewReg"),1.0))
+            # Live `PostProcessing.NbViews` for `View[PostProcessing.NbViews-1]`.
+            nviews=length(get(_GEO_EXEC_VIEWS,context,()))
+            get(context.option_numbers,("PostProcessing",0,"NbViews"),0.0)==nviews ||
+                _geo_sync_view_options!(context)
             # `_GeoSyntaxAbort` marks an upstream *syntax error* — the bison
             # parser records it, drops the statement and resumes at the next
             # one. The allocator observer is skipped: the statement did not
@@ -8065,6 +8069,11 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         # silently dropping the construct.
         _geo_syntax_abort(";")
     end
+    if match(r"^View\s*(?:\"|'|[A-Za-z_][A-Za-z0-9_]*\s*\()",line)!==nothing &&
+       _geo_view_top_level_brace(line)!=0
+        Base.inferencebarrier(_geo_exec_view_block!)(m,line,context)
+        return
+    end
     if occursin(r"^Periodic(?:\s|$)",line)
         Base.inferencebarrier(_exec_periodic!)(m,line,context)
         return
@@ -12926,6 +12935,151 @@ function _geo_retag_view(view,tag)
     return post.PosView(view.name;tag,time=view.time,elements=view.elements,texts=view.texts,
         interpolations=view.interpolations,scheme_positions=view.scheme_positions)
 end
+
+# `View <StringExpr> { records };` — Gmsh's parsed (list-based)
+# post-processing view, inline in a `.geo` script or an `Include`d `.pos`
+# file. Its records may use script variables and string expressions
+# (`View Sprintf(..)`, `T2(..){ StrCat(..) }`), which the standalone `.pos`
+# reader does not bind, so the name, every coordinate/value list and every
+# text is evaluated here and the canonical record text goes to
+# `Post.read_pos`; the views join the execution's view list.
+function _geo_exec_view_block!(m::GeoModel,line::AbstractString,
+                               context::_GeoNumericContext)
+    caller="execute_geo: View"
+    s=String(strip(line))
+    endswith(s,";") && (s=String(strip(s[firstindex(s):prevind(s,lastindex(s))])))
+    s=String(strip(s[nextind(s,firstindex(s),4):end]))
+    open=_geo_view_top_level_brace(s)
+    open==0 && _geo_syntax_abort(";")
+    close=_geo_matching_delim(s,open)
+    close==0 && _geo_syntax_abort("{")
+    after=String(strip(s[nextind(s,close):end]))
+    isempty(after) || _geo_syntax_abort(_geo_stmt_head_token(after))
+    name=_geo_eval_string(s[firstindex(s):prevind(s,open)],context,caller)
+    body=s[nextind(s,open):prevind(s,close)]
+    io=IOBuffer()
+    print(io,"View ",_geo_view_quote(name)," {\n")
+    for record in _geo_view_records(body)
+        rm=match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(.*)$"s,record)
+        rm===nothing && _geo_syntax_abort(_geo_stmt_head_token(record))
+        word=String(rm.captures[1]);rest=String(strip(rm.captures[2]))
+        if word=="TIME"
+            values=_geo_numeric_list_values(rest,context,caller)
+            print(io,"TIME{",join(_geo_view_number.(values),","),"};\n")
+        elseif word=="INTERPOLATION_SCHEME"
+            # Plain numeric matrices; the `.pos` reader evaluates them.
+            print(io,record,";\n")
+        else
+            startswith(rest,"(") || _geo_syntax_abort(_geo_stmt_head_token(rest))
+            pclose=_geo_matching_delim(rest,firstindex(rest))
+            pclose==0 && _geo_syntax_abort("(")
+            coords=_geo_numeric_list_values(
+                "{"*rest[nextind(rest,firstindex(rest)):prevind(rest,pclose)]*"}",
+                context,caller)
+            tail=String(strip(rest[nextind(rest,pclose):end]))
+            (startswith(tail,"{") && endswith(tail,"}")) ||
+                _geo_syntax_abort(_geo_stmt_head_token(tail))
+            inner=tail[nextind(tail,firstindex(tail)):prevind(tail,lastindex(tail))]
+            print(io,word,"(",join(_geo_view_number.(coords),","),"){")
+            if word in ("T2","T3")
+                items=isempty(strip(inner)) ? String[] :
+                    _geo_split_args(inner,caller)
+                print(io,join((_geo_view_quote(
+                    _geo_eval_string(item,context,caller)) for item in items),","))
+            else
+                values=_geo_numeric_list_values("{"*inner*"}",context,caller)
+                print(io,join(_geo_view_number.(values),","))
+            end
+            print(io,"};\n")
+        end
+    end
+    print(io,"};\n")
+    post=getfield(parentmodule(@__MODULE__),:Post)
+    views=post.read_pos(IOBuffer(take!(io)))
+    store=get!(_GEO_EXEC_VIEWS,context,Any[])
+    for view in views
+        push!(store,_geo_retag_view(view,_geo_next_view_tag!(context)))
+    end
+    return nothing
+end
+
+# Read-only data options of the current view list: `PostProcessing.NbViews`
+# and each `View[i].Min`/`Max`/`NbTimeStep` (`PViewData::getMin/getMax` over
+# every step — the norm for vectors and tensors), refreshed whenever the view
+# count changes (tutorials/t8.geo divides by `View[v0].Max`).
+function _geo_sync_view_options!(context::_GeoNumericContext)
+    store=get(_GEO_EXEC_VIEWS,context,())
+    context.option_numbers[("PostProcessing",0,"NbViews")]=Float64(length(store))
+    for (index,view) in enumerate(store)
+        lo=Inf;hi=-Inf;steps=1
+        try
+            steps=max(1,length(view.time))
+            for element in view.elements
+                values=element.values
+                for node in axes(values,2),step in axes(values,3)
+                    v=size(values,1)==1 ? values[1,node,step] :
+                        sqrt(sum(abs2,@view values[:,node,step]))
+                    isfinite(v) || continue
+                    lo=min(lo,v);hi=max(hi,v)
+                end
+            end
+        catch err
+            err isa InterruptException && rethrow()
+            # model-backed API views carry no list records here
+            continue
+        end
+        isfinite(lo) || (lo=hi=0.0)
+        context.option_numbers[("View",index-1,"Min")]=lo
+        context.option_numbers[("View",index-1,"Max")]=hi
+        context.option_numbers[("View",index-1,"NbTimeStep")]=Float64(steps)
+    end
+    return nothing
+end
+
+# Index of the first `{` outside quotes and parentheses (0 when absent).
+function _geo_view_top_level_brace(s::AbstractString)
+    depth=0;q='\0'
+    for (k,c) in pairs(s)
+        if q!='\0'
+            c==q && (q='\0')
+        elseif c=='"' || c=='\''
+            q=c
+        elseif c=='('
+            depth+=1
+        elseif c==')'
+            depth-=1
+        elseif c=='{' && depth==0
+            return k
+        end
+    end
+    return 0
+end
+
+# The `;`-separated records of a view body, split outside quotes and groups.
+function _geo_view_records(body::AbstractString)
+    records=String[];depth=0;q='\0';start=firstindex(body)
+    for (k,c) in pairs(body)
+        if q!='\0'
+            c==q && (q='\0')
+        elseif c=='"' || c=='\''
+            q=c
+        elseif c in ('(','{','[')
+            depth+=1
+        elseif c in (')','}',']')
+            depth-=1
+        elseif c==';' && depth==0
+            record=strip(body[start:prevind(body,k)])
+            isempty(record) || push!(records,String(record))
+            start=nextind(body,k)
+        end
+    end
+    tail=strip(body[start:end])
+    isempty(tail) || push!(records,String(tail))
+    return records
+end
+
+_geo_view_number(x::Real)=repr(Float64(x))
+_geo_view_quote(s::AbstractString)=occursin('"',s) ? "'"*s*"'" : "\""*s*"\""
 
 function _geo_view_operation!(operation,context,caller)
     api=getfield(parentmodule(@__MODULE__),:API)
