@@ -101,6 +101,50 @@ function _precompile_meshing_workload()
                 API.finalize()
             end
         end
+        # The command line: `CLI.main` infers the whole execute/mesh/write tree
+        # on its first call (about 40 s), so a 2-D run with physical groups,
+        # an extruded 3-D run, an OpenCASCADE box and a `-0` unroll are served
+        # from the package image. Best effort, like the curved cases above.
+        mktempdir() do directory
+            plane = joinpath(directory, "plane.geo")
+            write(plane, """
+                lc = 0.5;
+                Point(1) = {0,0,0,lc}; Point(2) = {1,0,0,lc};
+                Point(3) = {1,1,0,lc}; Point(4) = {0,1,0,lc};
+                Line(1) = {1,2}; Line(2) = {3,2}; Line(3) = {3,4}; Line(4) = {4,1};
+                Curve Loop(1) = {4,1,-2,3};
+                Plane Surface(1) = {1};
+                Physical Curve(5) = {1,2,4};
+                Physical Surface("My surface") = {1};
+                """)
+            extruded = joinpath(directory, "extruded.geo")
+            write(extruded, """
+                Include "plane.geo";
+                Point(5) = {0.5,0.5,0,0.5};
+                Point{5} In Surface{1};
+                e[] = Extrude {0,0,0.5} { Surface{1}; Layers{2}; };
+                q[] = Translate {2,0,0} { Duplicata { Volume{e[1]}; } };
+                Physical Volume("v", 7) = {e[1], q[0]};
+                """)
+            occ = joinpath(directory, "occ.geo")
+            write(occ, """
+                SetFactory("OpenCASCADE");
+                Box(1) = {0,0,0,1,1,1};
+                Mesh.MeshSizeMax = 0.5;
+                """)
+            for args in ((plane, "-2"), (extruded, "-3"), (occ, "-3"),
+                         (plane, "-0"))
+                output = joinpath(directory,
+                    args[2] == "-0" ? "out.geo_unrolled" : "out.msh")
+                try
+                    redirect_stdout(devnull) do
+                        CLI.main(String[args[1], args[2], "-v", "0", "-nt", "1",
+                                        "-o", output])
+                    end
+                catch
+                end
+            end
+        end
     finally
         API._SESSION_START_TIME[] = saved_start
         API._ONELAB_SESSION_EPOCH[] = saved_epoch
