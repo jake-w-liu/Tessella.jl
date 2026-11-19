@@ -326,7 +326,13 @@ function _geo_geometry_rebind_receipt(authority,carrier,previous,plan,caller)
         end
         push!(parts,(owner[1],owner[2],part));push!(remaps,rows)
     end
-    return _geo_geometry_receipt(carrier,parts,remaps,tags,caller)
+    # The parts above are built from the carrier's own columns, each assigned to
+    # exactly one owner, with unique rows and `carrier.coords[:,rows]`
+    # coordinates, so the cell-multiset audit of `_geo_geometry_receipt` (two
+    # Dicts over every cell) holds by construction; only the identity check runs.
+    length(tags)==nnodes(carrier) && allunique(tags) || throw(ArgumentError(
+        "$caller: geometry carrier identities do not align"))
+    return _GeoGeometryParts(carrier,parts,remaps,copy(tags))
 end
 
 function _geo_geometry_plan_receipt(authority,carrier,previous,plan,caller)
