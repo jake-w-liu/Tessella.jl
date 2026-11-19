@@ -423,7 +423,9 @@ function _model_occ_add_cone!(m::GeoModel,x,y,z,dx,dy,dz,r1,r2;
     t_top=kernel.maxima[4]+1; t_seam=kernel.maxima[4]+2
     t_bot=kernel.maxima[4]+3
     s_lat=kernel.maxima[5]+1; s_top=kernel.maxima[5]+2
-    s_bot=kernel.maxima[5]+3
+    # a cone closing in an apex has no top disk: the base is Surface 2 then
+    # (Gmsh 4.15.2), not 3 with a hole in the numbering
+    s_bot=kernel.maxima[5]+(apex_top ? 2 : 3)
     lat_pcurves=Dict{Int,NamedTuple}(
         t_top=>(fwd=(lin2d=((0.0,len),(1.0,0.0)),),rev=nothing),
         t_bot=>(fwd=(lin2d=((0.0,0.0),(1.0,0.0)),),rev=nothing),
@@ -481,7 +483,7 @@ function _model_occ_add_cone!(m::GeoModel,x,y,z,dx,dy,dz,r1,r2;
     apex_top || push!(pending,(-1,kernel.maxima[2]+2,wid_top,
         _ModelOCCShape(-1,(uses=Tuple{UInt64,Bool}[(cid_top,false)],),
                        UInt64[cid_top])))
-    apex_bot || push!(pending,(-1,kernel.maxima[2]+3,wid_bot,
+    apex_bot || push!(pending,(-1,kernel.maxima[2]+(apex_top ? 2 : 3),wid_bot,
         _ModelOCCShape(-1,(uses=Tuple{UInt64,Bool}[(cid_bot,false)],),
                        UInt64[cid_bot])))
     push!(pending,(2,s_lat,fid_lat,

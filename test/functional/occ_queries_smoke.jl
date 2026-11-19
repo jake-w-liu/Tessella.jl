@@ -12,7 +12,8 @@ let api=Tessella.API
         p=occ.add_point(10.0,0.0,0.0)
         occ.synchronize()
         @test collect(occ.get_bounding_box(3,v))≈[0,0,0,2,1,3]
-        @test collect(occ.get_bounding_box(0,1))≈[0,0,0,0,0,0]
+        # OpenCASCADE's box layout: Point 1 is (xmin,ymin,zmax)
+        @test collect(occ.get_bounding_box(0,1))≈[0,0,3,0,0,3]
         inside=occ.get_entities_in_bounding_box(-1.,-1.,-1.,3.,2.,4.)
         @test length(inside)==27
         @test (0,p) ∉ inside

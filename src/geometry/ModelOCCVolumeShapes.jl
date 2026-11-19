@@ -422,21 +422,23 @@ function _model_occ_add_box!(m::GeoModel,x,y,z,dx,dy,dz;tag=-1)
     # negative extents simply place P2 below P1 on that axis.
     lo=ntuple(i->min(corner[i],corner[i]+ext[i]),3)
     hi=ntuple(i->max(corner[i],corner[i]+ext[i]),3)
-    v=((lo[1],lo[2],lo[3]),(hi[1],lo[2],lo[3]),(hi[1],hi[2],lo[3]),
-       (lo[1],hi[2],lo[3]),(lo[1],lo[2],hi[3]),(hi[1],lo[2],hi[3]),
-       (hi[1],hi[2],hi[3]),(lo[1],hi[2],hi[3]))
-    # Edge list: 4 bottom, 4 top, 4 vertical.
-    ep=((1,2),(2,3),(3,4),(4,1),(5,6),(6,7),(7,8),(8,5),
-        (1,5),(2,6),(3,7),(4,8))
-    # Per-face wire traversal, wound counterclockwise about the outward
-    # normal — bottom/top/front/back/left/right; -k walks edge k against
-    # its stored direction.
-    face_loops=(((-4,-3,-2,-1),(0.0,0.0,-1.0)),
-                ((5,6,7,8),(0.0,0.0,1.0)),
-                ((1,10,-5,-9),(0.0,-1.0,0.0)),
-                ((12,-7,-11,3),(0.0,1.0,0.0)),
-                ((9,-8,-12,4),(-1.0,0.0,0.0)),
-                ((2,11,-6,-10),(1.0,0.0,0.0)))
+    # The entity layout is OpenCASCADE's `BRepPrimAPI_MakeBox`, as Gmsh
+    # 4.15.2 numbers it — scripts address a box's faces and edges by tag:
+    # points run x outermost, z innermost with zmax first; curves 1–4 lie on
+    # x=xmin, 5–8 on x=xmax, 9–12 run along x; surfaces are xmin, xmax, ymin,
+    # ymax, zmin, zmax. Every face's natural normal is the positive axis, so
+    # the three minimum faces are used reversed in the shell, and each wire
+    # lists its edges in OCC's order. The records are the ones `add_box!`
+    # stores for the GEO `Box`, so both boxes mesh alike.
+    v=((lo[1],lo[2],hi[3]),(lo[1],lo[2],lo[3]),(lo[1],hi[2],hi[3]),
+       (lo[1],hi[2],lo[3]),(hi[1],lo[2],hi[3]),(hi[1],lo[2],lo[3]),
+       (hi[1],hi[2],hi[3]),(hi[1],hi[2],lo[3]))
+    ep=((2,1),(1,3),(4,3),(2,4),(6,5),(5,7),(8,7),(6,8),
+        (2,6),(1,5),(4,8),(3,7))
+    # -k walks edge k against its stored direction
+    face_loops=((-1,4,3,-2),(-5,8,7,-6),(-9,1,10,-5),
+                (-11,3,12,-7),(-4,9,8,-11),(-2,10,6,-12))
+    span=ntuple(i->hi[i]-lo[i],3)
     count=8+12+6+6+1+1
     kernel.maxima[3]<=typemax(Int32)-8 || throw(ArgumentError(
         "$caller: OCC vertex tag allocation exceeds Int32"))
@@ -456,50 +458,139 @@ function _model_occ_add_box!(m::GeoModel,x,y,z,dx,dy,dz;tag=-1)
             _ModelOCCShape(0,(point=v[i],mesh_size=0.0),UInt64[])))
     end
     edge_ids=ids[9:20]
+    edge_records=NamedTuple[]
     for i in 1:12
         a,b=ep[i]
         pa,pb=v[a],v[b]
         diff=_arc_sub(pb,pa)
         geometry=(occ=:line,origin=pa,dir=_occ_dir(diff),
-                  t0=0.0,t1=_occ_modulus(diff))
+                  t0=0.0,t1=_occ_modulus(diff),primitive=:box)
+        push!(edge_records,geometry)
         push!(pending,(1,kernel.maxima[4]+i,edge_ids[i],
             _ModelOCCShape(1,(kind=:line,geometry=geometry),
                            UInt64[vertex_ids[a],vertex_ids[b]])))
     end
     wire_ids=ids[21:26]
     face_ids=ids[27:32]
-    shape_index=Dict{UInt64,_ModelOCCShape}()
-    for (_,_,id,shape) in pending
-        shape_index[id]=shape
-    end
-    edge_tag_of=Dict{UInt64,Int}(edge_ids[i]=>kernel.maxima[4]+i for i in 1:12)
-    for (index,(loop,_)) in enumerate(face_loops)
+    for (index,loop) in enumerate(face_loops)
         uses=Tuple{UInt64,Bool}[(edge_ids[abs(k)],k<0) for k in loop]
         push!(pending,(-1,kernel.maxima[2]+index,wire_ids[index],
             _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses])))
     end
-    shape_of=id->get(shape_index,id) do
-        kernel.shapes[id]
-    end
-    tag_of=id->get(()->_model_occ_shape_tag(kernel,id,caller),
-                   edge_tag_of,id)
-    for (index,(loop,normal)) in enumerate(face_loops)
-        uses=Tuple{UInt64,Bool}[(edge_ids[abs(k)],k<0) for k in loop]
-        geometry=_model_occ_plane_face_geometry(
-            shape_of,tag_of,[uses],caller)
-        # The wire is wound outward: the Newell fit must point along the
-        # intended normal — a mismatch means a winding bug above.
-        _dot3(geometry.axis,normal)>0.999 || throw(ArgumentError(
-            "$caller: internal box face winding is inconsistent"))
+    for (index,loop) in enumerate(face_loops)
+        # `_model_box_plane_geometry`'s frames: OCC's own for a box face
+        axis=(index+1)÷2
+        reversed=isodd(index)
+        location=ntuple(i->lo[i]+(i==axis && !reversed ? span[i] : 0.0),3)
+        normal=ntuple(i->i==axis ? 1.0 : 0.0,3)
+        X=axis==3 ? (1.0,0.0,0.0) : (0.0,0.0,1.0)
+        Y=axis==1 ? (0.0,-1.0,0.0) : axis==2 ? (1.0,0.0,0.0) : (0.0,1.0,0.0)
+        lower=axis==1 ? [0.0,-span[2]] : [0.0,0.0]
+        upper=axis==1 ? [span[3],0.0] : axis==2 ?
+            [span[3],span[1]] : [span[1],span[2]]
+        pcurves=Dict{Int,NamedTuple}()
+        for k in loop
+            pcurves[kernel.maxima[4]+abs(k)]=(fwd=_model_occ_plane_pcurve(
+                edge_records[abs(k)],location,X,Y),rev=nothing)
+        end
+        geometry=(occ=:plane,center=location,axis=normal,X=X,Y=Y,
+                  reversed=reversed,pcurves=pcurves,uvb=(lower,upper),
+                  primitive=:box)
         push!(pending,(2,kernel.maxima[5]+index,face_ids[index],
             _ModelOCCShape(2,(kind=:plane,geometry=geometry),
                            UInt64[wire_ids[index]])))
     end
     shell_id=ids[33]
-    uses=Tuple{UInt64,Bool}[(fid,false) for fid in face_ids]
+    uses=Tuple{UInt64,Bool}[(face_ids[i],isodd(i)) for i in 1:6]
     push!(pending,(-2,kernel.maxima[1]+1,shell_id,
         _ModelOCCShape(-2,(uses=uses,),face_ids)))
     solid_id=ids[34]
+    push!(pending,(3,allocated,solid_id,
+        _ModelOCCShape(3,(kind=:solid,),UInt64[shell_id])))
+    for (dimension,tag,id,shape) in pending
+        _model_occ_bind_shape!(kernel,dimension,tag,id,shape)
+    end
+    kernel.next_shape=solid_id+UInt64(1)
+    return allocated
+end
+
+# `BRepPrimAPI_MakeWedge`'s entity layout as Gmsh 4.15.2 numbers it: a box's
+# (see `_model_occ_add_box!`) whose xmax edge at ymax sits at `ltx`. With
+# `ltx == 0` that edge collapses onto the xmin one: points 7 and 8 fall on 3
+# and 4, the ymax face disappears and the later curve and surface tags close
+# up (9 curves, 5 surfaces; the shell is [-1, 2, -3, -4, 5]).
+function _model_occ_add_wedge_layout!(kernel,allocated,world,ex,ey,ez,lt,
+                                      caller)
+    corners=((0.0,0.0,ez),(0.0,0.0,0.0),(0.0,ey,ez),(0.0,ey,0.0),
+             (ex,0.0,ez),(ex,0.0,0.0),(lt,ey,ez),(lt,ey,0.0))
+    box_edges=((2,1),(1,3),(4,3),(2,4),(6,5),(5,7),(8,7),(6,8),
+               (2,6),(1,5),(4,8),(3,7))
+    box_loops=((-1,4,3,-2),(-5,8,7,-6),(-9,1,10,-5),
+               (-11,3,12,-7),(-4,9,8,-11),(-2,10,6,-12))
+    vmap=collect(1:8)
+    lt==0.0 && (vmap[7]=3;vmap[8]=4)
+    nverts=lt==0.0 ? 6 : 8
+    edges=NTuple{2,Int}[];emap=zeros(Int,12)
+    for (i,(a,b)) in enumerate(box_edges)
+        ends=(vmap[a],vmap[b])
+        ends[1]==ends[2] && continue
+        j=findfirst(==(ends),edges)
+        j===nothing && (push!(edges,ends);j=length(edges))
+        emap[i]=j
+    end
+    loops=Vector{Int}[];revs=Bool[]
+    for (f,loop) in enumerate(box_loops)
+        mapped=Int[sign(k)*emap[abs(k)] for k in loop if emap[abs(k)]!=0]
+        length(mapped)>=3 || continue
+        push!(loops,mapped);push!(revs,isodd(f))
+    end
+    nedges=length(edges);nfaces=length(loops)
+    for (index,count) in ((3,nverts),(4,nedges),(2,nfaces),(5,nfaces),(1,1))
+        kernel.maxima[index]<=typemax(Int32)-count || throw(ArgumentError(
+            "$caller: OCC entity tag allocation exceeds Int32"))
+    end
+    ids=_model_occ_reserve_shapes(kernel,nverts+nedges+2nfaces+2,caller)
+    vertex_ids=ids[1:nverts]
+    edge_ids=ids[nverts+1:nverts+nedges]
+    wire_ids=ids[nverts+nedges+1:nverts+nedges+nfaces]
+    face_ids=ids[nverts+nedges+nfaces+1:nverts+nedges+2nfaces]
+    shell_id=ids[end-1];solid_id=ids[end]
+    pending=Tuple{Int,Int,UInt64,_ModelOCCShape}[]
+    points=NTuple{3,Float64}[world(corners[i]...) for i in 1:nverts]
+    for i in 1:nverts
+        push!(pending,(0,kernel.maxima[3]+i,vertex_ids[i],
+            _ModelOCCShape(0,(point=points[i],mesh_size=0.0),UInt64[])))
+    end
+    for (i,(a,b)) in enumerate(edges)
+        diff=_arc_sub(points[b],points[a])
+        push!(pending,(1,kernel.maxima[4]+i,edge_ids[i],
+            _ModelOCCShape(1,(kind=:line,geometry=
+                (occ=:line,origin=points[a],dir=_occ_dir(diff),
+                 t0=0.0,t1=_occ_modulus(diff))),
+                UInt64[vertex_ids[a],vertex_ids[b]])))
+    end
+    shape_index=Dict{UInt64,_ModelOCCShape}()
+    for (_,_,id,shape) in pending
+        shape_index[id]=shape
+    end
+    edge_tag_of=Dict{UInt64,Int}(edge_ids[i]=>kernel.maxima[4]+i
+                                 for i in 1:nedges)
+    shape_of=id->shape_index[id]
+    tag_of=id->edge_tag_of[id]
+    for (index,loop) in enumerate(loops)
+        uses=Tuple{UInt64,Bool}[(edge_ids[abs(e)],e<0) for e in loop]
+        push!(pending,(-1,kernel.maxima[2]+index,wire_ids[index],
+            _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses])))
+        # the wire's winding normal is the face's natural normal; the
+        # minimum faces are the ones the shell uses reversed
+        geometry=_model_occ_plane_face_geometry(shape_of,tag_of,[uses],caller)
+        push!(pending,(2,kernel.maxima[5]+index,face_ids[index],
+            _ModelOCCShape(2,(kind=:plane,geometry=geometry),
+                           UInt64[wire_ids[index]])))
+    end
+    uses=Tuple{UInt64,Bool}[(face_ids[i],revs[i]) for i in 1:nfaces]
+    push!(pending,(-2,kernel.maxima[1]+1,shell_id,
+        _ModelOCCShape(-2,(uses=uses,),face_ids)))
     push!(pending,(3,allocated,solid_id,
         _ModelOCCShape(3,(kind=:solid,),UInt64[shell_id])))
     for (dimension,tag,id,shape) in pending
@@ -538,6 +629,12 @@ function _model_occ_add_wedge!(m::GeoModel,x,y,z,dx,dy,dz;
     world(lx,ly,lz)=_occ3_add(corner,_occ3_add(
         _occ3_scale(Xf,lx),_occ3_add(_occ3_scale(Yf,ly),
                                      _occ3_scale(axis_dir,lz))))
+    # positive extents — the only ones `BRepPrimAPI_MakeWedge` accepts —
+    # take OpenCASCADE's own entity layout
+    if ex>0.0 && ey>0.0 && ez>0.0 && lt>=0.0
+        return _model_occ_add_wedge_layout!(kernel,allocated,world,
+                                            ex,ey,ez,lt,caller)
+    end
     # Gmsh/OpenCASCADE `BRepPrimAPI_MakeWedge` profile in the local xy
     # plane, extruded along +z. `ltx==0` collapses the top edge into the
     # opposite vertex — a triangular prism.

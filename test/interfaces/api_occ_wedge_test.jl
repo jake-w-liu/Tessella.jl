@@ -40,7 +40,10 @@ end
     @test length(m.surfaces)==5
     @test length(m.surface_loops)==1
     @test m.volumes==Dict(1=>[1])
-    @test sort(m.surface_loops[1])==collect(1:5)
+    # Gmsh 4.15.2's shell: xmin, slope, ymin, zmin, zmax — every face's
+    # natural normal is a positive axis (or the slope's outward), so the
+    # three minimum faces are used reversed.
+    @test m.surface_loops[1]==[-1,2,-3,-4,5]
     # Two triangular caps, three quad sides.
     wire_sizes=sort!([length(m.loops[only(m.surfaces[t])])
                       for t in keys(m.surfaces)])
@@ -55,7 +58,8 @@ end
     # Outward normals: caps ±z, y=0 face −y, x=0 face −x, slope (3,2,0)/√13.
     expected=((0.0,0.0,-1.0),(0.0,0.0,1.0),(0.0,-1.0,0.0),
               (-1.0,0.0,0.0),(3.0,2.0,0.0)./sqrt(13.0))
-    axes=[m.surface_geometry[t].axis for t in 1:5]
+    axes=[s<0 ? .-m.surface_geometry[-s].axis : m.surface_geometry[s].axis
+          for s in m.surface_loops[1]]
     @test length(axes)==5
     for e in expected
         @test any(a->isapprox(collect(a),collect(e);atol=1e-9),axes)
