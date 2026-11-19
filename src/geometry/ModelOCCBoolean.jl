@@ -53,6 +53,56 @@ function _model_occ_boolean_tag!(pub::_ModelOCCBooleanPub,dim::Int)
     return tag
 end
 
+# Per-dimension tag maxima once the removed operands `ids` are unbound.
+# Upstream unbinds the removed inputs recursively — an entity a bound parent
+# still uses stays — and recomputes every dimension's `maxTag` before it
+# binds the result, so fresh tags continue from what is left: a difference
+# that deletes both boxes numbers its faces, curves and points from 1 again,
+# and t16's fragments are Surfaces 15–23, not 27–35. `kept` are the existing
+# shapes the staged result re-binds; the simulation runs on a copy of the
+# binding table. Live GModel entities the kernel has not bound (lazily bound
+# `.geo` records) count as well.
+function _model_occ_boolean_free_maxima(m::GeoModel,kernel,ids,
+                                        kept::Set{UInt64})
+    bindings=copy(kernel.bindings)
+    gone=Set{Tuple{Int,Int}}()
+    function owned(id)
+        dimension=kernel.shapes[id].dimension
+        owner=dimension==0 ? 1 : dimension in (-1,1) ? 2 :
+              dimension==2 ? -2 : 3
+        for ((d,_),parent) in bindings
+            d==owner || continue
+            _model_occ_contains_shape(kernel,parent,id) && return true
+        end
+        return false
+    end
+    function drop(id)
+        entry=get(kernel.shape_tags,id,nothing)
+        (entry===nothing || entry in gone || id in kept) && return nothing
+        owned(id) && return nothing
+        push!(gone,entry);delete!(bindings,entry)
+        foreach(drop,kernel.shapes[id].children)
+        return nothing
+    end
+    foreach(drop,ids)
+    maxima=zeros(Int,6)
+    for (d,t) in keys(bindings)
+        maxima[d+3]=max(maxima[d+3],t)
+    end
+    for (d,store) in ((0,m.points),(1,m.curves),(2,m.surfaces),
+                      (3,m.volumes),(-1,m.loops),(-2,m.surface_loops))
+        for t in keys(store)
+            ((d,t) in gone || (d,t) in kernel.removed) && continue
+            maxima[d+3]=max(maxima[d+3],t)
+        end
+    end
+    return maxima
+end
+
+# Existing kernel shapes a staged publication re-binds.
+_model_occ_boolean_kept(pub)=Set{UInt64}(id for (_,_,id) in pub.planned
+                                         if haskey(pub.kernel.shapes,id))
+
 # Reuse rule mirroring upstream: an sm entity materialized from a kernel
 # sub-shape that is still bound reuses the binding outright; anything else
 # (modified source, engine-created) gets a fresh tag — modified operands'
@@ -583,21 +633,35 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
         haskey(sm.volumes,t) && (surviving3=max(surviving3,t))
     end
     cursor=collect(kernel.maxima);cursor[6]=surviving3
-    pub=_ModelOCCBooleanPub(caller,kernel,sm,matmap,
-        cursor,kernel.next_shape,
-        Dict{UInt64,_ModelOCCShape}(),Tuple{Int,Int,UInt64}[],
-        Dict{Tuple{Int,Int},UInt64}(),Dict{Tuple{Int,Int},Int}(),
-        Dict{Tuple{Int,Int},Int}())
-    ktagmap=Dict{Int,Int}()
-    for v in out
-        sv=rvmap[v]
-        (haskey(sm.volumes,sv) && needs_publish(sv)) || continue
-        haskey(ktagmap,sv) && continue
-        ktag=desired(sv)
-        ktag==0 && (ktag=_model_occ_boolean_tag!(pub,3))
-        ktagmap[sv]=ktag
-        _model_occ_boolean_solid!(pub,sv,ktag,caller)
+    function stage(cursor)
+        pub=_ModelOCCBooleanPub(caller,kernel,sm,matmap,
+            cursor,kernel.next_shape,
+            Dict{UInt64,_ModelOCCShape}(),Tuple{Int,Int,UInt64}[],
+            Dict{Tuple{Int,Int},UInt64}(),Dict{Tuple{Int,Int},Int}(),
+            Dict{Tuple{Int,Int},Int}())
+        ktagmap=Dict{Int,Int}()
+        for v in out
+            sv=rvmap[v]
+            (haskey(sm.volumes,sv) && needs_publish(sv)) || continue
+            haskey(ktagmap,sv) && continue
+            ktag=desired(sv)
+            ktag==0 && (ktag=_model_occ_boolean_tag!(pub,3))
+            ktagmap[sv]=ktag
+            _model_occ_boolean_solid!(pub,sv,ktag,caller)
+        end
+        return pub,ktagmap
     end
+    pub,ktagmap=stage(copy(cursor))
+    # Which tags the removal frees depends on what the result re-binds, and
+    # that is only known once it is staged: stage again from the surviving
+    # maxima when they differ.
+    base=_model_occ_boolean_free_maxima(m,kernel,
+        UInt64[kernel.bindings[(3,t)] for t in in_tags
+               if !(haskey(sm.volumes,t) && !haskey(sm.booleans,t)) &&
+                  haskey(kernel.bindings,(3,t))],
+        _model_occ_boolean_kept(pub))
+    base[6]=max(base[6],surviving3)
+    base==cursor || ((pub,ktagmap)=stage(base))
     # kernel mutation phase: unbind deleted/rebound operands recursively,
     # then bind the staged shapes — upstream's remove-then-bind order
     for t in in_tags
@@ -2210,16 +2274,28 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
             (top_dim==3 ? "volumes" : "surfaces") *
             " to single tag $requested")
         member=members[1]
-        pub=_ModelOCCBooleanPub(caller,kernel,sm,matmap,
-            collect(kernel.maxima),kernel.next_shape,
-            Dict{UInt64,_ModelOCCShape}(),Tuple{Int,Int,UInt64}[],
-            Dict{Tuple{Int,Int},UInt64}(),Dict{Tuple{Int,Int},Int}(),
-            Dict{Tuple{Int,Int},Int}())
-        if top_dim==3
-            _model_occ_boolean_solid!(pub,member.vtag,requested,caller)
-        else
-            _model_occ_boolean_face!(pub,member.stag,caller,requested)
+        function stage_tagged(cursor)
+            pub=_ModelOCCBooleanPub(caller,kernel,sm,matmap,
+                cursor,kernel.next_shape,
+                Dict{UInt64,_ModelOCCShape}(),Tuple{Int,Int,UInt64}[],
+                Dict{Tuple{Int,Int},UInt64}(),Dict{Tuple{Int,Int},Int}(),
+                Dict{Tuple{Int,Int},Int}())
+            if top_dim==3
+                _model_occ_boolean_solid!(pub,member.vtag,requested,caller)
+            else
+                # the face publisher takes an explicit tag through `desired`
+                pub.desired[(2,member.stag)]=requested
+                _model_occ_boolean_face!(pub,member.stag,caller)
+            end
+            return pub
         end
+        cursor=collect(kernel.maxima)
+        pub=stage_tagged(copy(cursor))
+        base=_model_occ_boolean_free_maxima(m,kernel,
+            UInt64[kernel.bindings[in_dt[i]] for i in 1:N
+                   if rem(i) && haskey(kernel.bindings,in_dt[i])],
+            _model_occ_boolean_kept(pub))
+        base==cursor || (pub=stage_tagged(base))
         for (i,(d,t)) in enumerate(in_dt)
             rem(i) || continue
             id=get(kernel.bindings,(d,t),nothing)
@@ -2297,35 +2373,58 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
         end
     end
     cursor=collect(kernel.maxima)
-    # top-level dims reseed to post-removal maxima; sub-entity (dim 0/1)
-    # cursors stay on the pre-op maximum — shared sub-shapes can survive an
-    # operand unbind through ownership
+    # top-level dims reseed to post-removal maxima
     cursor[5]=surviving[3];cursor[6]=surviving[4]
-    pub=_ModelOCCBooleanPub(caller,kernel,sm,matmap,
-        cursor,kernel.next_shape,
-        Dict{UInt64,_ModelOCCShape}(),Tuple{Int,Int,UInt64}[],
-        Dict{Tuple{Int,Int},UInt64}(),Dict{Tuple{Int,Int},Int}(),
-        Dict{Tuple{Int,Int},Int}())
     # stage result solids in `out` order — fresh tags land in traversal
     # order like upstream's SOLID loop — then free faces. Claimed faces
     # pick up their operand tag inside shell staging through `pub.desired`.
-    for ((dim,st),i) in claim
-        rem(i) && (pub.desired[(dim,st)]=tags[i])
+    function stage_mixed(cursor)
+        pub=_ModelOCCBooleanPub(caller,kernel,sm,matmap,
+            cursor,kernel.next_shape,
+            Dict{UInt64,_ModelOCCShape}(),Tuple{Int,Int,UInt64}[],
+            Dict{Tuple{Int,Int},UInt64}(),Dict{Tuple{Int,Int},Int}(),
+            Dict{Tuple{Int,Int},Int}())
+        for ((dim,st),i) in claim
+            rem(i) && (pub.desired[(dim,st)]=tags[i])
+        end
+        ktag3=Dict{Int,Int}()   # sm vtag -> kernel tag
+        for p in pieces
+            p.pseudo==0 || continue
+            i=get(claim,(3,p.vtag),0)
+            ktag=(i!=0 && rem(i)) ? tags[i] : _model_occ_boolean_tag!(pub,3)
+            ktag3[p.vtag]=ktag
+            _model_occ_boolean_solid!(pub,p.vtag,ktag,caller)
+        end
+        ktag2=Dict{Int,Int}()   # sm stag -> kernel tag for free faces
+        for fe in faces
+            st=fe.stag
+            _model_occ_boolean_face!(pub,st,caller)
+            ktag2[st]=pub.ktags[(2,st)]
+        end
+        return pub,ktag3,ktag2
     end
-    ktag3=Dict{Int,Int}()   # sm vtag -> kernel tag
-    for p in pieces
-        p.pseudo==0 || continue
-        i=get(claim,(3,p.vtag),0)
-        ktag=(i!=0 && rem(i)) ? tags[i] : _model_occ_boolean_tag!(pub,3)
-        ktag3[p.vtag]=ktag
-        _model_occ_boolean_solid!(pub,p.vtag,ktag,caller)
+    pub,ktag3,ktag2=stage_mixed(copy(cursor))
+    # Sub-entity tags continue from what survives the operand removal, and
+    # which shapes survive depends on what the staged result re-binds: stage
+    # again from those maxima when they differ. Operand tags that stay bound
+    # or are reclaimed 1:1 keep counting at their own dimension.
+    base=_model_occ_boolean_free_maxima(m,kernel,
+        UInt64[kernel.bindings[in_dt[i]] for i in 1:N
+               if !preserved[i] && rem(i) && haskey(kernel.bindings,in_dt[i])],
+        _model_occ_boolean_kept(pub))
+    for (i,(d,t)) in enumerate(in_dt)
+        (preserved[i] || !rem(i)) && continue
+        if isvol[i]
+            imgs=Int[pi for pi in vol_image[i] if pieces[pi].pseudo==0]
+            length(imgs)==1 && get(claim,(3,pieces[imgs[1]].vtag),0)==i &&
+                (base[6]=max(base[6],t))
+        else
+            imgs=Int[st for st in face_image[i] if st in fresh_faces]
+            length(imgs)==1 && get(claim,(2,imgs[1]),0)==i &&
+                (base[5]=max(base[5],t))
+        end
     end
-    ktag2=Dict{Int,Int}()   # sm stag -> kernel tag for free faces
-    for fe in faces
-        st=fe.stag
-        _model_occ_boolean_face!(pub,st,caller)
-        ktag2[st]=pub.ktags[(2,st)]
-    end
+    base==cursor || ((pub,ktag3,ktag2)=stage_mixed(base))
     # kernel mutation: unbind removed operands recursively, then bind the
     # staged shapes — upstream's remove-then-bind order. With
     # remove=false modified operands stay bound beside their images.

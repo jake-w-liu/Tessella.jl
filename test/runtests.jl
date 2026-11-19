@@ -283,6 +283,8 @@ include("functional/fixtures.jl")
         "geometry/geo_view_block_test.jl",
         "geometry/geo_occ_conforming_solids_test.jl",
         "interfaces/api_occ_primitive_layout_test.jl",
+        "interfaces/api_occ_boolean_tag_base_test.jl",
+        "geometry/geo_occ_surface_boolean_tag_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
