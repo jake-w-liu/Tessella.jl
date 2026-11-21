@@ -233,19 +233,22 @@ function _higher_assembly_authority(assembly,m,done;ranks=nothing,carrier=nothin
         for (column,position) in enumerate(selected)
             nodes[:,column]=mapping[assembly.cells[position].nodes]
         end
-        push!(blocks,ElementBlock(msh,nodes,Int32[assembly.cells[i].physical for i in selected]))
+        push!(blocks,ElementBlock(Elements._TRUSTED_MIXED_STORAGE,msh,nodes,
+            Int32[assembly.cells[i].physical for i in selected]))
         push!(owners,Int32[assembly.cells[i].owner[2] for i in selected])
         push!(tags,UInt64[assembly.cells[i].tag for i in selected])
     end
     metadata,_=_dim01_entities(m,model_entities(m),assembly,kept)
-    data=Elements._native_mixed_entity_data(metadata;
-        node_entities=[assembly.nodes[row].owner for row in kept],
-        node_parametric=Union{Nothing,Vector{Float64}}[
+    # Every array below was just built for this mesh: hand them over and check
+    # the structure once, instead of copying and checking them three times.
+    mesh=Elements._detached_mixed_mesh(coords,MixedElementBlock[block for block in blocks],
+        Dict{Tuple{Int,Int},String}(),metadata,
+        Tuple{Int,Int32}[assembly.nodes[row].owner for row in kept],
+        Union{Nothing,Vector{Float64}}[
             Model._model_mesh_projected_parameter(assembly.nodes[row].owner,
                 assembly.nodes[row].parameter) for row in kept],
-        external_node_tags=[assembly.nodes[row].tag for row in kept],
-        block_entities=owners,external_element_tags=tags)
-    mesh=MixedMesh(coords,blocks;entity_data=data,elementary_entities=owners)
+        UInt64[assembly.nodes[row].tag for row in kept],
+        Vector{Int32}[copy(block) for block in owners],tags,owners,true)
     rank=ranks===nothing ? UInt64.(kept) :
         UInt64[ranks[assembly.nodes[row].tag] for row in kept]
     return carrier===nothing ? Model._model_mesh_authority(mesh,done;
@@ -2160,6 +2163,7 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                     input=advanced
                 end
                 shared=live!==nothing && live.log!==nothing
+                built=false;certified=false
                 if source_binding!==nothing
                     transfinite_events=source_binding.constructor_mesh===nothing &&
                         isempty(source_binding.element_tags) &&
@@ -2172,24 +2176,37 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                     # view whenever the merge-order product can carry rows the
                     # production did not emit.
                     merged_product=get(input.products,(2,Int32(tag)),nothing)
+                    ordered=source_binding.constructor_mesh!==nothing || transfinite_events ||
+                        metric_surface!==nothing ||
+                        (merged_product!==nothing &&
+                         length(merged_product.rows)!=length(source_binding.node_tags))
                     actual_product=Model._model_mesh_product(input,2,tag;
-                        caller=assembly.caller,
-                        producer_order=source_binding.constructor_mesh!==nothing || transfinite_events ||
-                            metric_surface!==nothing ||
-                            (merged_product!==nothing &&
-                             length(merged_product.rows)!=length(source_binding.node_tags)))
+                        caller=assembly.caller,producer_order=ordered)
                     if transfinite_events
                         constructor=_higher_transfinite_constructor_input(actual_product,
                             assembly.cells[first_cell_event:end],assembly,tag)
                         constructor===nothing || (constructor_inputs[(2,Int32(tag))]=constructor)
                     elseif source_binding.constructor_mesh===nothing
-                        isempty(source_binding.element_tags) ||
-                            (constructor_inputs[(2,Int32(tag))]=Model._model_surface_constructor_input(
-                                source_binding,actual_product,assembly.caller;constructor=mesh))
+                        if !isempty(source_binding.element_tags)
+                            constructor_inputs[(2,Int32(tag))]=Model._model_surface_constructor_input(
+                                source_binding,actual_product,assembly.caller;constructor=mesh)
+                            built=true
+                        end
                     else
                         constructor_inputs[(2,Int32(tag))]=Model._model_surface_constructor_input(
                             source_binding,actual_product,assembly.caller)
+                        built=true
                     end
+                    # Building the input ends with its binding check against
+                    # `actual_product`. The check below compares it with the
+                    # producer-order, first-order view of the same product:
+                    # the same cells, and the same rows when the product is
+                    # linear and both views hold the same row set (the check
+                    # does not depend on row order). Then it is the same check.
+                    rows=get(input.producer_rows,(2,Int32(tag)),nothing)
+                    certified=built && merged_product!==nothing && rows!==nothing &&
+                        all(block->msh_spec(block.msh).order==1,merged_product.blocks) &&
+                        (ordered || issetequal(merged_product.rows,rows))
                 end
                 # Only this Surface's input is new. A caller that passes
                 # `unvalidated_inputs` validates every input once, against
@@ -2202,7 +2219,7 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                     # tables are shared across merges already.
                     input=Model._model_mesh_with_surface_constructor_inputs(input,constructor_inputs;
                         caller=assembly.caller,only=(2,Int32(tag)),shared,
-                        known=shared && live.inputs_known)
+                        known=shared && live.inputs_known,certified=shared && certified)
                     shared && (live.inputs_known=true)
                     # The end of the pass validates every input against its
                     # final authority. Record what this one was validated
@@ -2428,9 +2445,19 @@ function _higher_surface_phase!(assembly,m,options,entities,discarded,done;
     end
     # Each merge validated its own constructor input only; a later merge must
     # not have changed an earlier Surface's product.
+    # Inputs whose merge-time check still stands at the end of the pass. The
+    # plan's publication relabels them one to one; while no row or cell is
+    # edited afterwards it need not prove the binding again.
+    certificate=(constructors=IdDict{Any,Nothing}(),edits=Ref(assembly.edits))
+    for (owner,record) in validated
+        record[1]===get(input.products,owner,nothing) &&
+            record[2]===get(input.producer_rows,owner,nothing) &&
+            record[3]===get(constructor_inputs,owner,nothing) &&
+            (certificate.constructors[record[3]]=nothing)
+    end
     unvalidated_inputs[] && (input=Model._model_mesh_with_surface_constructor_inputs(
         input,constructor_inputs;caller=assembly.caller,validated))
-    return input,scope,retained,volume_forward
+    return input,scope,retained,volume_forward,certificate
 end
 
 function _higher_mesh_periodic_links(mesh,links)
@@ -3570,8 +3597,16 @@ function _higher_surface_constructor_rows(authority,constructors,node_map,caller
     return Model._model_mesh_with_producer_rows(authority,produced;caller)
 end
 
-function _higher_surface_constructor_publication(authority,constructors,cells,node_map,caller)
+# `certified` holds the inputs the Surface pass checked against the cells this
+# plan publishes, with no row or cell edited since. Publication gives each of
+# their nodes and cells its final label, one to one, and
+# `_higher_surface_constructor_rows` has compared every node with the final
+# mesh; such an input is bound without cutting its product and checking the
+# same cells again. An input that lost a row is checked in full.
+function _higher_surface_constructor_publication(authority,constructors,cells,node_map,caller;
+                                                 certified=nothing)
     rebound=Dict{Tuple{Int,Int32},MixedMesh}()
+    trusted=Set{Tuple{Int,Int32}}()
     for (owner,source) in constructors
         constructor=Elements._detached_mixed_copy(source);data=constructor.entity_data
         data!==nothing || throw(ArgumentError(
@@ -3591,6 +3626,8 @@ function _higher_surface_constructor_publication(authority,constructors,cells,no
         end
         allunique(nodes) || throw(ArgumentError(
             "$caller: Surface constructor publication aliases actual node UIDs"))
+        certified!==nothing && haskey(certified,source) &&
+            length(kept_rows)==nnodes(constructor) && push!(trusted,owner)
         if length(kept_rows)!=nnodes(constructor)
             row_map=zeros(Int32,nnodes(constructor))
             row_map[kept_rows]=Int32.(1:length(kept_rows))
@@ -3631,7 +3668,7 @@ function _higher_surface_constructor_publication(authority,constructors,cells,no
         end
         rebound[owner]=constructor
     end
-    return Model._model_mesh_with_surface_constructor_inputs(authority,rebound;caller)
+    return Model._model_mesh_with_surface_constructor_inputs(authority,rebound;caller,trusted)
 end
 
 function _higher_retained_periodic_surface_pairs!(pairs,m,retained,caller;slave_tags=nothing)
@@ -4565,6 +4602,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         _higher_retained_curves!(assembly,m,entities,first_nodes,high_order,done)
     end
     periodic_pairs=Dict{Int,Tuple{Int,Vector{Tuple{UInt64,UInt64}}}}()
+    surface_certificate=nothing
     native_recombine_events=Tuple{Symbol,String}[]
     surface_constructor_inputs=first_order_constructor_inputs
     retained_surfaces=Set(keys(first_order_constructor_inputs))
@@ -4574,7 +4612,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                 push!(discarded,(3,Int32(entity[2])))
         end
         filter!(cell->cell.source_tag===nothing || !(cell.owner in discarded),assembly.cells)
-        _,_,retained_surfaces,volume_forward=Base.inferencebarrier(_higher_surface_phase!)(assembly,m,options,entities,discarded,done;
+        _,_,retained_surfaces,volume_forward,surface_certificate=Base.inferencebarrier(_higher_surface_phase!)(assembly,m,options,entities,discarded,done;
                                size_field,metric_surface,source_nodes=length(high_order),ranks,old_supports=high_order,
                                 geometry_parts=surface_parts,dimension,geometry_cells,
                                 geometry_birth,geometry_alternates,curve_births,periodic_pairs,native_orphan_births,native_recombine_events,
@@ -4702,7 +4740,9 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     if element_order==1 && !isempty(surface_constructor_inputs)
         m.meshing.mesh_authority=_higher_surface_constructor_publication(
             m.meshing.mesh_authority,surface_constructor_inputs,constructor_cells,
-            plan.node_tag_map,caller)
+            plan.node_tag_map,caller;
+            certified=surface_certificate!==nothing &&
+                surface_certificate.edits[]==assembly.edits ? surface_certificate.constructors : nothing)
     end
     if emitted_parts!==nothing && any(emitted_parts) do part
             part[1]==3 || return false

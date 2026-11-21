@@ -632,7 +632,7 @@ end
 
 function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthority,inputs;
         caller="Surface constructor input",only=nothing,shared::Bool=false,known::Bool=false,
-        validated=nothing)
+        validated=nothing,certified::Bool=false,trusted=nothing)
     if shared
         # An authority taken from a log already shares its entity tables across
         # appends, so the pass's own table is bound as it is instead of being
@@ -643,7 +643,9 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
         for (owner,constructor) in (known ? (haskey(inputs,only) ? (only=>inputs[only],) : ()) : inputs)
             owner[1]==2 && haskey(authority.products,owner) || throw(ArgumentError(
                 "$caller: Surface constructor input refers to absent actual entity $owner"))
-            if owner==only
+            # `certified`: the caller built this input from the same product
+            # view a moment ago, and that construction ends with this check.
+            if owner==only && !certified
                 actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
                     producer_order=true,first_order=true)
                 _model_surface_constructor_binding(actual,constructor,caller)
@@ -669,8 +671,10 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
         # objects the log has only been appended to since, so the product view
         # and the check's answer are the same too.
         record=validated===nothing ? nothing : get(validated,owner,nothing)
-        if (only===nothing || owner==only) && !(record!==nothing &&
-                record[1]===authority.products[owner] &&
+        # `trusted` names owners whose binding the caller carries over from
+        # an earlier check of the same cells under a one-to-one relabelling.
+        if (only===nothing || owner==only) && !(trusted!==nothing && owner in trusted) &&
+                !(record!==nothing && record[1]===authority.products[owner] &&
                 record[2]===get(authority.producer_rows,owner,nothing) && record[3]===constructor)
             actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
                 producer_order=true,first_order=true)

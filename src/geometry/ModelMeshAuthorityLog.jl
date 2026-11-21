@@ -84,6 +84,9 @@ mutable struct _ModelMeshLog
     done::Set{Tuple{Int,Int32}}
     native_inputs::Dict{Tuple{Int,Int32},Union{Mesh,MixedMesh}}
     producer_rows::Dict{Tuple{Int,Int32},Vector{Int32}}
+    # Zeroed row table, one entry per row of capacity, in which a touched
+    # entity's product is numbered without a set and a dictionary of its own.
+    work::Vector{Int32}
 end
 
 # Counts of full seeds and incremental appends, for tests of the scaling
@@ -175,7 +178,7 @@ function _model_mesh_log(authority::_ModelMeshAuthority;caller="mesh authority")
         cell_bindings,block_index,element_tags,data.entities,owned,selected,
         Tuple{Int,Int32}[],Set{Tuple{Int,Int32}}(),copy(authority.products),
         copy(authority.done),Dict{Tuple{Int,Int32},Union{Mesh,MixedMesh}}(),
-        copy(authority.producer_rows))
+        copy(authority.producer_rows),zeros(Int32,capacity))
 end
 
 function _model_mesh_log_grow_nodes!(log::_ModelMeshLog,needed::Int)
@@ -187,6 +190,7 @@ function _model_mesh_log_grow_nodes!(log::_ModelMeshLog,needed::Int)
     log.node_tags=_model_mesh_reserve(log.node_tags,used,capacity)
     log.rank=_model_mesh_reserve(log.rank,used,capacity)
     log.carrier_rows=_model_mesh_row_numbers(capacity)
+    log.work=zeros(Int32,capacity)
     return nothing
 end
 
@@ -389,7 +393,7 @@ function _model_mesh_log_authority!(log::_ModelMeshLog,done,completed=nothing)
     rank=_model_mesh_prefix(log.rank,(log.nodes,))
     for owner in log.touched
         log.products[owner]=_model_mesh_owner_product(mesh,owner,
-            get(log.owned,owner,Int32[]),log.selected[owner],rank,log.caller)
+            get(log.owned,owner,Int32[]),log.selected[owner],rank,log.caller;work=log.work)
     end
     empty!(log.touched);empty!(log.touched_set)
     bindings=Vector{Union{Nothing,UInt64}}[

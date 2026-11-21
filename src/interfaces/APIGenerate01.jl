@@ -1633,11 +1633,14 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
     projected_parameters=Union{Nothing,Vector{Float64}}[
         Model._model_mesh_projected_parameter(owner,value)
         for (owner,value) in zip(node_entities,node_parameters)]
-    data=Elements._native_mixed_entity_data(metadata;node_entities=node_entities,
-        node_parametric=projected_parameters,external_node_tags=node_tags,
-        block_entities=block_owners,external_element_tags=external_cells)
-    mesh=MixedMesh(coords,blocks;physical_names=m.physical_names,entity_data=data,
-                   elementary_entities=block_owners)
+    # The arrays were built for this mesh. Those the classification below
+    # also keeps are copied once; the rest are handed over, and the structure
+    # is checked once instead of at each of three copies.
+    mesh=Elements._detached_mixed_mesh(coords,MixedElementBlock[block for block in blocks],
+        m.physical_names,metadata,copy(node_entities),projected_parameters,copy(node_tags),
+        Vector{Int32}[copy(block) for block in block_owners],external_cells,
+        Vector{Int32}[copy(block) for block in block_owners],true)
+    data=mesh.entity_data
     classified_entities=Tuple{Int,Int32}[(dim,Int32(tag)) for (dim,tag) in entities]
     primary=isempty(classified_entities) ? (0,Int32(0)) : classified_entities[end]
     class=_mixed_classification(mesh,primary,classified_entities,node_entities,boundaries,owners;
