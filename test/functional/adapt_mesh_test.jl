@@ -3,6 +3,9 @@
 # edge collapse, embedded-boundary-protected quality swaps — exercising the
 # actual authority carrier, entity ownership and physical-tag transport.
 
+using Test
+using Tessella
+
 const _ADAPT_BOX_GEO = """
 lc = 1.3;
 Point(1) = {0,0,0,lc}; Point(2) = {1,0,0,lc}; Point(3) = {1,1,0,lc}; Point(4) = {0,1,0,lc};

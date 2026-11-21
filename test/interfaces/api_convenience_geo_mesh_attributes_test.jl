@@ -59,6 +59,10 @@ end
 end
 end
 
+# This testset sits outside the module above; it needs its own imports to run
+# as a standalone file.
+using Tessella, Test
+
 @testset "immediate factories preserve live removal and pending GEO boundaries" begin
     A=Tessella.API
     A.finalize();A.initialize()

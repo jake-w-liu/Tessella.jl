@@ -5,6 +5,9 @@
 # file's memberships, points/curves keep the model's) and a failed match
 # leaves the model and mesh untouched.
 
+using Test
+using Tessella
+
 function _match_box_geo(lc=1.5)
     return """
 lc = $lc;
