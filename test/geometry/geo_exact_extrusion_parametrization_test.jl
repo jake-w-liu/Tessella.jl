@@ -17,6 +17,11 @@ out[]=Extrude{{0,0,0.2},{0,0,1},{0.15,0.15,0},Pi/2}{Surface{1};Layers{3};Recombi
 c[]=Extrude{{0,1,0},{0.6,0,0},Pi/2}{Curve{2};Layers{2};};
 """
 
+# Inverted parameters come out of a Newton iteration. They are Gmsh's bit for
+# bit on x86-64, where these values were taken; another processor's arithmetic
+# (fused multiply-add on ARM) moves their last digits.
+_same_parameters(a,b)=Sys.ARCH===:x86_64 ? a==b : isapprox(a,b;atol=1e-12,rtol=0)
+
 _point_allocations(m,surface)=
     @allocated Tessella.Model._ruled_surface_point(m,surface,0.3,0.4,"test")
 
@@ -38,13 +43,13 @@ _point_allocations(m,surface)=
             @test tags==[49,50]
             @test coords==[0.22499999999967005,0.020096189432143696,0.06666666666666667,
                            0.27990381056747526,0.07499999999967005,0.13333333333333333]
-            @test params==[0.49999999999873,0.3333333333333333,
-                           0.49999999999873007,0.6666666666666666]
-            @test A.mesh.get_nodes(2,21,false,true)[3]==
+            @test _same_parameters(params,[0.49999999999873,0.3333333333333333,
+                                           0.49999999999873007,0.6666666666666666])
+            @test _same_parameters(A.mesh.get_nodes(2,21,false,true)[3],
                 [0.4999999999987167,0.33333333333333337,
-                 0.4999999999987168,0.6666666666666666]
-            @test A.mesh.get_nodes(2,30,false,true)[3]==[0.5,0.5]
-            @test A.model.get_parametrization(2,13,coords[1:3])==params[1:2]
+                 0.4999999999987168,0.6666666666666666])
+            @test _same_parameters(A.mesh.get_nodes(2,30,false,true)[3],[0.5,0.5])
+            @test _same_parameters(A.model.get_parametrization(2,13,coords[1:3]),params[1:2])
             if Base.JLOptions().compile_enabled==1
                 # A swept point, as the transfinite grid asks per node.
                 A._with_model() do m

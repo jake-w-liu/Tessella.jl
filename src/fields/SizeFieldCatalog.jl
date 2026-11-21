@@ -92,16 +92,22 @@ end
     return matrix,vectors,true
 end
 
-@inline _jacobi_sweeps(A,V,::Val{0})=(A,V)
-@inline function _jacobi_sweeps(A,V,::Val{N}) where {N}
-    A,V,c12=_jacobi12(A,V)
-    A,V,c13=_jacobi13(A,V)
-    A,V,c23=_jacobi23(A,V)
-    (c12||c13||c23) || return A,V
-    return _jacobi_sweeps(A,V,Val(N-1))
+# At most `sweeps` cyclic Jacobi sweeps, stopping after the first that rotates
+# nothing. One compiled copy serves every caller: the solver is a few hundred
+# floating-point operations, so a call costs nothing beside it, while a copy
+# inlined at each of the dozen uses per metric intersection made single
+# functions with megabytes of compiler data.
+function _jacobi_sweeps(A::NTuple{6,Float64},V::NTuple{9,Float64},sweeps::Int)
+    for _ in 1:sweeps
+        A,V,c12=_jacobi12(A,V)
+        A,V,c13=_jacobi13(A,V)
+        A,V,c23=_jacobi23(A,V)
+        (c12||c13||c23) || break
+    end
+    return A,V
 end
 
-@inline function _sym3_eigh(a11,a22,a33,a12,a13,a23)
+@noinline function _sym3_eigh(a11,a22,a33,a12,a13,a23)
     if a12==0 && a13==0 && a23==0
         return ((Float64(a11),Float64(a22),Float64(a33)),
                 ((1.0,0.0,0.0),(0.0,1.0,0.0),(0.0,0.0,1.0)))
@@ -113,7 +119,7 @@ end
     A=(Float64(a11/scale),Float64(a22/scale),Float64(a33/scale),
        Float64(a12/scale),Float64(a13/scale),Float64(a23/scale))
     V=(1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0)
-    A,V=_jacobi_sweeps(A,V,Val(12))
+    A,V=_jacobi_sweeps(A,V,12)
     values=(scale*A[1],scale*A[2],scale*A[3])
     spectral=max(abs(values[1]),abs(values[2]),abs(values[3]))
     if spectral>0 && minimum(abs,values)<=4096eps(Float64)*spectral
@@ -389,7 +395,7 @@ Return the symmetric-positive-definite metric intersection obtained by a
 generalized eigendecomposition. The result is independently certifiable in the
 Loewner order: it dominates both input metrics in every direction.
 """
-@inline function intersection_alauzet(m1::Metric3, m2::Metric3)
+function intersection_alauzet(m1::Metric3, m2::Metric3)
     m1==m2 && return m1
     # Avoid rebuilding a metric only after a guarded or exact certificate. A
     # bare floating generalized ratio of one can be a false positive for a
@@ -425,7 +431,7 @@ Loewner order: it dominates both input metrics in every direction.
     return _inflate_to_dominate(result::Metric3,m1,m2)
 end
 
-@inline function _intersection_alauzet_core(m1::Metric3,m2::Metric3)
+function _intersection_alauzet_core(m1::Metric3,m2::Metric3)
     l11,l21,l22,l31,l32,l33=_metric_cholesky_components(
         m1.m11,m1.m22,m1.m33,m1.m12,m1.m13,m1.m23)::NTuple{6,Float64}
     invL=(inv(l11),0.0,0.0,
@@ -500,7 +506,7 @@ end
     return diagonal>=factor*off
 end
 
-@inline function _metric_generalized_min(a::Metric3,b::Metric3)
+function _metric_generalized_min(a::Metric3,b::Metric3)
     l11,l21,l22,l31,l32,l33=_metric_cholesky_components(
         b.m11,b.m22,b.m33,b.m12,b.m13,b.m23)::NTuple{6,Float64}
     invL=(inv(l11),0.0,0.0,
@@ -521,7 +527,7 @@ end
 # this behavior private to field scalar overloads that require exact 4.15.2
 # parity; the public Alauzet helper retains Tessella's certified Loewner-upper
 # contract.
-@inline function _gmsh_metric_intersection_core(m1::Metric3,m2::Metric3,
+function _gmsh_metric_intersection_core(m1::Metric3,m2::Metric3,
                                                 proportional_shortcut::Bool)
     chol=_metric_cholesky_components(
         m1.m11,m1.m22,m1.m33,m1.m12,m1.m13,m1.m23)
@@ -557,7 +563,7 @@ end
     end
 end
 
-@inline function _gmsh_metric_intersection_impl(m1::Metric3,m2::Metric3,
+function _gmsh_metric_intersection_impl(m1::Metric3,m2::Metric3,
                                                 proportional_shortcut::Bool)
     scale=max(abs(m1.m11),abs(m1.m22),abs(m1.m33),abs(m1.m12),abs(m1.m13),abs(m1.m23),
               abs(m2.m11),abs(m2.m22),abs(m2.m33),abs(m2.m12),abs(m2.m13),abs(m2.m23))
@@ -636,7 +642,7 @@ end
 # IEEE-dyadic value after a common power-of-two normalization; accepting the
 # lower bounds of all seven principal minors therefore cannot produce a false
 # Loewner-dominance result.
-@inline function _metric_interval_dominates(candidate::Metric3,input::Metric3)
+function _metric_interval_dominates(candidate::Metric3,input::Metric3)
     scale=max(abs(candidate.m11),abs(candidate.m22),abs(candidate.m33),
               abs(candidate.m12),abs(candidate.m13),abs(candidate.m23),
               abs(input.m11),abs(input.m22),abs(input.m33),
@@ -994,7 +1000,7 @@ function _metric_boundary_upper(candidate::Union{Nothing,Metric3},a::Metric3,b::
         "intersection_alauzet: unable to certify a common upper metric at the Float64 range boundary"))
 end
 
-@inline function _inflate_to_dominate(candidate::Metric3,a::Metric3,b::Metric3)
+function _inflate_to_dominate(candidate::Metric3,a::Metric3,b::Metric3)
     guard=64sqrt(eps(Float64))
     for _ in 1:6
         (_metric_interval_dominates(candidate,a) &&

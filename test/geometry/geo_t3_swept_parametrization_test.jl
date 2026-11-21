@@ -28,6 +28,11 @@ out[] = Extrude { {-2*h,0,0}, {1,0,0} , {0,0.15,0.25} , Pi/2 } {
 };
 """
 
+# Inverted parameters come out of a Newton iteration. They are Gmsh's bit for
+# bit on x86-64, where these values were taken; another processor's arithmetic
+# (fused multiply-add on ARM) moves their last digits.
+_same_parameters(a,b)=Sys.ARCH===:x86_64 ? a==b : isapprox(a,b;atol=1e-12,rtol=0)
+
 _node(tags,coords,params,tag)=begin
     i=findfirst(==(tag),tags)
     (coords[3i-2:3i],params[2i-1:2i])
@@ -57,7 +62,9 @@ end
             for (surface,(tag,xyz,uv)) in expected
                 tags,coords,params=A.mesh.get_nodes(2,surface,false,true)
                 @test length(tags)==(surface==37 ? 174 : 261)
-                @test _node(tags,coords,params,tag)==(xyz,uv)
+                node_xyz,node_uv=_node(tags,coords,params,tag)
+                @test node_xyz==xyz
+                @test _same_parameters(node_uv,uv)
             end
         end
     finally
