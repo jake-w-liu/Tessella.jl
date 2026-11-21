@@ -158,10 +158,71 @@ function _gopt_connect!(state,indices)
     return nothing
 end
 
-# The same bonds as the hashed pass above. The sort is stable, so the owners
-# of a face stay in the order the cells were given, and each later owner
-# bonds with the first, exactly as the hashed pass leaves them.
+# The same bonds as the hashed pass above, from sorted faces. The owners of a
+# face must stay in the order the cells were given (each later owner bonds
+# with the first, exactly as the hashed pass leaves them), so the sort has to
+# be stable. Faces are dealt into one bucket per lowest vertex by counting,
+# which keeps that order, and each bucket (about twenty faces) is put in order
+# by a stable insertion sort on its two remaining vertices: no comparison of
+# triples and no merge buffer for the whole mesh.
 function _gopt_connect_sorted!(state,indices::AbstractUnitRange)
+    nv=size(state.coords,2)
+    (isempty(indices) || last(indices)>=(1<<29)) &&
+        return _gopt_connect_merge_sorted!(state,indices)
+    embedded=!isempty(state.embedded_faces)
+    stop=zeros(Int32,nv+2)
+    @inbounds for index in indices
+        cell=state.cells[index]
+        cell.deleted && continue
+        for face in 1:4
+            key=_gopt_face(cell.vertices,face)
+            embedded && key in state.embedded_faces && continue
+            (0<key[1]<=nv) || return _gopt_connect_merge_sorted!(state,indices)
+            stop[key[1]+2]+=Int32(1)
+        end
+    end
+    @inbounds for vertex in 1:nv
+        stop[vertex+2]+=stop[vertex+1]
+    end
+    total=Int(stop[nv+2])
+    rest=Vector{UInt64}(undef,total)     # (middle, largest) vertex of a face
+    who=Vector{Int32}(undef,total)       # 4*cell + face - 1
+    @inbounds for index in indices
+        cell=state.cells[index]
+        cell.deleted && continue
+        for face in 1:4
+            key=_gopt_face(cell.vertices,face)
+            embedded && key in state.embedded_faces && continue
+            position=(stop[key[1]+1]+=Int32(1))
+            rest[position]=(UInt64(key[2])<<32)|UInt64(key[3])
+            who[position]=(Int32(index)<<2)|Int32(face-1)
+        end
+    end
+    # After the fill, bucket `vertex` spans `stop[vertex]+1 : stop[vertex+1]`.
+    @inbounds for vertex in 1:nv
+        first=Int(stop[vertex])+1;last_=Int(stop[vertex+1])
+        first<last_ || continue
+        _sort_face_bucket!(rest,who,first,last_)
+        position=first
+        while position<=last_
+            next=position+1
+            head=who[position]
+            while next<=last_ && rest[next]==rest[position]
+                other=who[next]
+                head_cell=head>>2;other_cell=other>>2
+                first_owner=state.cells[head_cell];later_owner=state.cells[other_cell]
+                first_owner.neighbors=Base.setindex(first_owner.neighbors,other_cell,Int(head&Int32(3))+1)
+                later_owner.neighbors=Base.setindex(later_owner.neighbors,head_cell,Int(other&Int32(3))+1)
+                next+=1
+            end
+            position=next
+        end
+    end
+    return nothing
+end
+
+# The plain stable sort, for complexes the bucket pass does not take.
+function _gopt_connect_merge_sorted!(state,indices::AbstractUnitRange)
     records=Vector{Tuple{NTuple{3,Int32},Int32,Int8}}()
     sizehint!(records,4*length(indices))
     for index in indices

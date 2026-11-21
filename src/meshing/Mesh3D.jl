@@ -22,7 +22,7 @@ module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle3_sos, orient2
 using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, boundary_faces, tet_signed_volume, _pinch_link_chi,
-                   _tet_tables, _tet_tables_faces!
+                   _tet_tables, _tet_tables_faces!, _sort_face_bucket!
 using ..Elements: MixedMesh, ElementBlock,
                   _VOLUME_CELL_EDGES, _VOLUME_CELL_FACES
 using ..Mesh2D: constrained_delaunay, to_mesh
