@@ -13,12 +13,26 @@ mutable struct _GmshCurveIntegrationPoints <: AbstractVector{_IntegrationPoint}
     closed::Bool
 end
 
+# A Curve is integrated, read and closed before the next one begins, so one
+# in-memory table per task serves every Curve of a pass. Closing a store hands
+# its table back; opening one takes it. A store opened while another is still
+# open finds nothing to take and allocates its own.
+const _GMSH_CURVE_POINT_TABLE_KEY=:tessella_gmsh_curve_point_table
+const _GMSH_CURVE_POINT_TABLE_KEEP=1<<16
+const _GMSH_CURVE_NO_POINTS=_IntegrationPoint[]
+
 function _gmsh_curve_point_store(memory_limit::Int=_DEFAULT_MAX_INTEGRATION_POINTS)
     2<=memory_limit<=_GMSH_CURVE_INTEGRATION_CAPACITY || throw(ArgumentError(
         "native Curve integration memory capacity is out of range"))
-    memory=_IntegrationPoint[]
-    sizehint!(memory,min(memory_limit,257))
-    return _GmshCurveIntegrationPoints(memory,_IntegrationPoint[],nothing,"",0,memory_limit,false)
+    storage=task_local_storage()
+    kept=get(storage,_GMSH_CURVE_POINT_TABLE_KEY,nothing)
+    memory=if kept isa Vector{_IntegrationPoint}
+        delete!(storage,_GMSH_CURVE_POINT_TABLE_KEY)
+        empty!(kept)
+    else
+        sizehint!(_IntegrationPoint[],min(memory_limit,257))
+    end
+    return _GmshCurveIntegrationPoints(memory,_GMSH_CURVE_NO_POINTS,nothing,"",0,memory_limit,false)
 end
 
 Base.IndexStyle(::Type{_GmshCurveIntegrationPoints})=IndexLinear()
@@ -91,7 +105,7 @@ function _gmsh_curve_close_points!(points::_GmshCurveIntegrationPoints)
         # Mmap attaches the unmap/handle finalizer to Array's Memory on both
         # supported Julia versions. Run it before closing/deleting on Windows.
         Base.finalize(points.mapping.ref.mem)
-        points.mapping=_IntegrationPoint[]
+        points.mapping=_GMSH_CURVE_NO_POINTS
     end
     if points.stream!==nothing
         close(points.stream)
@@ -101,8 +115,12 @@ function _gmsh_curve_close_points!(points::_GmshCurveIntegrationPoints)
         rm(points.path;force=true)
         points.path=""
     end
-    points.memory=_IntegrationPoint[]
+    memory=points.memory
+    points.memory=_GMSH_CURVE_NO_POINTS
     points.count=0
+    # A table that grew far beyond an ordinary Curve is not worth pinning.
+    memory===_GMSH_CURVE_NO_POINTS || length(memory)>_GMSH_CURVE_POINT_TABLE_KEEP ||
+        (task_local_storage()[_GMSH_CURVE_POINT_TABLE_KEY]=memory)
     return nothing
 end
 

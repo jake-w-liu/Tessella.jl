@@ -464,12 +464,12 @@ end
 function _model_vertex_bgm(m::GeoModel,point::Int,xyz,
                            options::_ModelMesh1DOptions,caller::AbstractString;
                            _native_producer::Bool=false)
-    l1=options.from_points ? _model_vertex_l1(m,point,options.ctx_lc;_native_producer) :
+    l1::Float64=options.from_points ? _model_vertex_l1(m,point,options.ctx_lc;_native_producer) :
         GMSH_MAX_SIZE
-    l2=_model_vertex_l2(m,point,options.from_curvature;_native_producer=_native_producer)
-    l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
+    l2::Float64=_model_vertex_l2(m,point,options.from_curvature;_native_producer=_native_producer)
+    l3::Float64=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(0,point))
-    lc=min(l1,l2,l3,GMSH_MAX_SIZE)
+    lc::Float64=min(l1,l2,l3,GMSH_MAX_SIZE)
     if options.callback!==nothing
         lc=_apply_size_callback(options.callback,0,point,xyz[1],xyz[2],
                                 xyz[3],lc,caller)
@@ -520,7 +520,10 @@ function _model_curve_bgm(context::_ModelCurveSizeContext,m::GeoModel,
                           t1::Float64,options::_ModelMesh1DOptions,
                           caller::AbstractString;_native_producer::Bool=false,
                           _native_geometry=nothing)
-    l1=if !options.from_points
+    # The field and the callback are stored untyped. Left untyped here, their
+    # values make every later operation of this function, and of the
+    # integrand that calls it at each sample, a dynamic call on boxed numbers.
+    l1::Float64=if !options.from_points
         GMSH_MAX_SIZE
     elseif context.lc1>=GMSH_MAX_SIZE && context.lc2>=GMSH_MAX_SIZE
         _native_producer ? options.ctx_lc*0.1 : options.ctx_lc/10
@@ -528,14 +531,14 @@ function _model_curve_bgm(context::_ModelCurveSizeContext,m::GeoModel,
         alpha=t1==t0 ? 0.0 : (u-t0)/(t1-t0)
         (1-alpha)*context.lc1 + alpha*context.lc2
     end
-    l2=options.from_curvature>0 ?
+    l2::Float64=options.from_curvature>0 ?
         _model_curve_l2(m,curve,u,options.from_curvature;
             _native_producer=_native_producer,_native_geometry=_native_geometry) :
         GMSH_MAX_SIZE
-    l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
+    l3::Float64=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(1,curve))
-    l5=context.parametric_sizes ? _model_curve_l5(m,curve,u,caller) : GMSH_MAX_SIZE
-    lc=min(l1,l2,l3,GMSH_MAX_SIZE,l5)
+    l5::Float64=context.parametric_sizes ? _model_curve_l5(m,curve,u,caller) : GMSH_MAX_SIZE
+    lc::Float64=min(l1,l2,l3,GMSH_MAX_SIZE,l5)
     if options.callback!==nothing
         lc=_apply_size_callback(options.callback,1,curve,xyz[1],xyz[2],
                                 xyz[3],lc,caller)
@@ -1630,10 +1633,10 @@ function _model_discrete_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,
                 (1-alpha)*lc1+alpha*lc2
             end
     end
-    l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
+    l3::Float64=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(1,curve))
-    l5=_model_curve_l5(m,curve,u,caller)
-    lc=min(l1,l3,GMSH_MAX_SIZE,l5)
+    l5::Float64=_model_curve_l5(m,curve,u,caller)
+    lc::Float64=min(l1,l3,GMSH_MAX_SIZE,l5)
     if options.callback!==nothing
         lc=_apply_size_callback(options.callback,1,curve,xyz[1],xyz[2],
                                 xyz[3],lc,caller)
