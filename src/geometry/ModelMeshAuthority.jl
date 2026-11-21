@@ -142,25 +142,85 @@ function _model_mesh_rebound_cell_tags(previous,element_tag_map=nothing)
         for tag in tags] for tags in previous.carrier_cells]
 end
 
+# Where the cell with each label sits in `mesh`, as block<<32|column, over the
+# blocks `_model_mesh_primary_catalog` lists (a repeated label keeps its last
+# cell, as that catalog does). Labels are dense after a renumbering, so the
+# table is a vector unless they are sparse; no key and no node vector is made
+# per cell.
+function _model_mesh_cell_positions(mesh::MixedMesh)
+    data=mesh.entity_data
+    highest=UInt64(0);lowest=typemax(UInt64);total=0
+    for (bi,block) in enumerate(mesh.blocks)
+        block isa ElementBlock && _msh_primary_nodes(msh_family(block.msh))!=0 || continue
+        labels=data.external_element_tags[bi]
+        for column in axes(block.nodes,2)
+            highest=max(highest,labels[column]);lowest=min(lowest,labels[column])
+        end
+        total+=size(block.nodes,2)
+    end
+    dense=total>0 && lowest>0 && highest<=UInt64(4)*UInt64(total)+UInt64(1024)
+    table=zeros(UInt64,dense ? Int(highest) : 0)
+    sparse=Dict{UInt64,UInt64}()
+    for (bi,block) in enumerate(mesh.blocks)
+        block isa ElementBlock && _msh_primary_nodes(msh_family(block.msh))!=0 || continue
+        labels=data.external_element_tags[bi]
+        for column in axes(block.nodes,2)
+            packed=(UInt64(bi)<<32)|UInt64(column)
+            if dense
+                table[labels[column]]=packed
+            else
+                sparse[labels[column]]=packed
+            end
+        end
+    end
+    return table,sparse,dense
+end
+
+# One carrier block of `_model_mesh_refined_cell_tags`: `false` when a parent
+# is not the actual cell of its label on the same rows in the same order.
+function _model_mesh_refined_block_tags!(tags::Vector{Union{Nothing,UInt64}},
+        sources::AbstractVector,cells::AbstractMatrix{<:Integer},rows::AbstractVector{<:Integer},
+        mesh::MixedMesh,table::Vector{UInt64},sparse::Dict{UInt64,UInt64},dense::Bool,
+        produced_by,children::Int,caller)
+    for parent in axes(cells,2)
+        source=sources[parent]
+        source===nothing && return false
+        packed=dense ? (0<source<=length(table) ? table[source] : UInt64(0)) :
+            get(sparse,source,UInt64(0))
+        packed==0 && return false
+        block=mesh.blocks[Int(packed>>32)]::ElementBlock
+        column=Int(packed&0xffffffff)
+        width=_msh_primary_nodes(msh_family(block.msh))
+        nodes=block.nodes
+        width==size(cells,1) || return false
+        for slot in 1:width
+            nodes[slot,column]==rows[cells[slot,parent]] || return false
+        end
+        produced=get(produced_by,source,nothing)
+        produced!==nothing && length(produced)==children || throw(ArgumentError(
+            "$caller: refined carrier parent lacks its actual child events"))
+        append!(tags,produced)
+    end
+    return true
+end
+
+# The labels of a refined carrier's cells: each parent's child labels, parent
+# after parent, when every parent is the actual cell of its label. A parent is
+# found through a table from label to cell position and compared in place;
+# the catalog of the whole previous mesh this used to build (a key, three
+# vectors and two table entries per cell) cost more than the labels.
 function _model_mesh_refined_cell_tags(plan,previous;caller="mesh refinement")
     isempty(previous.carrier_cells) && return Vector{Union{Nothing,UInt64}}[]
     previous.carrier isa Mesh && hasproperty(plan,:refine_cell_tags) || return Vector{Union{Nothing,UInt64}}[]
-    catalog,_=_model_mesh_primary_catalog(previous.mesh)
+    table,sparse,dense=_model_mesh_cell_positions(previous.mesh)
     output=Vector{Union{Nothing,UInt64}}[]
     for (bi,(msh,cells)) in enumerate(_model_mesh_carrier_blocks(previous.carrier))
         children=msh==1 ? 2 : msh==2 ? 4 : 8
         tags=Union{Nothing,UInt64}[];sizehint!(tags,Base.checked_mul(children,size(cells,2)))
-        for parent in axes(cells,2)
-            source=previous.carrier_cells[bi][parent]
-            source===nothing && return Vector{Union{Nothing,UInt64}}[]
-            actual=get(catalog,source,nothing)
-            actual!==nothing && actual[2]==previous.carrier_rows[cells[:,parent]] ||
-                return Vector{Union{Nothing,UInt64}}[] # A proxy/permuted parent needs its own child trace.
-            produced=get(plan.refine_cell_tags,source,nothing)
-            produced!==nothing && length(produced)==children || throw(ArgumentError(
-                "$caller: refined carrier parent lacks its actual child events"))
-            append!(tags,produced)
-        end
+        # A proxy/permuted parent needs its own child trace.
+        _model_mesh_refined_block_tags!(tags,previous.carrier_cells[bi],cells,previous.carrier_rows,
+            previous.mesh,table,sparse,dense,plan.refine_cell_tags,children,caller) ||
+            return Vector{Union{Nothing,UInt64}}[]
         push!(output,tags)
     end
     return output
