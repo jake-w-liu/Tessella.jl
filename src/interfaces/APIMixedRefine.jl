@@ -492,11 +492,11 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
                 ntuple(axis->quadratic.coords[axis,position],3),
                 quadclass.node_entities[position],quadclass.node_parametric[position])
         end
-        for block in blocks,column in axes(block.nodes,2)
-            _dim01_add_cell!(assembly,block.msh,
-                (Int(msh_dimension(block.msh)),owners[block.msh][column]),
-                @view(block.nodes[:,column]),external[block.msh][column];
-                physical=block.tags[column])
+        # Whole blocks of children: no object and no node vector per cell.
+        columns=_Dim01CellColumns()
+        for block in blocks
+            _dim01_add_cell_block!(columns,assembly,block.msh,block.nodes,owners[block.msh],
+                external[block.msh],block.tags)
         end
         periodic_parent_receipt=any(link->link.dim==2,quadratic.periodic_links) ?
             _surface_periodic_refine_receipt(quadratic,quadclass,blocks,owners,external,caller) : nothing
@@ -507,7 +507,7 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
             Set{Tuple{Int,Int32}}(),falses(length(assembly.nodes)),
             renumber,true;save_all,curve_parameter_order=true,
             source_mesh=quadratic,source_node_positions=Int32.(1:nnodes(quadratic)),
-            periodic_parent_receipt,periodic_uid_operation=:refine)
+            periodic_parent_receipt,periodic_uid_operation=:refine,cells=columns)
         # The parent mesh was validated on entry and every child was certified
         # against its parent's orientation above: the result is not validated
         # a second time.
