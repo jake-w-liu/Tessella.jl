@@ -220,6 +220,7 @@ include("functional/fixtures.jl")
         "interfaces/api_geo_view_transport_test.jl",
         "interfaces/cli_meshadapt_view_frontend_test.jl",
         "interfaces/msh_import_identity_test.jl",
+        "interfaces/msh_import_derived_lazily_test.jl",
         "interfaces/msh2_type_order_test.jl",
         "interfaces/msh_open_gmsh_parity_test.jl",
         "interfaces/io_gmsh_format_parity_test.jl",

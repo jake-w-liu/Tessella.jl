@@ -294,11 +294,12 @@ function _geo_import_element_lookup!(context,incoming,identities)
         filter!(pair->first(pair)<=maximum_tag,vector)
     end
     bindings=dense ? vector : map
-    for (block,tags,owners) in zip(incoming.blocks,identities.element_tags,data.block_entities),
-            column in eachindex(tags)
-        uid=tags[column]
-        get!(bindings,uid) do
-            (Int32(block.msh),msh_dimension(block.msh),Int(owners[column]))
+    sizehint!(bindings,length(bindings)+count)
+    for (block,tags,owners) in zip(incoming.blocks,identities.element_tags,data.block_entities)
+        family=Int32(block.msh);dimension=msh_dimension(block.msh)
+        @inbounds for column in eachindex(tags)
+            # `get!` keeps the first binding of a repeated UID (no closure here).
+            get!(bindings,tags[column],(family,dimension,Int(owners[column])))
         end
     end
     node_vector=copy(receipt.node_vector);node_map=copy(receipt.node_map)
@@ -476,6 +477,136 @@ _geo_mesh_switch_tags(context)=
 
 const _IMPORT_MSH2_PARTITIONS=Ref{Any}(nothing)
 
+# Switch for tests: false forces the general `_geo_merge_discrete!`.
+const _IMPORT_FAST_MERGE=Ref(true)
+
+# `_geo_merge_discrete!` for the common import: an MSH4-style mesh (entity
+# metadata present) into a model without discrete entities. Same records as the
+# general function, built from counting sorts and a node-owner table instead of
+# a Dict entry and a tuple per cell and per node reference. Returns false (and
+# changes nothing) when a precondition fails; the caller then runs the general
+# function.
+function _geo_merge_discrete_import!(m::GeoModel,mixed::MixedMesh,caller::AbstractString)
+    _IMPORT_FAST_MERGE[] || return false
+    data=mixed.entity_data
+    data===nothing && return false
+    (isempty(m.discrete) && isempty(m.meshing.attached)) || return false
+    blocks=mixed.blocks
+    nnode=size(mixed.coords,2)
+    all(block->block isa ElementBlock,blocks) || return false
+    all(owner->owner[1]>=0,data.node_entities) || return false
+    # Entity keys in first-appearance order (cells, node owners, declarations).
+    order=Tuple{Int,Int}[];index=Dict{Tuple{Int,Int},Int}()
+    keyid(key)=get!(index,key) do
+        push!(order,key);length(order)
+    end
+    cell_key=Vector{Vector{Int32}}(undef,length(blocks));counts=Int[]
+    for (bi,block) in enumerate(blocks)
+        dim=msh_dimension(block.msh);owners=data.block_entities[bi]
+        ids=Vector{Int32}(undef,length(owners));lastowner=Int32(-1);lastid=0
+        @inbounds for j in eachindex(owners)
+            owners[j]==lastowner || (lastowner=owners[j];lastid=keyid((dim,Int(lastowner))))
+            ids[j]=Int32(lastid)
+        end
+        cell_key[bi]=ids
+        length(counts)<length(order) && append!(counts,zeros(Int,length(order)-length(counts)))
+        @inbounds for id in ids;counts[id]+=1;end
+    end
+    entity_records=mixed.partition_data===nothing ? data.entities :
+        merge(data.entities,mixed.partition_data.entities)
+    for key in keys(entity_records);keyid(key);end
+    node_key=Vector{Int32}(undef,nnode);lastowner=(-1,Int32(-1));lastid=0
+    @inbounds for i in 1:nnode
+        owner=data.node_entities[i]
+        owner==lastowner || (lastowner=owner;lastid=keyid((owner[1],Int(owner[2]))))
+        node_key[i]=Int32(lastid)
+    end
+    isempty(order) && return true
+    length(counts)<length(order) && append!(counts,zeros(Int,length(order)-length(counts)))
+    # Records for new keys only; a key colliding with a model entity falls back.
+    records=Vector{DiscreteEntity}(undef,length(order))
+    for (id,key) in enumerate(order)
+        dim,tag=key
+        _has_entity(m,dim,tag) && return false
+    end
+    for (id,key) in enumerate(order)
+        dim,tag=key
+        records[id]=if haskey(m.discrete,key)
+            m.discrete[key]
+        elseif tag==0
+            m.discrete[key]=DiscreteEntity()
+        else
+            m.discrete[(dim,add_discrete_entity!(m,dim,tag))]
+        end
+    end
+    # Cells grouped by entity, block order then column order.
+    starts=zeros(Int,length(order)+1);starts[1]=1
+    for id in eachindex(order);starts[id+1]=starts[id]+counts[id];end
+    fill_at=copy(starts)
+    cell_block=Vector{Int32}(undef,starts[end]-1);cell_column=Vector{Int32}(undef,starts[end]-1)
+    for (bi,ids) in enumerate(cell_key)
+        @inbounds for j in eachindex(ids)
+            slot=fill_at[ids[j]];fill_at[ids[j]]=slot+1
+            cell_block[slot]=Int32(bi);cell_column[slot]=Int32(j)
+        end
+    end
+    node_tags=data.external_node_tags
+    for (id,key) in enumerate(order)
+        record=records[id];count=counts[id]
+        sizehint!(record.element_types,length(record.element_types)+count)
+        sizehint!(record.element_tags,length(record.element_tags)+count)
+        sizehint!(record.element_nodes,length(record.element_nodes)+count)
+        @inbounds for slot in starts[id]:starts[id+1]-1
+            bi=Int(cell_block[slot]);j=Int(cell_column[slot]);block=blocks[bi]
+            nodes=block.nodes;arity=size(nodes,1)
+            tags=Vector{UInt64}(undef,arity)
+            for k in 1:arity;tags[k]=node_tags[nodes[k,j]];end
+            push!(record.element_types,Int32(block.msh))
+            push!(record.element_tags,data.external_element_tags[bi][j])
+            push!(record.element_nodes,tags)
+        end
+    end
+    # Every node is classified, so each materializes on its owner.
+    planned=[Int32[] for _ in order]
+    for i in 1:nnode;push!(planned[node_key[i]],Int32(i));end
+    for (id,positions) in enumerate(planned)
+        isempty(positions) && continue
+        _geo_append_discrete_import_nodes!(records[id],mixed,positions,data)
+    end
+    for (id,key) in enumerate(order)
+        dim,tag=key
+        entity=get(entity_records,key,nothing)
+        physicals=Int32[]
+        entity===nothing || append!(physicals,entity.physical_tags)
+        for ptag in physicals
+            ep=get!(() -> Int[],m.entity_physicals,key)
+            member=tag>0 ? Int(ptag) : -Int(ptag)
+            member in ep || push!(ep,member)
+            members=get!(() -> Int[],m.physical,(dim,Int(ptag)))
+            if !(tag in members)
+                push!(members,tag);sort!(members)
+            end
+        end
+    end
+    for (id,key) in enumerate(order)
+        entity=get(entity_records,key,nothing)
+        entity===nothing && continue
+        dim=key[1];dim==0 && continue
+        unsigned_points=dim==1 && mixed.partition_data!==nothing
+        listed=entity.boundaries
+        if dim>=2
+            seen=Set{Int}()
+            listed=[b for b in listed if abs(Int(b)) in seen ? false : (push!(seen,abs(Int(b)));true)]
+        end
+        records[id].boundary=NTuple{2,Int}[(dim-1,
+            unsigned_points ? abs(Int(b)) : Int(b)) for b in listed]
+    end
+    for (key,name) in mixed.physical_names
+        get!(m.physical_names,key,name)
+    end
+    return true
+end
+
 function _geo_import_mesh_file!(m,context,file,caller)
     _geo_import_cleared_native_factory!(m,context,file,caller) && return nothing
     # `Geometry.MatchGeomAndMesh` — `GeomMeshMatcher::match` grafts the file's
@@ -563,7 +694,7 @@ function _geo_import_mesh_file!(m,context,file,caller)
         authority=Model._model_mesh_with_emitted_receipt(authority,
             geometry_receipt.parts,geometry_receipt.rows;caller)
     end
-    _geo_merge_discrete!(m,incoming,caller)
+    _geo_merge_discrete_import!(m,incoming,caller) || _geo_merge_discrete!(m,incoming,caller)
     # Later imports can raise the model dimension; previous Ghost entities
     # retain the kind and partition chosen at their own read-time event.
     _geo_import_entity_receipts!(m,incoming;ghost_dimension)

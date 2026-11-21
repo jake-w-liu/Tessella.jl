@@ -1119,6 +1119,40 @@ function _mixed_element_record(mesh::MixedMesh,class,tag::Int)
     throw(ArgumentError("API.mesh.get_element: unknown element $tag"))
 end
 
+# The classification of an imported mesh, in one pass. It equals
+# `_mixed_rebind_class(_higher_classification_from_data(mesh,caller),mesh;
+# node_parametric)` without the intermediate classification, whose parameter
+# deepcopy and public tag table were thrown away by the rebind.
+function _import_classification(mesh,node_parametric,caller)
+    data=mesh.entity_data
+    data===nothing && throw(ArgumentError("$caller: actual products need entity metadata"))
+    declarations=mesh.partition_data===nothing ? data.entities :
+        merge(data.entities,mesh.partition_data.entities)
+    entities=sort!(Tuple{Int,Int32}[(dim,Int32(tag)) for (dim,tag) in keys(declarations)])
+    boundaries=Dict((dim,Int32(tag))=>Int32[abs(value) for value in entity.boundaries]
+                    for ((dim,tag),entity) in declarations)
+    owners=Dict{Int,Vector{Int32}}()
+    for (block,values) in zip(mesh.blocks,data.block_entities)
+        append!(get!(()->Int32[],owners,block.msh),values)
+    end
+    authority=Set{Tuple{Int,Int32}}()
+    prior=(-1,Int32(-1))
+    for owner in data.node_entities
+        owner==prior || (push!(authority,owner);prior=owner)
+    end
+    for (block,values) in zip(mesh.blocks,data.block_entities)
+        dim=msh_dimension(block.msh);previous=Int32(-1)
+        for owner in values
+            owner==previous || (push!(authority,(dim,owner));previous=owner)
+        end
+    end
+    primary=isempty(entities) ? (0,Int32(0)) : last(entities)
+    class=_mixed_classification(mesh,primary,entities,data.node_entities,boundaries,owners;
+        node_parametric)
+    return _classification_with_public_tags(class,
+        _cache_public_tags(mesh;authority=authority))
+end
+
 function _mixed_rebind_class(class,mesh;node_entities=class.node_entities,
                              owners=class.cell_entities,primary_map=nothing,selections=nothing,
                              public_node_tags=nothing,node_parametric=nothing)

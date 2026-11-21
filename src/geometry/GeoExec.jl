@@ -241,6 +241,17 @@ end
 function _geo_geometry_rebind_receipt(authority,carrier,previous,plan,caller)
     carrier===authority.mesh && return nothing
     tags=_geo_geometry_carrier_tags(authority,carrier,caller)
+    length(tags)==nnodes(carrier) && allunique(tags) || throw(ArgumentError(
+        "$caller: geometry carrier identities do not align"))
+    # A fresh import has nothing to rebind: the entity parts are derived from
+    # the carrier and are only built when a geometry operation asks for them.
+    previous===nothing && plan===nothing && return _GeoGeometryParts(carrier,copy(tags),
+        ()->_geo_geometry_rebind_build(authority,carrier,tags,previous,plan,caller))
+    parts,remaps=_geo_geometry_rebind_build(authority,carrier,tags,previous,plan,caller)
+    return _GeoGeometryParts(carrier,parts,remaps,copy(tags))
+end
+
+function _geo_geometry_rebind_build(authority,carrier,tags,previous,plan,caller)
     native=authority.mesh.entity_data
     cell_owners=Dict{UInt64,Tuple{Int,Int}}()
     for (block,owners,ids) in zip(authority.mesh.blocks,native.block_entities,native.external_element_tags)
@@ -330,10 +341,8 @@ function _geo_geometry_rebind_receipt(authority,carrier,previous,plan,caller)
     # The parts above are built from the carrier's own columns, each assigned to
     # exactly one owner, with unique rows and `carrier.coords[:,rows]`
     # coordinates, so the cell-multiset audit of `_geo_geometry_receipt` (two
-    # Dicts over every cell) holds by construction; only the identity check runs.
-    length(tags)==nnodes(carrier) && allunique(tags) || throw(ArgumentError(
-        "$caller: geometry carrier identities do not align"))
-    return _GeoGeometryParts(carrier,parts,remaps,copy(tags))
+    # Dicts over every cell) holds by construction.
+    return parts,remaps
 end
 
 function _geo_geometry_plan_receipt(authority,carrier,previous,plan,caller)

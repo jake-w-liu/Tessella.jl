@@ -2092,11 +2092,27 @@ end
 
 # Exported geometry entity parts use the carrier's row space, while the
 # existing context products continue to use actual native row space.
+# `parts` and `rows` are derived from the carrier: an import keeps only a thunk
+# and builds them when a geometry operation first asks (`getproperty`).
 struct _GeoGeometryParts
     carrier::Union{Mesh,MixedMesh}
-    parts::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}}
-    rows::Vector{Vector{Int32}}
     node_tags::Vector{UInt64}
+    build::Any
+    cache::Base.RefValue{Any}
+end
+_GeoGeometryParts(carrier,parts,rows,node_tags)=
+    _GeoGeometryParts(carrier,node_tags,nothing,Ref{Any}((parts,rows)))
+_GeoGeometryParts(carrier,node_tags,build)=
+    _GeoGeometryParts(carrier,node_tags,build,Ref{Any}(nothing))
+function Base.getproperty(geometry::_GeoGeometryParts,name::Symbol)
+    if name===:parts || name===:rows
+        cache=getfield(geometry,:cache)
+        cache[]===nothing && (cache[]=getfield(geometry,:build)())
+        return name===:parts ?
+            cache[][1]::Vector{Tuple{Int,Int,Union{Mesh,MixedMesh}}} :
+            cache[][2]::Vector{Vector{Int32}}
+    end
+    return getfield(geometry,name)
 end
 
 mutable struct _GeoNumericContext

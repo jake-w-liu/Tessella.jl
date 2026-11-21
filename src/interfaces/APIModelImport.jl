@@ -102,6 +102,7 @@ function _model_import_lookup(receipt,model,caller)
         Model._model_mesh_factory_lookup_binding(receipt,authority.mesh,caller)
     end
     bindings=receipt.vector_max===nothing ? receipt.map : receipt.vector
+    sizehint!(catalogue.elements,length(bindings))
     for (uid,(family,dimension,owner)) in bindings
         catalogue.elements[uid]=_NativeElementLookupBinding(family,dimension,owner)
     end
@@ -240,8 +241,7 @@ function _model_import_prepare_result(result,path,options,diagnostics;legacy=fal
     mesh=authority!==nothing && authority.mesh!==nothing ? authority.mesh :
         result.mesh===nothing ? nothing : _copy_mesh(result.mesh)
     class=if authority!==nothing && authority.mesh!==nothing
-        _mixed_rebind_class(_higher_classification_from_data(mesh,caller),mesh;
-            node_parametric=Model._model_mesh_runtime_parameters(model,mesh))
+        _import_classification(mesh,Model._model_mesh_runtime_parameters(model,mesh),caller)
     else
         nothing
     end
