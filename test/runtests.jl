@@ -303,6 +303,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_boolean_crossed_cylinders_test.jl",
         "geometry/metric_area_sign_test.jl",
         "interfaces/api_occ_boolean_tangent_sphere_test.jl",
+        "interfaces/api_occ_transform_owned_vertex_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

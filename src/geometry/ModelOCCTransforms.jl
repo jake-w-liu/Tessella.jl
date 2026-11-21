@@ -434,6 +434,47 @@ function _model_occ_affine_prepare!(m::GeoModel,kernel,union,dim_tags,
     return nothing
 end
 
+# Move the bound vertex `id` from tag `from` to the free tag `to`, in the
+# kernel and in what the model has already imported of it: the point record,
+# the end points of the curves that use it and the vertex tables of their
+# faces. Its tag is then free for another shape.
+function _model_occ_rebind_owned_vertex!(m::GeoModel,kernel,id,from,to,caller)
+    point=kernel.shapes[id].geometry.point
+    _model_occ_retag_shape!(kernel,0,from,to,caller)
+    if haskey(kernel.mirrored_points,from)
+        delete!(kernel.mirrored_points,from)
+        kernel.mirrored_points[to]=point
+    end
+    if haskey(m.points,from)
+        m.points[to]=m.points[from]
+        haskey(m.point_size,from) && (m.point_size[to]=m.point_size[from])
+        m.next_tag[1]=max(m.next_tag[1],to)
+        # the old tag's record goes with the unbind; `synchronize` imports
+        # the shape that takes the tag
+        delete!(m.points,from);delete!(m.point_size,from)
+        delete!(m.point_w,from)
+    end
+    rename(tags)=map(tag->tag==from ? to : tag,tags)
+    for ((dimension,tag),owner) in kernel.bindings
+        shape=kernel.shapes[owner]
+        if dimension==1 && id in shape.children
+            haskey(m.curves,tag) && (m.curves[tag]=rename(m.curves[tag]))
+        elseif dimension==2
+            record=shape.geometry.geometry
+            (record isa NamedTuple && haskey(record,:vertex_uv) &&
+             haskey(record.vertex_uv,from)) || continue
+            _model_occ_contains_shape(kernel,owner,id) || continue
+            table=copy(record.vertex_uv)
+            table[to]=pop!(table,from)
+            record=merge(record,(vertex_uv=table,))
+            kernel.shapes[owner]=_ModelOCCShape(2,
+                merge(shape.geometry,(geometry=record,)),shape.children)
+            haskey(m.surface_geometry,tag) && (m.surface_geometry[tag]=record)
+        end
+    end
+    return nothing
+end
+
 function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
                                caller::AbstractString)
     kernel=m.occ_kernel
@@ -549,12 +590,16 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
          tagmap=Dict{Int,Int}(),tagmap0=Dict{Int,Int}(),caller=caller)
     for (d,tg,id) in entries
         if d==0 && haskey(kernel.shape_tags,id)
-            # The ownership-protected unbind refused an owned leaf — replace
-            # the bound shape in place like upstream's binding swap; every
-            # parent edge/face still references this shape identity.
-            kernel.shapes[id]=newshapes[remap[id]]
-            kernel.changed=true
-            continue
+            # The ownership-protected unbind left a vertex that a bound edge
+            # still uses. Upstream's `_bind` then hands its tag to the moved
+            # copy, which is a free vertex; the corner the tag came from
+            # stays where it was, part of its solid, and is bound again
+            # under the next free tag (Gmsh 4.15.2, `Translate {0,0,1} {
+            # Point{1}; }` on a box: nine points, the corner (0,0,1) is
+            # Point 9 and Curves 1, 2 and 10 end there). It used to be
+            # dragged along with the copy.
+            _model_occ_rebind_owned_vertex!(m,kernel,id,tg,
+                newtags[remap[id]],caller)
         end
         _model_occ_bind_tree!(kernel,newshapes,remap[id],d,tg,ctx)
     end
