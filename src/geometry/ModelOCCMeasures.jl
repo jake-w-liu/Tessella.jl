@@ -458,6 +458,19 @@ function _model_occ_pcurve_measure_panels(pc,t0,t1)
             t=neg ? -knot : knot
             lo<t<hi && push!(cuts,t)
         end
+    elseif hasproperty(inner,:brep_conversion2d)
+        # the trace of an edge converted to a rational curve runs through
+        # that curve's span-wise reparametrization, smooth only between its
+        # breakpoints: a NURBS-converted disk measured one panel across
+        # them was 2e-4 off
+        input=inner.brep_conversion2d[2]
+        if input isa _ModelOCCConicReparam
+            lo,hi=minmax(t0,t1)
+            for knot in input.knots
+                t=neg ? -knot : knot
+                lo<t<hi && push!(cuts,t)
+            end
+        end
     end
     sort!(unique!(cuts))
     t1<t0 && reverse!(cuts)
