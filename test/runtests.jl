@@ -319,6 +319,7 @@ include("functional/fixtures.jl")
         "geometry/geo_periodic_shared_edge_test.jl",
         "interfaces/api_occ_revolve_full_turn_test.jl",
         "fields/geo_attractor_aniso_curve_test.jl",
+        "interfaces/api_cell_cache_sizes_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

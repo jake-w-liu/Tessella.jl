@@ -95,16 +95,130 @@ end
             """,NTuple{4,UInt32},Tuple{UInt32,UInt32},leaf,subleaf)
         catch err
             err isa ErrorException || rethrow()
-            # `llvmcall` needs the compiler — interpreted minimal-JIT runs
-            # fall through to the documented default cache sizes.
+            # `llvmcall` needs the compiler: an interpreted run reports no
+            # CPUID and the caller asks the operating system instead.
             return (UInt32(0),UInt32(0),UInt32(0),UInt32(0))
         end
     end
 end
 
+# The L1 data, L2 and L3 cache sizes of each logical processor as the operating
+# system reports them: `processor=>(l1,l2,l3)` in processor order, with 0 for a
+# level that is absent; `nothing` when the query is not available. CPUID gives
+# the same numbers for the core it runs on, and an interpreted run cannot
+# execute CPUID.
+function _native_cell_os_cache_sizes()
+    try
+        @static if Sys.iswindows()
+            Sys.WORD_SIZE==64 || return nothing
+            # SYSTEM_LOGICAL_PROCESSOR_INFORMATION, 32 bytes on Win64:
+            # ProcessorMask@0, Relationship@8 (2: cache), CACHE_DESCRIPTOR@16
+            # (Level@16, Size@20, Type@24: 0 unified, 1 instruction, 2 data).
+            needed=Ref{UInt32}(0)
+            ccall((:GetLogicalProcessorInformation,"kernel32"),Int32,
+                (Ptr{Cvoid},Ptr{UInt32}),C_NULL,needed)
+            (needed[]>0 && needed[]%32==0) || return nothing
+            buffer=Vector{UInt8}(undef,needed[])
+            ccall((:GetLogicalProcessorInformation,"kernel32"),Int32,
+                (Ptr{UInt8},Ptr{UInt32}),buffer,needed)!=0 || return nothing
+            caches=NTuple{3,Int}[]
+            GC.@preserve buffer for index in 0:Int(needed[])÷32-1
+                record=pointer(buffer)+32index
+                unsafe_load(Ptr{UInt32}(record+8))==2 || continue
+                kind=unsafe_load(Ptr{UInt32}(record+24))
+                (kind==0 || kind==2) || continue
+                level=Int(unsafe_load(Ptr{UInt8}(record+16)))
+                1<=level<=3 || continue
+                push!(caches,(Int(unsafe_load(Ptr{UInt64}(record))%Int64),level,
+                    Int(unsafe_load(Ptr{UInt32}(record+20)))))
+            end
+            reported=Pair{Int,NTuple{3,Int}}[]
+            for processor in 0:63
+                sizes=[0,0,0];present=false
+                for (mask,level,capacity) in caches
+                    (mask>>>processor)&1==1 || continue
+                    present=true;sizes[level]=capacity
+                end
+                present && push!(reported,processor=>(sizes[1],sizes[2],sizes[3]))
+            end
+            return isempty(reported) ? nothing : reported
+        elseif Sys.islinux()
+            root="/sys/devices/system/cpu"
+            isdir(root) || return nothing
+            processors=sort!([parse(Int,name[4:end]) for name in readdir(root)
+                if occursin(r"^cpu[0-9]+$",name)])
+            reported=Pair{Int,NTuple{3,Int}}[]
+            for processor in processors
+                directory=joinpath(root,"cpu$processor","cache")
+                isdir(directory) || continue
+                sizes=[0,0,0]
+                for index in readdir(directory)
+                    startswith(index,"index") || continue
+                    kind=strip(read(joinpath(directory,index,"type"),String))
+                    kind in ("Data","Unified") || continue
+                    level=parse(Int,strip(read(joinpath(directory,index,"level"),String)))
+                    text=strip(read(joinpath(directory,index,"size"),String))
+                    scale=endswith(text,"K") ? 1024 : endswith(text,"M") ? 1024^2 : 1
+                    1<=level<=3 && (sizes[level]=parse(Int,rstrip(text,('K','M')))*scale)
+                end
+                push!(reported,processor=>(sizes[1],sizes[2],sizes[3]))
+            end
+            return isempty(reported) ? nothing : reported
+        elseif Sys.isapple()
+            sizes=Int[]
+            for name in ("hw.l1dcachesize","hw.l2cachesize","hw.l3cachesize")
+                value=Ref{Int64}(0);width=Ref{Csize_t}(sizeof(Int64))
+                status=ccall(:sysctlbyname,Cint,
+                    (Cstring,Ptr{Int64},Ptr{Csize_t},Ptr{Cvoid},Csize_t),
+                    name,value,width,C_NULL,0)
+                push!(sizes,status==0 ? Int(value[]) : 0)
+            end
+            return sizes[1]>0 ? [0=>(sizes[1],sizes[2],sizes[3])] : nothing
+        end
+    catch err
+        err isa InterruptException && rethrow()
+    end
+    return nothing
+end
+
+# The logical processor this thread is running on, as numbered in
+# `_native_cell_os_cache_sizes`; -1 when the system does not say.
+function _native_cell_os_current_processor()
+    @static if Sys.iswindows()
+        return Int(ccall((:GetCurrentProcessorNumber,"kernel32"),UInt32,()))
+    elseif Sys.islinux()
+        return Int(ccall(:sched_getcpu,Cint,()))
+    else
+        return -1
+    end
+end
+
+# Eigen's defaults stand in for a level the processor does not report.
+_native_cell_cache_defaults(l1,l2,l3)=
+    (l1>0 ? l1 : 32*1024,l2>0 ? l2 : 256*1024,l3>0 ? l3 : 2*1024*1024)
+
+# Eigen sizes its blocks from the L1/L2/L3 capacities CPUID reports, so the
+# last bits of a blocked solve or factorization of more than 120 rows follow
+# the machine, in Gmsh as here. CPUID answers for the core the thread is on
+# when it is asked: on a processor with two kinds of cores (48 KiB and 32 KiB
+# L1 data caches on a hybrid Intel part) two runs can see different sizes.
+# That is inherent in mirroring Eigen and is left as it is. What must not
+# differ is a compiled and an interpreted run on the same core: an interpreted
+# run cannot execute CPUID (`llvmcall` needs the compiler), so it asks the
+# operating system for the same three sizes of the processor it is on, and
+# takes Eigen's defaults only if that query fails too.
 function _native_cell_detect_cache_sizes()
     @static if Sys.ARCH in (:x86_64,:i686)
         vendor=_native_cell_cpuid(UInt32(0),UInt32(0))
+        if vendor==(UInt32(0),UInt32(0),UInt32(0),UInt32(0))
+            reported=_native_cell_os_cache_sizes()
+            if reported!==nothing
+                current=_native_cell_os_current_processor()
+                position=findfirst(entry->first(entry)==current,reported)
+                return _native_cell_cache_defaults(
+                    last(reported[position===nothing ? 1 : position])...)
+            end
+        end
         l1=0;l2=0;l3=0
         if (vendor[2],vendor[4],vendor[3]) in
             ((0x68747541,0x69746e65,0x444d4163),(0x69444d41,0x74656273,0x21726574))
@@ -132,7 +246,7 @@ function _native_cell_detect_cache_sizes()
                 end
             end
         end
-        return (l1>0 ? l1 : 32*1024,l2>0 ? l2 : 256*1024,l3>0 ? l3 : 2*1024*1024)
+        return _native_cell_cache_defaults(l1,l2,l3)
     else
         return (16*1024,512*1024,512*1024)
     end
@@ -318,11 +432,10 @@ function _native_cell_lu!(lu,permutations,max_block=256,cache=_native_cell_cache
     return lu
 end
 
-function _native_cell_inverse(matrix)
+function _native_cell_inverse(matrix,cache=_native_cell_cache_sizes())
     n=size(matrix,1)
     size(matrix,2)==n || throw(ArgumentError("native cell interpolation matrix must be square"))
     lu=copy(matrix);permutations=Vector{Int}(undef,n)
-    cache=_native_cell_cache_sizes()
     _native_cell_lu!(lu,permutations,256,cache)
     result=zeros(Float64,n,n)
     @inbounds for i in 1:n
