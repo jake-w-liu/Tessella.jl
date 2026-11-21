@@ -101,6 +101,57 @@ function _precompile_meshing_workload()
                 API.finalize()
             end
         end
+        # Staged generation (`generate(1)`, then 2, then 3) runs other paths
+        # than one `generate(3)`: the first staged box of a session spent 19 s
+        # compiling them. A torus and a cone (2 s each), and the common calls
+        # after a first mesh (element qualities 11 s, `set_order(2)` 4 s, an
+        # .msh written and opened again) likewise. Best effort.
+        for (build, dims) in (
+                (() -> API.model.occ.add_box(0, 0, 0, 1, 1, 1), 1:3),
+                (() -> API.model.occ.add_torus(0, 0, 0, 2, 0.5), 3:3),
+                (() -> API.model.occ.add_cone(0, 0, 0, 0, 0, 1, 1, 0.3), 3:3))
+            try
+                API.initialize()
+                API.option("General.Terminal", 0)
+                build()
+                API.model.occ.synchronize()
+                API.option("Mesh.MeshSizeMin", 0.3)
+                API.option("Mesh.MeshSizeMax", 0.3)
+                for dim in dims
+                    API.mesh.generate(dim)
+                end
+            catch
+            finally
+                API.finalize()
+            end
+        end
+        mktempdir() do directory
+            path = joinpath(directory, "queries.msh")
+            try
+                API.initialize()
+                API.option("General.Terminal", 0)
+                API.model.occ.add_box(0, 0, 0, 1, 1, 1)
+                API.model.occ.synchronize()
+                API.option("Mesh.MeshSizeMax", 0.5)
+                API.mesh.generate(3)
+                _, tags, _ = API.mesh.get_elements(3)
+                API.mesh.get_element_qualities(tags[1], "gamma")
+                API.write(path)
+                API.mesh.set_order(2)
+            catch
+            finally
+                API.finalize()
+            end
+            try
+                API.initialize()
+                API.option("General.Terminal", 0)
+                API.open(path)
+                API.mesh.get_nodes()
+            catch
+            finally
+                API.finalize()
+            end
+        end
         # The command line: `CLI.main` infers the whole execute/mesh/write tree
         # on its first call (about 40 s), so a 2-D run with physical groups,
         # an extruded 3-D run, an OpenCASCADE box and a `-0` unroll are served
