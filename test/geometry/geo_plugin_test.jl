@@ -1,3 +1,4 @@
+module GeoPluginTests
 # `.geo` `Plugin(Name).Opt = v` / `Plugin(Name).Run` — upstream executes
 # plugins against the model view list, which `_GEO_EXEC_VIEWS` carries here
 # (`Merge "*.pos"` order). Options share the API plugin spec; runs swap the
@@ -277,4 +278,5 @@ end
     # Combining zero views is a no-op upstream.
     ex0=_execute_geo_source("Combine ElementsFromAllViews;")
     @test isempty(ex0.views)
+end
 end

@@ -1,3 +1,4 @@
+module MeshJacobianApiTests
 using Test
 using Tessella
 using Tessella.MeshTypes: mesh_crc
@@ -160,4 +161,5 @@ end
     finally
         _MESH_JACOBIAN_API.finalize()
     end
+end
 end
