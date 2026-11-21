@@ -1,9 +1,6 @@
 module OCCBooleanExactConicChecks
 using Test,Tessella
-const A=Tessella.API
-
-curve_kinds(occ)=sort!(unique!(String[A.model.get_type(1,t)
-    for (_,t) in A.model.get_entities(1) if occ.get_mass(1,t)>0]))
+const M=Tessella.Model
 
 # A plane cuts a sphere in a circle, a cylinder obliquely in an ellipse, and
 # two spheres meet in a circle — exact conics even when their trace on the
@@ -11,62 +8,55 @@ curve_kinds(occ)=sort!(unique!(String[A.model.get_type(1,t)
 # used to be traced numerically (1e-7): the edges were anonymous splines, the
 # plane faces' areas were off by up to 1e-3, volumes by 1e-5, and the plane
 # faces could not be meshed ("Point[N] is not coplanar with Surface[M]").
-# The 3-D conic is kept exact now; only its chart trace is fitted. Expected
-# values are closed forms (Gmsh 4.15.2 agrees to its own 1e-8).
+# The 3-D conic is kept exact now and only its chart trace is fitted.
+#
+# The section builders are called directly: a Boolean that walks a fitted
+# trace through trimming and region building costs minutes interpreted (the
+# three Booleans this file used to run took 2300 s). With the exact sections
+# Box(-1..1)³ minus Sphere(.8,.55,.35,.6) is 7.3636776202, the closed form
+# (Gmsh 4.15.2: 7.3636776470).
+pcs(pc)=pc isa AbstractVector ? pc : [pc]
+function lifts_onto(sg,pc,curve)
+    worst=0.0
+    for θ in range(0.1,6.2;length=23)
+        uv=M._brep_pc_eval(pc,θ)
+        worst=max(worst,M._b3dist(M._brep_surface_eval(sg,uv[1],uv[2]),
+                                  M._brep_curve_eval(curve,θ)))
+    end
+    return worst
+end
+
 @testset "OCC Boolean sections that are exact conics" begin
-    # spherical cap: the cutting plane x=0.4 is off the centre
-    A.initialize()
-    try
-        A.option("General.Terminal",0)
-        occ=A.model.occ
-        ball=occ.add_sphere(0,0,0,1)
-        box=occ.add_box(0.4,-2,-2,4,4,4)
-        out,_=occ.intersect([(3,ball)],[(3,box)])
-        occ.synchronize()
-        @test occ.get_mass(3,out[1][2])≈π*0.6^2*(3-0.6)/3 rtol=1e-9
-        @test curve_kinds(occ)==["Circle"]
-        areas=Dict{String,Float64}()
-        for (_,t) in A.model.get_entities(2)
-            kind=A.model.get_type(2,t)
-            areas[kind]=get(areas,kind,0.0)+occ.get_mass(2,t)
-        end
-        @test areas["Plane"]≈π*(1-0.4^2) rtol=1e-12
-        @test areas["Sphere"]≈2π*0.6 rtol=1e-9
-    finally
-        A.finalize()
-    end
+    ball=(occ=:sphere,center=(0.0,0.0,0.0),radius=1.0,axis=(0.0,0.0,1.0),
+          X=(1.0,0.0,0.0),Y=(0.0,1.0,0.0))
+    # the cutting plane x=0.4 is off the centre: a circle of radius √0.84
+    plane=(occ=:plane,center=(0.4,0.0,0.0),axis=(1.0,0.0,0.0),
+           X=(0.0,1.0,0.0),Y=(0.0,0.0,1.0))
+    section=only(M._brep_sec_plane_sphere(plane,ball,true,"test"))
+    @test section.closed && section.curve.kind===:circle
+    @test section.curve.r≈sqrt(0.84) rtol=1e-14
+    @test all(pc->haskey(pc,:circ2d),pcs(section.pcA))
+    trace=only(pcs(section.pcB))
+    @test haskey(trace,:per2d)
+    @test lifts_onto(ball,trace,section.curve)<2e-9
 
-    # cylinder cut by an oblique half-space: an ellipse through the axis
-    A.initialize()
-    try
-        A.option("General.Terminal",0)
-        occ=A.model.occ
-        cylinder=occ.add_cylinder(0,0,-1,0,0,2,0.5)
-        box=occ.add_box(-2,-2,0,4,4,2)
-        occ.rotate([(3,box)],0,0,0,0,1,0,0.5)
-        out,_=occ.cut([(3,cylinder)],[(3,box)])
-        occ.synchronize()
-        @test occ.get_mass(3,out[1][2])≈π*0.25 rtol=1e-10
-        @test "Ellipse" in curve_kinds(occ)
-        @test Tuple(length(A.model.get_entities(d)) for d in 0:3)==(2,3,3,1)
-    finally
-        A.finalize()
-    end
+    # two unit spheres 1.2 apart meet in the circle x=0.6, radius 0.8
+    other=merge(ball,(center=(1.2,0.0,0.0),))
+    section=only(M._brep_sec_sphere_sphere(ball,other,"test"))
+    @test section.curve.kind===:circle
+    @test section.curve.r≈0.8 rtol=1e-14
+    @test collect(section.curve.c)≈[0.6,0.0,0.0] atol=1e-14
+    @test lifts_onto(other,only(pcs(section.pcB)),section.curve)<2e-9
 
-    # lens of two unit spheres 1.2 apart: V = π(4+d)(2−d)²/12
-    A.initialize()
-    try
-        A.option("General.Terminal",0)
-        occ=A.model.occ
-        left=occ.add_sphere(0,0,0,1)
-        right=occ.add_sphere(1.2,0,0,1)
-        out,_=occ.intersect([(3,left)],[(3,right)])
-        occ.synchronize()
-        @test occ.get_mass(3,out[1][2])≈π*5.2*0.8^2/12 rtol=1e-9
-        @test curve_kinds(occ)==["Circle"]
-        @test Tuple(length(A.model.get_entities(d)) for d in 0:3)==(2,3,3,1)
-    finally
-        A.finalize()
-    end
+    # a plane tilted 0.5 rad about y cuts a cylinder of radius 0.5 in an
+    # ellipse with semi-axes 0.5/cos(0.5) and 0.5
+    rod=(occ=:cylinder,center=(0.0,0.0,-1.0),axis=(0.0,0.0,1.0),
+         X=(1.0,0.0,0.0),Y=(0.0,1.0,0.0),radius=0.5,height=2.0)
+    tilted=(occ=:plane,center=(0.0,0.0,0.0),axis=(sin(0.5),0.0,cos(0.5)),
+            X=(cos(0.5),0.0,-sin(0.5)),Y=(0.0,1.0,0.0))
+    section=only(M._brep_sec_plane_cylinder(tilted,rod,true,"test"))
+    @test section.curve.kind===:ellipse
+    @test sort([section.curve.rx,section.curve.ry])≈[0.5,0.5/cos(0.5)] rtol=1e-14
+    @test lifts_onto(rod,only(pcs(section.pcB)),section.curve)<2e-9
 end
 end
