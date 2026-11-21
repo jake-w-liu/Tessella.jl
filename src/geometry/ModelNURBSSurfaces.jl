@@ -39,7 +39,11 @@ function _ModelNURBSSurface(family,surface::NURBS.NURBSSurface)
     return _ModelNURBSSurface(family,surface,(net,du,dv,duu,dvv,duv))
 end
 
-function _model_nurbs_deboor_h(points,degree,knots,u)
+# De Boor's algorithm on homogeneous points, in a buffer the caller owns
+# (`degree+1` entries are used). `knots` may be a view: the derivative nets
+# use the knot vector with its ends trimmed.
+function _model_nurbs_deboor_h!(buffer::Vector{NTuple{4,Float64}},points,degree::Int,
+                                knots::AbstractVector{Float64},u::Float64)
     count=length(points)
     span=clamp(searchsortedlast(knots,u)-1,degree,count-1)
     # A periodic spline's active upper endpoint can precede repeated knots
@@ -48,56 +52,82 @@ function _model_nurbs_deboor_h(points,degree,knots,u)
     while span>degree && knots[span+1]==knots[span+2]
         span-=1
     end
-    buffer=NTuple{4,Float64}[points[span-degree+j+1] for j in 0:degree]
-    for level in 1:degree,j in degree:-1:level
+    @inbounds for j in 0:degree
+        buffer[j+1]=points[span-degree+j+1]
+    end
+    @inbounds for level in 1:degree,j in degree:-1:level
         lower=knots[span-degree+j+1]
         upper=knots[span+j-level+2]
         factor=(u-lower)/(upper-lower)
         left=buffer[j];right=buffer[j+1]
-        buffer[j+1]=ntuple(axis->(1.0-factor)*left[axis]+factor*right[axis],4)
+        buffer[j+1]=((1.0-factor)*left[1]+factor*right[1],
+                     (1.0-factor)*left[2]+factor*right[2],
+                     (1.0-factor)*left[3]+factor*right[3],
+                     (1.0-factor)*left[4]+factor*right[4])
     end
-    return buffer[end]
+    return @inbounds buffer[degree+1]
 end
 
-function _model_nurbs_homogeneous(patch,slot,u,v)
+function _model_nurbs_deboor_h(points,degree,knots,u)
+    return _model_nurbs_deboor_h!(Vector{NTuple{4,Float64}}(undef,degree+1),
+        points,Int(degree),knots,Float64(u))
+end
+
+# Scratch for one evaluation of a patch: the column of row results and one
+# de Boor buffer.
+function _model_nurbs_scratch(patch::_ModelNURBSSurface)
+    surface=patch.surface
+    net=patch.nets[1]::Matrix{NTuple{4,Float64}}
+    return (Vector{NTuple{4,Float64}}(undef,size(net,1)),
+            Vector{NTuple{4,Float64}}(undef,max(surface.degree_u,surface.degree_v)+1))
+end
+
+function _model_nurbs_homogeneous(patch::_ModelNURBSSurface,slot::Int,u::Float64,
+        v::Float64,columns::Vector{NTuple{4,Float64}},
+        buffer::Vector{NTuple{4,Float64}})
     net=patch.nets[slot]
     net===nothing && return (0.0,0.0,0.0,0.0)
     ou,ov=slot==1 ? (0,0) : slot==2 ? (1,0) : slot==3 ? (0,1) :
           slot==4 ? (2,0) : slot==5 ? (0,2) : (1,1)
     surface=patch.surface
-    U=surface.knots_u[1+ou:end-ou];V=surface.knots_v[1+ov:end-ov]
-    columns=NTuple{4,Float64}[
-        _model_nurbs_deboor_h(@view(net[i,:]),surface.degree_v-ov,V,v)
-        for i in axes(net,1)]
-    return _model_nurbs_deboor_h(columns,surface.degree_u-ou,U,u)
+    U=@view surface.knots_u[1+ou:end-ou]
+    V=@view surface.knots_v[1+ov:end-ov]
+    rows=size(net,1)
+    for i in 1:rows
+        columns[i]=_model_nurbs_deboor_h!(buffer,@view(net[i,:]),
+            surface.degree_v-ov,V,v)
+    end
+    return _model_nurbs_deboor_h!(buffer,@view(columns[1:rows]),
+        surface.degree_u-ou,U,u)
 end
 
-function _model_nurbs_surface_d2(g,u,v)
-    if hasproperty(g,:reparam) && g.reparam!==nothing
-        ru,rv=g.reparam.u,g.reparam.v
-        su,dsu,ddsu=ru===nothing ? (u,1.0,0.0) :
-            _occ_conic_reparam(ru,u)
-        sv,dsv,ddsv=rv===nothing ? (v,1.0,0.0) :
-            _occ_conic_reparam(rv,v)
-        # Bare patch record carries no `reparam` — recursion ends here.
-        point,du,dv,duu,dvv,duv=_model_nurbs_surface_d2(
-            (patch=g.patch,),su,sv)
-        return (point,
-            ntuple(axis->du[axis]*dsu,3),
-            ntuple(axis->dv[axis]*dsv,3),
-            ntuple(axis->duu[axis]*dsu*dsu+du[axis]*ddsu,3),
-            ntuple(axis->dvv[axis]*dsv*dsv+dv[axis]*ddsv,3),
-            ntuple(axis->duv[axis]*dsu*dsv,3))
-    end
-    patch=g.patch
-    h=_model_nurbs_homogeneous(patch,1,u,v)
-    hu=_model_nurbs_homogeneous(patch,2,u,v)
-    hv=_model_nurbs_homogeneous(patch,3,u,v)
-    huu=_model_nurbs_homogeneous(patch,4,u,v)
-    hvv=_model_nurbs_homogeneous(patch,5,u,v)
-    huv=_model_nurbs_homogeneous(patch,6,u,v)
+function _model_nurbs_homogeneous(patch,slot,u,v)
+    columns,buffer=_model_nurbs_scratch(patch)
+    return _model_nurbs_homogeneous(patch,Int(slot),Float64(u),Float64(v),
+        columns,buffer)
+end
+
+@inline function _model_nurbs_weight_check(h,u,v)
     isfinite(h[4]) && !iszero(h[4]) || throw(ArgumentError(
         "NURBS Surface: zero or non-finite homogeneous weight at ($u,$v)"))
+    return nothing
+end
+
+# Point and derivatives of the bare patch. The evaluation used to be written
+# in `_model_nurbs_surface_d2` itself, where the results were assigned in two
+# branches and captured by closures: every intermediate was boxed, and each
+# homogeneous evaluation sliced the knot vectors and allocated a buffer per
+# control row. That was several hundred heap objects per evaluated point,
+# and a caller that wanted the point alone still paid for all six nets.
+function _model_nurbs_patch_d2(patch::_ModelNURBSSurface,u::Float64,v::Float64)
+    columns,buffer=_model_nurbs_scratch(patch)
+    h=_model_nurbs_homogeneous(patch,1,u,v,columns,buffer)
+    hu=_model_nurbs_homogeneous(patch,2,u,v,columns,buffer)
+    hv=_model_nurbs_homogeneous(patch,3,u,v,columns,buffer)
+    huu=_model_nurbs_homogeneous(patch,4,u,v,columns,buffer)
+    hvv=_model_nurbs_homogeneous(patch,5,u,v,columns,buffer)
+    huv=_model_nurbs_homogeneous(patch,6,u,v,columns,buffer)
+    _model_nurbs_weight_check(h,u,v)
     point=ntuple(axis->h[axis]/h[4],3)
     du=ntuple(axis->(hu[axis]-hu[4]*point[axis])/h[4],3)
     dv=ntuple(axis->(hv[axis]-hv[4]*point[axis])/h[4],3)
@@ -108,6 +138,76 @@ function _model_nurbs_surface_d2(g,u,v)
     all(value->all(isfinite,value),result) || throw(ArgumentError(
         "NURBS Surface: evaluated derivatives must be finite"))
     return result
+end
+_model_nurbs_patch_d2(patch::_ModelNURBSSurface,u,v)=
+    _model_nurbs_patch_d2(patch,Float64(u),Float64(v))
+
+# The first three results of `_model_nurbs_patch_d2`, from three nets.
+function _model_nurbs_patch_d1(patch::_ModelNURBSSurface,u::Float64,v::Float64)
+    columns,buffer=_model_nurbs_scratch(patch)
+    h=_model_nurbs_homogeneous(patch,1,u,v,columns,buffer)
+    hu=_model_nurbs_homogeneous(patch,2,u,v,columns,buffer)
+    hv=_model_nurbs_homogeneous(patch,3,u,v,columns,buffer)
+    _model_nurbs_weight_check(h,u,v)
+    point=ntuple(axis->h[axis]/h[4],3)
+    du=ntuple(axis->(hu[axis]-hu[4]*point[axis])/h[4],3)
+    dv=ntuple(axis->(hv[axis]-hv[4]*point[axis])/h[4],3)
+    all(isfinite,point) && all(isfinite,du) && all(isfinite,dv) ||
+        throw(ArgumentError("NURBS Surface: evaluated derivatives must be finite"))
+    return point,du,dv
+end
+
+# The point alone, from the control net.
+function _model_nurbs_patch_point(patch::_ModelNURBSSurface,u::Float64,v::Float64)
+    columns,buffer=_model_nurbs_scratch(patch)
+    h=_model_nurbs_homogeneous(patch,1,u,v,columns,buffer)
+    _model_nurbs_weight_check(h,u,v)
+    point=ntuple(axis->h[axis]/h[4],3)
+    all(isfinite,point) || throw(ArgumentError(
+        "NURBS Surface: evaluated derivatives must be finite"))
+    return point
+end
+
+# The conic reparametrization of a record that carries one: the patch
+# parameters with their first and second derivatives.
+function _model_nurbs_reparam(g,u,v)
+    ru,rv=g.reparam.u,g.reparam.v
+    su,dsu,ddsu=ru===nothing ? (u,1.0,0.0) : _occ_conic_reparam(ru,u)
+    sv,dsv,ddsv=rv===nothing ? (v,1.0,0.0) : _occ_conic_reparam(rv,v)
+    return su,dsu,ddsu,sv,dsv,ddsv
+end
+@inline _model_nurbs_reparametrized(g)=hasproperty(g,:reparam) && g.reparam!==nothing
+
+function _model_nurbs_surface_d2(g,u,v)
+    _model_nurbs_reparametrized(g) || return _model_nurbs_patch_d2(g.patch,u,v)
+    su,dsu,ddsu,sv,dsv,ddsv=_model_nurbs_reparam(g,u,v)
+    point,du,dv,duu,dvv,duv=_model_nurbs_patch_d2(g.patch,su,sv)
+    return (point,
+        (du[1]*dsu,du[2]*dsu,du[3]*dsu),
+        (dv[1]*dsv,dv[2]*dsv,dv[3]*dsv),
+        (duu[1]*dsu*dsu+du[1]*ddsu,duu[2]*dsu*dsu+du[2]*ddsu,
+         duu[3]*dsu*dsu+du[3]*ddsu),
+        (dvv[1]*dsv*dsv+dv[1]*ddsv,dvv[2]*dsv*dsv+dv[2]*ddsv,
+         dvv[3]*dsv*dsv+dv[3]*ddsv),
+        (duv[1]*dsu*dsv,duv[2]*dsu*dsv,duv[3]*dsu*dsv))
+end
+
+# `(point, du, dv)` of a NURBS record: `_model_nurbs_surface_d2` without the
+# three second-derivative nets.
+function _model_nurbs_surface_d1(g,u,v)
+    _model_nurbs_reparametrized(g) ||
+        return _model_nurbs_patch_d1(g.patch,Float64(u),Float64(v))
+    su,dsu,_,sv,dsv,_=_model_nurbs_reparam(g,u,v)
+    point,du,dv=_model_nurbs_patch_d1(g.patch,Float64(su),Float64(sv))
+    return point,(du[1]*dsu,du[2]*dsu,du[3]*dsu),(dv[1]*dsv,dv[2]*dsv,dv[3]*dsv)
+end
+
+# The point of a NURBS record: one net instead of six.
+function _model_nurbs_surface_point(g,u,v)
+    _model_nurbs_reparametrized(g) ||
+        return _model_nurbs_patch_point(g.patch,Float64(u),Float64(v))
+    su,_,_,sv,_,_=_model_nurbs_reparam(g,u,v)
+    return _model_nurbs_patch_point(g.patch,Float64(su),Float64(sv))
 end
 
 function _model_nurbs_surface_bounds(g)

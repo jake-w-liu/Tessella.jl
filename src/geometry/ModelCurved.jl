@@ -1897,7 +1897,7 @@ end
 # written order before the location add. `TorusValue` additionally zeroes
 # coefficients below `10·(r_minor+r_major)·eps` (the OCC620 clamp).
 function _occ_surface_point(g, u::Float64, v::Float64)
-    _model_nurbs_surface(g) && return first(_model_nurbs_surface_d2(g,u,v))
+    _model_nurbs_surface(g) && return _model_nurbs_surface_point(g,u,v)
     Y=_occ_frame_y(g)
     C,X,Z=g.center,g.X,g.axis
     if g.occ===:plane
@@ -1963,8 +1963,7 @@ end
 # the OCC620 torus clamp. Returns (point, ∂P/∂u, ∂P/∂v).
 function _occ_surface_d1(g,u::Float64,v::Float64)
     if _model_nurbs_surface(g)
-        values=_model_nurbs_surface_d2(g,u,v)
-        return values[1],values[2],values[3]
+        return _model_nurbs_surface_d1(g,u,v)
     end
     Y=_occ_frame_y(g)
     X,Z=g.X,g.axis

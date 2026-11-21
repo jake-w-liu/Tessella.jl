@@ -49,6 +49,28 @@ const M=Tessella.Model
                 @test origin.+edge.t0.*direction==geometry.vertex_uv[first_vertex]
                 @test origin.+edge.t1.*direction==geometry.vertex_uv[last_vertex]
             end
+            # The mesher asks for the point, or the point and first
+            # derivatives, far more often than for second derivatives. Those
+            # entries read one and three of the six nets; they must return
+            # the very numbers of the full evaluation. (Meshing a filling
+            # surface took 7 to 10 times Gmsh's time while every point paid
+            # for all six nets through boxed intermediates.)
+            nurbs=geometry.patch
+            for (u,v) in ((0.0,0.0),(0.3,0.7),(1.0,0.45),(0.999,1.0))
+                full=M._model_nurbs_surface_d2(geometry,u,v)
+                @test M._occ_surface_point(geometry,u,v)===full[1]
+                @test M._occ_surface_d1(geometry,u,v)===(full[1],full[2],full[3])
+                @test M._occ_surface_d2(geometry,u,v)===full
+                @test M._model_nurbs_homogeneous(nurbs,1,u,v)[4]==1.0
+            end
+            # Compiled, an evaluation owns two small buffers (the suite runs
+            # interpreted, where every call allocates).
+            if Base.JLOptions().compile_enabled==1
+                M._model_nurbs_patch_point(nurbs,0.3,0.7)
+                M._model_nurbs_patch_d2(nurbs,0.3,0.7)
+                @test (@allocated M._model_nurbs_patch_point(nurbs,0.3,0.7))<=512
+                @test (@allocated M._model_nurbs_patch_d2(nurbs,0.3,0.7))<=512
+            end
         finally
             A.finalize()
         end
