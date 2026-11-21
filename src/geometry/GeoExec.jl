@@ -1089,6 +1089,18 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                 getfield(params,index)
         end
         params=GeoParams(values...)
+    elseif context.background_field!==nothing &&
+           context.background_field!=params.background_field
+        # `Background Mesh View[i]` makes its own PostView field and selects
+        # it while the script runs: the scan that read `params` before the
+        # run saw no `Background Field` statement, so the selection is only
+        # on the context. Without it the view sized nothing (tutorials/t7.geo
+        # meshed its rectangle with two triangles).
+        values=ntuple(length(fieldnames(GeoParams))) do index
+            fieldnames(GeoParams)[index]===:background_field ?
+                context.background_field : getfield(params,index)
+        end
+        params=GeoParams(values...)
     end
     _execution_context_callback===nothing || _execution_context_callback(context,allocator_state)
     return GeoExecution(model,mesh,params,transfinite_tri,context.values,
