@@ -417,8 +417,22 @@ end
     return slot+1,false
 end
 
+# The end nodes of the protected edges, as a mask over node numbers. A cavity
+# is asked about every edge of every one of its cells at every insertion,
+# and nearly all of those edges join interior nodes, which no protected edge
+# touches: one bit test per end spares them the two hashed lookups.
+function _gmsh3_protected_nodes(protected_edges,nodes::Int)
+    mask=falses(nodes)
+    for (u,v) in protected_edges
+        0<u<=nodes && (mask[u]=true)
+        0<v<=nodes && (mask[v]=true)
+    end
+    return mask
+end
+
 function _gmsh3_compatible(T,point,lc,protected_faces,protected_edges,
-                           scratch::_GmshShellScratch=_GmshShellScratch())
+                           scratch::_GmshShellScratch=_GmshShellScratch(),
+                           protected_nodes::Union{Nothing,BitVector}=nothing)
     _gmsh3_shell_reset!(scratch,length(T.boundary))
     epoch=scratch.epoch
     nvertices=0;nedges=0
@@ -448,23 +462,35 @@ function _gmsh3_compatible(T,point,lc,protected_faces,protected_edges,
     # Every edge on exactly two triangles, and the Euler characteristic of a sphere.
     3length(T.boundary)==2nedges || return false
     nvertices-nedges+length(T.boundary)==2 || return false
+    guarded=!isempty(protected_faces)
     for t in T.cavity,slot in 1:4
         # A replacement must keep every preexisting vertex and every typed
         # embedded face. The input's original node labels remain usable.
         last(_gmsh3_shell_vertex_slot(scratch,_vert(T,t,slot))) || return false
-        face=_face(T,t,slot);nb=_nbr(T,t,slot)
-        (_sort3t(face...) in protected_faces && nb!=0 &&
-         T.mark[nb]==T.epoch) && return false
+        guarded || continue
+        # Only a face between two cavity cells disappears; look that up
+        # before hashing the face.
+        nb=_nbr(T,t,slot)
+        (nb!=0 && T.mark[nb]==T.epoch &&
+         _sort3t(_face(T,t,slot)...) in protected_faces) && return false
     end
     # A protected edge of a cavity cell must survive on the shell. The cavity
     # holds a few dozen cells while a model protects every curve segment, so
     # the cells' own edges are looked up rather than every protected edge
     # tested against every cell.
     isempty(protected_edges) && return true
+    masked=protected_nodes!==nothing
+    known=masked ? length(protected_nodes) : 0
     for t in T.cavity
         vertices=(_vert(T,t,1),_vert(T,t,2),_vert(T,t,3),_vert(T,t,4))
         for i in 1:3,j in i+1:4
             u=vertices[i];v=vertices[j]
+            if masked
+                # A node beyond the mask was born after it was built and is
+                # no end of a protected edge.
+                (0<u<=known && 0<v<=known && @inbounds(protected_nodes[u]) &&
+                 @inbounds(protected_nodes[v])) || continue
+            end
             ((u,v) in protected_edges || (v,u) in protected_edges) || continue
             last(_gmsh3_shell_edge_slot(scratch,_gmsh3_edge_code(u,v))) || return false
         end
@@ -502,6 +528,8 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
     sizes,background=_gmsh3_initial_sizes(T,mesh,exterior,minimize_boundary,embedded_sizes;native_arithmetic=native_storage_order)
     queue=_GmshTetQueue();skipped=Set{NTuple{4,Int32}}()
     shell_scratch=_GmshShellScratch()
+    # `protected_edges` is not edited while this loop runs.
+    protected_nodes=_gmsh3_protected_nodes(protected_edges,nn)
     for t in eachindex(T.alive)
         _gmsh3_queue_tet!(queue,T,t,sizes,background,extend_boundary,skipped,numbers,storage)
     end
@@ -545,7 +573,8 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
             "$caller: candidate element number allocation overflows"))
         first_number=number
         number+=candidates
-        if !_gmsh3_compatible(T,point,lc,protected_faces,protected_edges,shell_scratch)
+        if !_gmsh3_compatible(T,point,lc,protected_faces,protected_edges,shell_scratch,
+                              protected_nodes)
             push!(skipped,entry.key);continue
         end
         T.nreal<max_nodes || throw(ArgumentError("$caller: node limit reached"))
