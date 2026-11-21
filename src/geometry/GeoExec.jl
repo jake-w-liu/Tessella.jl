@@ -5506,14 +5506,16 @@ function _geo_exec_occ_extrude_run!(m::GeoModel,entities,params,delta,revolve,
     shapes=NTuple{2,Int}[(dim,abs(tag)) for (dim,tag) in entities]
     isempty(shapes) && return nothing
     kernel=_geo_occ_prepare_kernel!(m,allocator_state)
+    # a statement without `Layers` carries an empty record: no mesh transport
+    layered=params!==nothing && !isempty(params.layers) ? params : nothing
     out=try
         _geo_occ_bind_entities!(m,shapes,kernel,caller)
         if revolve===nothing
             Model._model_occ_extrude(m,shapes,delta[1],delta[2],delta[3];
-                caller,params_override=params)
+                caller,params_override=layered)
         else
             Model._model_occ_revolve(m,shapes,revolve.origin...,
-                revolve.axis...,revolve.angle;params_override=params)
+                revolve.axis...,revolve.angle;params_override=layered)
         end
     catch err
         err isa ArgumentError || rethrow()
