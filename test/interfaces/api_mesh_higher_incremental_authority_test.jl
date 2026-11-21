@@ -145,4 +145,56 @@ out[]=Extrude {0,0,1} { Surface{1}; Layers{2}; QuadTriNoNewVerts RecombLaterals;
         A.finalize()
     end
 end
+
+# A Surface's constructor input is checked against its actual product. When
+# both list the same nodes and cells in the same order the check compares
+# them in place; any other valid input takes the general check, and an input
+# that changes a cell is rejected by either.
+function rebuilt_input(input,columns,labels)
+    data=input.entity_data
+    block=only(input.blocks)
+    metadata=Tessella.Elements._native_mixed_entity_data(data.entities;
+        node_entities=data.node_entities,node_parametric=data.node_parametric,
+        external_node_tags=data.external_node_tags,
+        block_entities=[data.block_entities[1][columns]],
+        external_element_tags=[labels])
+    return Tessella.MixedMesh(input.coords,
+        [Tessella.ElementBlock(block.msh,block.nodes[:,columns],block.tags[columns])];
+        physical_names=input.physical_names,entity_data=metadata,
+        elementary_entities=[input.elementary_entities[1][columns]])
+end
+
+@testset "aligned and general Surface input checks agree" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.option("Mesh.MeshSizeMin",0.4);A.option("Mesh.MeshSizeMax",0.4)
+        A.mesh.generate(2)
+        authority=A.CURRENT[].meshing.mesh_authority
+        actual=M._model_mesh_product(authority,2,1;producer_order=true,first_order=true)
+        input=authority.surface_constructor_inputs[(2,Int32(1))]
+        labels=only(input.entity_data.external_element_tags)
+        cells=length(labels)
+        @test cells>=4
+        @test M._model_surface_nodes_aligned(actual,input)
+        @test M._model_surface_cells_aligned(actual,input)
+        @test M._model_surface_constructor_binding(actual,input,"test")===nothing
+        # The same cells listed backwards: valid, but not aligned.
+        backwards=rebuilt_input(input,collect(cells:-1:1),reverse(labels))
+        @test !M._model_surface_cells_aligned(actual,backwards)
+        @test M._model_surface_constructor_binding(actual,backwards,"test")===nothing
+        # Two cells exchange their labels: the same label set, another mesh.
+        exchanged=copy(labels);exchanged[1],exchanged[2]=labels[2],labels[1]
+        changed=rebuilt_input(input,collect(1:cells),exchanged)
+        @test !M._model_surface_cells_aligned(actual,changed)
+        @test_throws ArgumentError M._model_surface_constructor_binding(actual,changed,"test")
+        # A repeated label is never accepted.
+        repeated=copy(labels);repeated[2]=labels[1]
+        @test_throws ArgumentError M._model_surface_constructor_binding(actual,
+            rebuilt_input(input,collect(1:cells),repeated),"test")
+    finally
+        A.finalize()
+    end
+end
 end

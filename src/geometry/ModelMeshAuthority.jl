@@ -536,7 +536,7 @@ function _model_surface_cells_aligned(actual::MixedMesh,constructor::MixedMesh)
     count==length(data.external_element_tags)==length(data.block_entities)==
         length(constructor.blocks)==length(receipt.external_element_tags)==
         length(receipt.block_entities) || return false
-    previous=UInt64(0);started=false
+    previous=UInt64(0);started=false;increasing=true;total=0
     for index in 1:count
         block=actual.blocks[index];other=constructor.blocks[index]
         labels=data.external_element_tags[index];owners=data.block_entities[index]
@@ -548,14 +548,23 @@ function _model_surface_cells_aligned(actual::MixedMesh,constructor::MixedMesh)
             length(owners)==length(other_owners) || return false
         for column in 1:cells
             label=labels[column]
-            # Increasing labels cannot repeat, in either mesh.
-            label==other_labels[column] && (!started || label>previous) || return false
+            label==other_labels[column] || return false
+            started && label<=previous && (increasing=false)
             started=true;previous=label
             owners[column]==other_owners[column] && block.tags[column]==other.tags[column] &&
                 _model_surface_cell_support(data.external_node_tags,block.nodes,column)==
                 _model_surface_cell_support(receipt.external_node_tags,other.nodes,column) ||
                 return false
         end
+        total+=cells
+    end
+    # Both meshes carry the same labels at the same positions. Increasing
+    # labels cannot repeat; birth labels in another order are checked for it.
+    increasing && return true
+    seen=Set{UInt64}();sizehint!(seen,total)
+    for labels in data.external_element_tags,label in labels
+        label in seen && return false
+        push!(seen,label)
     end
     return true
 end
