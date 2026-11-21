@@ -1836,6 +1836,9 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
             m,endpoint_constraints,assembly.caller)
         for slave_point in sort!(collect(keys(parents)))
             master_point,affine=parents[slave_point]
+            # A Point shared by both faces of a rotation about their common
+            # edge is its own image: it has no master.
+            master_point==slave_point && continue
             # A point whose entity was not generated has no actual node — like
             # a starved curve relation, its endpoint link is mesh-inert here.
             haskey(point_nodes,slave_point) && haskey(point_nodes,master_point) ||

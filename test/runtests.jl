@@ -316,6 +316,7 @@ include("functional/fixtures.jl")
         "geometry/brep_spline_roots_test.jl",
         "interfaces/api_occ_distance_edge_end_test.jl",
         "geometry/geo_negative_plane_loop_test.jl",
+        "geometry/geo_periodic_shared_edge_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

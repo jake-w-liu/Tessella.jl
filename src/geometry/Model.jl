@@ -1080,10 +1080,8 @@ function _model_periodic_surface_point_map(
         m,slave,caller;include_embeddings=include_embeddings)
     master_points=_model_periodic_surface_points(
         m,master,caller;include_embeddings=include_embeddings)
-    isempty(intersect(Set(slave_points),Set(master_points))) ||
-        throw(ArgumentError(
-            "$caller: Surface[$slave] and Surface[$master] must have " *
-            "disjoint point tags"))
+    # Faces sharing an edge (a rotation about it) keep the shared points
+    # fixed: upstream maps each to itself through the same search below.
     length(slave_points)==length(master_points) || throw(ArgumentError(
         "$caller: Surface[$slave] and Surface[$master] point counts differ"))
     coefficients,translation=_periodic_affine_3x4(affine)
@@ -1243,7 +1241,9 @@ function _model_periodic_surface_edge_map(
             "$caller: could not find counterpart of curve $curve with end " *
             "points $s0 $s1 (corresponding to curve with end points " *
             "$mb0 $mb1) in surface $master"))
-        on_match===nothing || on_match(curve,master_curve)
+        # `if(masterEdge->getMeshMaster() != localEdge)`: an edge shared by
+        # both faces maps onto itself and gets no curve master.
+        on_match===nothing || curve==master_curve || on_match(curve,master_curve)
         push!(pairs,curve=>master_curve)
         push!(pair_reversed,curve_reversed)
     end
@@ -1519,6 +1519,8 @@ function set_periodic!(m::GeoModel,dim,slave_entities,master_entities,affine;
                 m,slave,master,stored_affine,tolerance,caller)
             for (pair_index,(slave_curve,master_curve)) in
                     enumerate(curve_pairs)
+                # A shared edge is its own counterpart: no curve master.
+                slave_curve==master_curve && continue
                 push!(derived_curve_constraints,ModelPeriodicConstraint(
                     1,Int32(slave_curve),Int32(master_curve),stored_affine,
                     curve_reversed[pair_index],tolerance,true))
@@ -4210,9 +4212,12 @@ function _snap_surface_periodic(m::GeoModel,mesh,constraints,
         # Orientation-only relations have no transform to snap with; the
         # synchronized parameters already pair the nodes on their own curves.
         constraint.affine===nothing && continue
-        isempty(mapping.slave_nodes) && continue
+        # Nodes on an edge shared by master and slave are their own images.
+        moved=findall(i->mapping.master_nodes[i]!=mapping.slave_nodes[i],
+                      eachindex(mapping.slave_nodes))
+        isempty(moved) && continue
         output=periodic_identify_affine(
-            output,constraint.affine,mapping.master_nodes,mapping.slave_nodes;
+            output,constraint.affine,mapping.master_nodes[moved],mapping.slave_nodes[moved];
             atol=_periodic_coordinate_tolerance(m,constraint.atol))
     end
     for constraint in ordered
