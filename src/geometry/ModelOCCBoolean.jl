@@ -398,8 +398,14 @@ function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
     end
     id=_model_occ_boolean_id!(pub)
     tag=desired==0 ? _model_occ_boolean_tag!(pub,2) : desired
-    pub.staged[id]=_ModelOCCShape(2,(kind=get(pub.sm.surface_types,s,:plane),
-        geometry=g),children)
+    record=(kind=get(pub.sm.surface_types,s,:plane),geometry=g)
+    # Internal vertices of the face (OpenCASCADE's `TopAbs_INTERNAL`): the
+    # points where another shape's vertex touches it. They are no children
+    # of the face; `synchronize` embeds the ones that are still bound.
+    internal=UInt64[_model_occ_boolean_vertex!(pub,point,caller)
+        for (dimension,point) in get(pub.sm.embeds,(2,s),()) if dimension==0]
+    isempty(internal) || (record=merge(record,(internal=internal,)))
+    pub.staged[id]=_ModelOCCShape(2,record,children)
     push!(pub.planned,(2,tag,id))
     pub.ids[skey]=id;pub.ktags[skey]=tag
     return id
@@ -1723,9 +1729,8 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
         inside=falses(ncomp,ncomp);inside_count=zeros(Int,ncomp)
         for a in 1:ncomp,b in 1:ncomp
             a==b && continue
-            if _brep_point_in_solid(
-                    _brep_spec_solid_view(kept,comp_faces[b]),
-                    _brep_spec_rep(kept,comp_faces[a]),tol,caller)
+            if _brep_spec_inside(kept,comp_faces[a],
+                    _brep_spec_solid_view(kept,comp_faces[b]),tol,caller)
                 inside[b,a]=true;inside_count[a]+=1
             end
         end

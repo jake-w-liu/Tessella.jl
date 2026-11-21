@@ -1945,8 +1945,10 @@ function _brep_sec_plane_sphere(pl,sp,plane_is_a,caller)
     dist=_b3dot(_b3(pl.center,sp.center),pl.axis)
     ad=abs(dist)
     ad>sp.radius+_BREP_TOL && return NamedTuple[]
-    ad>=sp.radius-_BREP_TOL && throw(ArgumentError(
-        "$caller: tangent plane×sphere contact is unsupported"))
+    # A sphere touching the plane meets it in one point: no section curve,
+    # and neither face is cut (a sphere resting on a box face, or touching
+    # it from inside).
+    ad>=sp.radius-_BREP_TOL && return NamedTuple[]
     r=sqrt(sp.radius*sp.radius-dist*dist)
     c=_b3add(sp.center,_b3mul(pl.axis,dist))
     n=pl.axis
@@ -6388,6 +6390,8 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
     # operand edge is decided span by span below
     sections=NamedTuple[merge(sec,(spans=[span],))
                         for sec in sections for span in sec.spans]
+    contacts=_brep_vertex_face_touch!(touched,solids,coinc,tol;
+        modify=!(op===:difference || op===:intersection))
     # operand edges piercing other operands' faces split those edges
     esplits=[Dict{Int,Vector{Float64}}() for _ in 1:N]
     for i in 1:N
@@ -6402,7 +6406,17 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 end
             end
             if !isempty(ps)
-                es[eidx]=sort!(ps);touched[i]=true
+                es[eidx]=sort!(ps)
+                # An edge that only ends on the other operand (the seam of
+                # a sphere resting on a box by its pole) is not split, and
+                # its solid not modified by that.
+                ends=(_brep_curve_eval(e.curve,e.t0),
+                      _brep_curve_eval(e.curve,e.t1))
+                any(t->begin
+                        q=_brep_curve_eval(e.curve,t)
+                        _b3dist(q,ends[1])>_OCC_CONFUSION &&
+                            _b3dist(q,ends[2])>_OCC_CONFUSION
+                    end,ps) && (touched[i]=true)
             end
         end
     end
@@ -6765,6 +6779,8 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                       sgn=uses[1][2])
                 isempty(sec_edges) ||
                     (spec=merge(spec,(sev=sec_edges,)))
+                length(regions)==1 && haskey(contacts,(i,fidx)) &&
+                    (spec=merge(spec,(inner=contacts[(i,fidx)],)))
                 push!(kept,spec)
             end
         end
@@ -6817,6 +6833,65 @@ end
 _brep_spec_rep(kept,fis) =
     _brep_vertex_eval(kept[fis[1]].wires[1][1].crv,
                       kept[fis[1]].wires[1][1].vt0)
+
+# OpenCASCADE's vertex/face interference: a vertex of one operand inside a
+# plane face of another (the pole of a sphere resting on a box) becomes an
+# internal vertex of that face, and the face's solid a modified shape, which
+# fuse and fragments rebind under fresh tags (Gmsh 4.15.2: the box of
+# `fuse(box, resting sphere)` comes back as volume 3 with faces 8 to 13). A
+# cut leaves the object as it is (`modify=false`). Faces of coincident
+# planes are imprinted by their own pass and need nothing from here.
+# Returns the contact points by (operand, face): a rebuilt face embeds them,
+# so that the two surface meshes share the node where they touch (a cavity
+# touching its box is no valid boundary for the volume mesh otherwise).
+function _brep_vertex_face_touch!(touched,solids,coinc,tol;modify=true)
+    inset=1.0e-6
+    N=length(solids)
+    contacts=Dict{Tuple{Int,Int},Vector{NTuple{3,Float64}}}()
+    for i in 1:N, j in 1:N
+        i==j && continue
+        for e in solids[i].edges, t in (e.t0,e.t1)
+            P=_brep_vertex_eval(e.curve,t)
+            for (fj,f) in enumerate(solids[j].faces)
+                f.sg.occ===:plane || continue
+                abs(_b3dot(_b3(P,f.sg.center),f.sg.axis))<=tol || continue
+                any(c->(c[1]==i && c[3]==j && c[4]==fj) ||
+                       (c[1]==j && c[2]==fj && c[3]==i),coinc) && continue
+                uv=_brep_surface_uv(f.sg,P)
+                all(d->_brep_uv_in_face(solids[j].edges,f,
+                        (uv[1]+d[1],uv[2]+d[2]),tol),
+                    ((0.0,0.0),(inset,0.0),(-inset,0.0),(0.0,inset),
+                     (0.0,-inset))) || continue
+                modify && (touched[j]=true)
+                known=get!(Vector{NTuple{3,Float64}},contacts,(j,fj))
+                any(q->_b3dist(q,P)<=_OCC_CONFUSION,known) || push!(known,P)
+                break
+            end
+        end
+    end
+    return contacts
+end
+
+# Whether the shell component `fis` lies inside the solid view `outer`. Its
+# representative vertex decides, unless the two shells touch there: the pole
+# of a sphere touching a box face from inside is on the box, where the
+# containment test answers either way (the cavity then became a solid of
+# its own, with a negative volume). Two more points of the same boundary
+# edge are asked and the majority holds; shells that share no edge cannot
+# touch in all three.
+function _brep_spec_inside(kept,fis,outer,tol,caller)
+    first=_brep_point_in_solid(outer,_brep_spec_rep(kept,fis),tol,caller)
+    for fi in fis, wire in kept[fi].wires, ar in wire
+        ar.crv.kind===:degenerate && continue
+        span=ar.vt1-ar.vt0
+        second=_brep_point_in_solid(
+            outer,_brep_curve_eval(ar.crv,ar.vt0+0.5*span),tol,caller)
+        second==first && return first
+        return _brep_point_in_solid(
+            outer,_brep_curve_eval(ar.crv,ar.vt0+0.25*span),tol,caller)
+    end
+    return first
+end
 
 # Containment forms a forest: a component's parent is the component containing
 # it one nesting level up. Even-depth components are disjoint solids — each
@@ -6955,9 +7030,8 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
     inside_count=zeros(Int,ncomp)
     for i in 1:ncomp, j in 1:ncomp
         i==j && continue
-        p=_brep_spec_rep(kept,comp_faces[i])
-        if _brep_point_in_solid(
-                _brep_spec_solid_view(kept,comp_faces[j]),p,tol,caller)
+        if _brep_spec_inside(kept,comp_faces[i],
+                _brep_spec_solid_view(kept,comp_faces[j]),tol,caller)
             inside[j,i]=true;inside_count[i]+=1
         end
     end
@@ -7189,9 +7263,8 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         inside=falses(ncomp,ncomp);inside_count=zeros(Int,ncomp)
         for i in 1:ncomp, j in 1:ncomp
             i==j && continue
-            if _brep_point_in_solid(
-                    _brep_spec_solid_view(kept,comp_faces[j]),
-                    _brep_spec_rep(kept,comp_faces[i]),tol,caller)
+            if _brep_spec_inside(kept,comp_faces[i],
+                    _brep_spec_solid_view(kept,comp_faces[j]),tol,caller)
                 inside[j,i]=true;inside_count[i]+=1
             end
         end
@@ -7466,6 +7539,31 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                 ar.crv.kind===:degenerate &&
                     _occ_bind_degenerate!(m,c,face)
             end
+            # Contact points of another operand's vertices: the result
+            # vertex there when the result has one, else the point of the
+            # operand that stays as it is. Only a contact inside one
+            # result solid is embedded (a cavity touching the outer shell:
+            # its boundary is no valid triangulation unless both surface
+            # meshes have the node). Two solids touching in a point mesh
+            # apart, each with its own node there; sharing it, as Gmsh
+            # does, is refused by the merged-mesh manifold check.
+            for P in get(spec,:inner,())
+                at(ar)=_b3dist(P,_brep_vertex_eval(ar.crv,ar.vt0))<tol3 ||
+                       _b3dist(P,_brep_vertex_eval(ar.crv,ar.vt1))<tol3
+                any(p->p.pseudo==0 && any(cf->fi in cf,p.comps) &&
+                       any(cf->any(fk->fk!=fi && any(w->any(at,w),
+                           kept[fk].wires),cf),p.comps),pieces) || continue
+                vi=findfirst(q->_b3dist(P,q)<tol3,res_verts)
+                pt=vi===nothing ? 0 : ptag[vi]
+                if pt==0
+                    for (tag,q) in m.points
+                        _b3dist(P,q)<tol3 && (pt==0 || tag<pt) && (pt=tag)
+                    end
+                end
+                pt==0 && continue
+                inner=get!(Vector{NTuple{2,Int}},m.embeds,(2,st))
+                (0,pt) in inner || push!(inner,(0,pt))
+            end
         end
         # shells per piece component — the shell entry sign is the spec's use
         # sign for this piece's cell
@@ -7510,6 +7608,9 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
     catch
         for sh in shells
             delete!(m.surface_loops,sh)
+        end
+        for st in surfaces
+            delete!(m.embeds,(2,st))
         end
         _occ_materialize_rollback!(m,points,curves,loops,surfaces,0)
         rethrow()

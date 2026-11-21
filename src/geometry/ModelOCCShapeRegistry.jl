@@ -273,6 +273,14 @@ function _model_occ_synchronize!(m::GeoModel)
             m.surface_types[tag]=shape.geometry.kind
             m.surface_geometry[tag]=shape.geometry.geometry
             m.next_tag[3]=max(m.next_tag[3],tag)
+            # internal vertices of a Boolean result face (a point contact
+            # with another shape) are embedded points of the surface
+            for vertex in get(shape.geometry,:internal,())
+                entry=get(kernel.shape_tags,vertex,nothing)
+                (entry===nothing || !haskey(m.points,entry[2])) && continue
+                inner=get!(Vector{NTuple{2,Int}},m.embeds,(2,tag))
+                (0,entry[2]) in inner || push!(inner,(0,entry[2]))
+            end
             imported=true
         end
     end
