@@ -808,6 +808,10 @@ function clear()
         _slot_load_locked!(MODEL_SLOTS[1])
         empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
         empty!(SESSION_PLUGINS)
+        # `ClearProject` ends with `Msg::ResetErrorCounter()`: an error left in
+        # the session no longer makes `set_order`, `optimize` or `recombine`
+        # return early under General.AbortOnError.
+        NATIVE_LOOKUP_QUERY_ERRORS[]=0;NATIVE_MSG_LAST_ERROR[]=""
         return nothing
     end
 end

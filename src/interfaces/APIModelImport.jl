@@ -462,6 +462,11 @@ function open(filename)
     path=_model_import_filename(filename,"API.open")
     return lock(STATE_LOCK) do
         current=_model_locked()
+        # `OpenProject` begins with `Msg::ResetErrorCounter()`: errors of the
+        # session so far do not make a later `set_order`, `optimize` or
+        # `recombine` on the opened file return early (General.AbortOnError).
+        # `merge` keeps the count, as `MergeFile` does.
+        NATIVE_LOOKUP_QUERY_ERRORS[]=0;NATIVE_MSG_LAST_ERROR[]=""
         # `Geometry.MatchGeomAndMesh` — an opened `.msh` grafts onto the
         # current model's entities through the merge stage (upstream
         # `GeomMeshMatcher::match` keeps the current model, so the publish is

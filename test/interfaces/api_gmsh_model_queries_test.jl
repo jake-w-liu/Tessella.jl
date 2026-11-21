@@ -188,4 +188,30 @@ end
     end
 end
 
+@testset "open and clear start a new error count" begin
+    file=joinpath(DATA,"gmsh_4152_api_square_o1.msh")
+    node_count()=length(A.mesh.get_nodes()[1])
+    unknown_element()=(@test_throws ErrorException A.mesh.get_element(10000000))
+    try
+        A.finalize();A.initialize();A.option("General.Terminal",0)
+        # An error left in the session makes set_order(2) return early under
+        # the default General.AbortOnError, as HighOrder.cpp does.
+        A.open(file);unknown_element();A.mesh.set_order(2)
+        @test node_count()==4
+        # OpenProject and ClearProject reset the count; MergeFile does not.
+        A.open(file);A.mesh.set_order(2)
+        @test node_count()==9
+        A.open(file);unknown_element();A.clear();A.merge(file);A.mesh.set_order(2)
+        @test node_count()==9
+        # The count outlives finalize and initialize.
+        A.open(file);unknown_element();A.finalize();A.initialize()
+        A.option("General.Terminal",0);A.merge(file);A.mesh.set_order(2)
+        @test node_count()==4
+    finally
+        A.finalize()
+        # Leave no count behind for the files that follow in the suite.
+        A.initialize();A.clear();A.finalize()
+    end
+end
+
 end # module
