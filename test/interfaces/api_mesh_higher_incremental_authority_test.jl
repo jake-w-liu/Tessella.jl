@@ -507,4 +507,81 @@ end
     @test_throws ArgumentError R._refine_uniform_traced(inverted)
     @test size(R._refine_uniform_traced(inverted;trusted=true).mesh.tets,2)==8
 end
+
+# Entity records are built and copied through `MixedEntity`'s checks many
+# times per generation. Values that already have the stored types (`Int32`
+# lists, six `Float64` bounds) take a route without conversions; it must
+# accept, reject and return exactly what the general route does.
+function int32_outcome(values;kwargs...)
+    try
+        Tessella.Elements._mixed_int32_vector(values,"test";kwargs...)
+    catch err
+        err isa ArgumentError || rethrow()
+        err.msg
+    end
+end
+
+@testset "typed entity record values are checked like any others" begin
+    E=Tessella.Elements
+    long=Int32.(1:40)
+    for values in (Int32[],Int32[3,1,2],Int32[1,0,2],Int32[2,-1],Int32[4,4],Int32[typemin(Int32)],
+            long,vcat(long,Int32[7])),
+            options in ((;),(;positive=true),(;nonzero=true),(;absolute_fits=true),
+            (;unique_values=true),(;positive=true,unique_values=true),
+            (;nonzero=true,absolute_fits=true))
+        typed=int32_outcome(values;options...)
+        general=int32_outcome(Int.(values);options...)
+        @test typed==general
+        typed isa Vector && @test typed!==values && typed isa Vector{Int32}
+    end
+    bounds=(0.0,1.0,2.0,3.0,4.0,5.0)
+    tuple_record=E.MixedEntity(2,7,bounds;physical_tags=Int32[3,1],boundaries=Int32[1,-2],
+        embedded_curves=Int32[9,5])
+    vector_record=E.MixedEntity(2,7,collect(bounds);physical_tags=[3,1],boundaries=[1,-2],
+        embedded_curves=[9,5])
+    @test same_content(tuple_record,vector_record)
+    @test tuple_record.embedded_curves==Int32[5,9]
+    @test_throws ArgumentError E.MixedEntity(2,7,(0.0,1.0,2.0,3.0,Inf,5.0))
+    @test_throws ArgumentError E.MixedEntity(2,7,(4.0,1.0,2.0,3.0,4.0,5.0))
+    @test_throws ArgumentError E.MixedEntity(2,7,bounds;boundaries=Int32[5],embedded_curves=Int32[5])
+    @test_throws ArgumentError E.MixedEntity(2,7,bounds;embedded_curves=Int32[5,5])
+    @test_throws ArgumentError E.MixedEntity(1,7,bounds;boundaries=Int32[1,0])
+    @test same_content(E.MixedEntity(0,3,(1.0,2.0,3.0)),E.MixedEntity(0,3,(1.0,2.0,3.0,1.0,2.0,3.0)))
+end
+
+# `generate(1)` keeps a geometry carrier beside the mesh: the same nodes and
+# cells with the public (unsigned) Curve descriptors. It is copied from the
+# validated mesh once per array. The copy must be a valid mesh in normal
+# form (the public constructors rebuild it unchanged), detached from the
+# mesh it was made from.
+@testset "the dimension-one geometry carrier is one detached copy" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.option("Mesh.MeshSizeMin",0.4);A.option("Mesh.MeshSizeMax",0.4)
+        A.mesh.generate(1)
+        authority=A.CURRENT[].meshing.mesh_authority
+        mesh=authority.mesh;carrier=authority.carrier
+        @test carrier isa Tessella.MixedMesh && carrier!==mesh
+        @test Tessella.validate(carrier).ok
+        data=carrier.entity_data
+        @test carrier.coords!==mesh.coords && data.external_node_tags!==mesh.entity_data.external_node_tags
+        @test all(first(pair)!==last(pair) for pair in zip(carrier.blocks,mesh.blocks))
+        @test data.external_node_tags==mesh.entity_data.external_node_tags
+        @test [block.nodes for block in carrier.blocks]==[block.nodes for block in mesh.blocks]
+        curves=[record for record in values(data.entities) if record.dim==1]
+        @test !isempty(curves) && all(record->all(>(0),record.boundaries),curves)
+        @test any(record->any(<(0),record.boundaries),values(mesh.entity_data.entities))
+        rebuilt=Tessella.MixedMesh(carrier.coords,carrier.blocks;physical_names=carrier.physical_names,
+            entity_data=Tessella.Elements._native_mixed_entity_data(data.entities;
+                node_entities=data.node_entities,node_parametric=data.node_parametric,
+                external_node_tags=data.external_node_tags,block_entities=data.block_entities,
+                external_element_tags=data.external_element_tags),
+            elementary_entities=carrier.elementary_entities)
+        @test same_content(rebuilt,carrier)
+    finally
+        A.finalize()
+    end
+end
 end

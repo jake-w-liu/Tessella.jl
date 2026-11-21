@@ -590,7 +590,8 @@ function _mixed_int32_vector(values,context::AbstractString;
                              unique_values=false)
     (values isa AbstractVector || values isa Tuple) || throw(ArgumentError(
         "$context values must be a vector or tuple"))
-    out=Int32[]; seen=Set{Int32}()
+    # The values seen so far are kept only when repeats are refused.
+    out=Int32[]; seen=unique_values ? Set{Int32}() : nothing
     for value in values
         value isa Integer || throw(ArgumentError("$context must be an integer"))
         _elements_reject_bool(value,context)
@@ -608,9 +609,40 @@ function _mixed_int32_vector(values,context::AbstractString;
         positive && converted<=0 && throw(ArgumentError("$context must be positive"))
         nonzero && converted==0 && throw(ArgumentError("$context cannot be zero"))
         item=Int32(converted)
-        unique_values && item in seen && throw(ArgumentError(
-            "$context values must be unique"))
-        push!(seen,item); push!(out,item)
+        if seen!==nothing
+            item in seen && throw(ArgumentError("$context values must be unique"))
+            push!(seen,item)
+        end
+        push!(out,item)
+    end
+    return out
+end
+
+# The same checks, in the same order, and the same fresh copy for values that
+# are `Int32` already: nothing can fail to convert, so there is no element
+# test, no `try` and, for a short list, no set. Entity records are built and
+# copied through here four lists at a time.
+function _mixed_int32_vector(values::Vector{Int32},context::AbstractString;
+                             positive=false,nonzero=false,absolute_fits=false,
+                             unique_values=false)
+    count=length(values)
+    out=Vector{Int32}(undef,count)
+    seen=unique_values && count>32 ? Set{Int32}() : nothing
+    for index in 1:count
+        item=values[index]
+        absolute_fits && item==typemin(Int32) && throw(ArgumentError(
+            "$context magnitude must fit Int32"))
+        positive && item<=0 && throw(ArgumentError("$context must be positive"))
+        nonzero && item==0 && throw(ArgumentError("$context cannot be zero"))
+        if seen!==nothing
+            item in seen && throw(ArgumentError("$context values must be unique"))
+            push!(seen,item)
+        elseif unique_values
+            for earlier in 1:index-1
+                out[earlier]==item && throw(ArgumentError("$context values must be unique"))
+            end
+        end
+        out[index]=item
     end
     return out
 end
@@ -724,6 +756,26 @@ function _mixed_native_entity_tag(value,context::AbstractString)
     return Int32(converted)
 end
 
+# Bounds given in any other admitted form: a tuple or vector of six reals, or
+# of three for a point.
+function _mixed_entity_bounds(bounds,d::Int)
+    (bounds isa Tuple || bounds isa AbstractVector) || throw(ArgumentError(
+        "MixedEntity: bounds must be a tuple or vector"))
+    given=collect(bounds)
+    _elements_reject_bool_values(given,"MixedEntity: bounds")
+    raw=d==0 && length(given)==3 ? vcat(given,given) : given
+    length(raw)==6 || throw(ArgumentError(
+        "MixedEntity: bounds must contain six values (or three for a point)"))
+    return ntuple(6) do i
+        value=try Float64(raw[i]) catch err
+            err isa InterruptException && rethrow()
+            throw(ArgumentError("MixedEntity: bounds must be Float64-representable"))
+        end
+        isfinite(value) || throw(ArgumentError("MixedEntity: non-finite bound"))
+        value
+    end
+end
+
 """
 One MSH v4 geometric entity, including all physical memberships, signed boundary
 tags, and any embedded curves owned by a surface. `embedded_curves` records the
@@ -754,22 +806,14 @@ struct MixedEntity
         0<=d<=3 || throw(ArgumentError("MixedEntity: dimension $d is outside 0:3"))
         t=native===nothing ? _mixed_positive_int32(tag,"MixedEntity: entity tag") :
                              _mixed_native_entity_tag(tag,"MixedEntity: entity tag")
-        (bounds isa Tuple || bounds isa AbstractVector) || throw(ArgumentError(
-            "MixedEntity: bounds must be a tuple or vector"))
-        raw=collect(bounds)
-        _elements_reject_bool_values(raw,"MixedEntity: bounds")
-        if d==0 && length(raw)==3
-            raw=vcat(raw,raw)
-        end
-        length(raw)==6 || throw(ArgumentError(
-            "MixedEntity: bounds must contain six values (or three for a point)"))
-        converted=ntuple(6) do i
-            value=try Float64(raw[i]) catch err
-                err isa InterruptException && rethrow()
-                throw(ArgumentError("MixedEntity: bounds must be Float64-representable"))
-            end
-            isfinite(value) || throw(ArgumentError("MixedEntity: non-finite bound"))
-            value
+        # Six `Float64` bounds, what every producer and every copy passes,
+        # need no collection and no conversion: only the finiteness test of
+        # the general route applies to them.
+        converted=if bounds isa NTuple{6,Float64}
+            all(isfinite,bounds) || throw(ArgumentError("MixedEntity: non-finite bound"))
+            bounds
+        else
+            _mixed_entity_bounds(bounds,d)
         end
         all(converted[i]<=converted[i+3] for i in 1:3) || throw(ArgumentError(
             "MixedEntity: reversed bounding box"))
@@ -788,10 +832,13 @@ struct MixedEntity
             "MixedEntity: point entities cannot have boundaries"))
         d==2 || isempty(embedded) || throw(ArgumentError(
             "MixedEntity: embedded curves are valid only on surface entities"))
-        boundary_curves=Set(abs.(boundary))
-        any(curve->curve in boundary_curves,embedded) && throw(ArgumentError(
-            "MixedEntity: a curve cannot be both bounding and embedded"))
-        sort!(embedded)
+        # Without embedded curves none can also be a bounding curve.
+        if !isempty(embedded)
+            boundary_curves=Set(abs.(boundary))
+            any(curve->curve in boundary_curves,embedded) && throw(ArgumentError(
+                "MixedEntity: a curve cannot be both bounding and embedded"))
+            sort!(embedded)
+        end
         parts=_mixed_int32_vector(partitions,"MixedEntity: partition tag";
                                   positive=true)
         parent isa Tuple && length(parent)==2 || throw(ArgumentError(
