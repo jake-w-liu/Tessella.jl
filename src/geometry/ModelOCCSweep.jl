@@ -502,19 +502,30 @@ end
 # edge of a line through that point are two entities
 # (`extrude([(0,p),(1,e)],…)` returns six distinct entities in Gmsh 4.15.2).
 # Park the finished dimension's mesh links and start the next one with empty
-# dedup maps.
+# dedup maps. The revolve does the same with its rim and face maps:
+# `revolve([(0,p),(1,e)],…)` by a quarter turn gives the point its own arc
+# and end point, and the line's lateral arc through that point another
+# (Gmsh 4.15.2: [(0,3),(1,2),(1,5),(2,1),(1,3),(1,4)], five points and five
+# curves).
 function _model_occ_sweep_next_dim!(sw::_ModelOCCSweep,kernel)
     tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,sw.caller)
     for (vid,eid) in sw.lmap
-        push!(sw.links,(1,sw.tags[eid],(0,tag_of(vid))))
+        haskey(sw.tags,eid) && push!(sw.links,(1,sw.tags[eid],(0,tag_of(vid))))
+    end
+    for (vid,cid) in sw.rmap
+        haskey(sw.tags,cid) && push!(sw.links,(1,sw.tags[cid],(0,tag_of(vid))))
     end
     for (eid,teid) in sw.emap
-        push!(sw.links,(1,sw.tags[teid],(1,tag_of(eid))))
+        haskey(sw.tags,teid) && push!(sw.links,(1,sw.tags[teid],(1,tag_of(eid))))
     end
     for (fid,eid) in sw.smap
         push!(sw.links,(2,sw.tags[fid],(1,tag_of(eid))))
     end
+    for (eid,fid) in sw.fmap
+        push!(sw.links,(2,sw.tags[fid],(1,tag_of(eid))))
+    end
     empty!(sw.vmap);empty!(sw.lmap);empty!(sw.emap);empty!(sw.smap)
+    empty!(sw.rmap);empty!(sw.fmap)
     return nothing
 end
 
@@ -1729,6 +1740,7 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
                 end
             end
         end
+        dim<2 && _model_occ_sweep_next_dim!(sw,kernel)
     end
     for (dimension,tag,id,shape) in sw.pending
         _model_occ_bind_shape!(kernel,dimension,tag,id,shape)
