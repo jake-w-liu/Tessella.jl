@@ -5909,6 +5909,37 @@ function _geo_occ_allocator_resync!(allocator_state,m::GeoModel)
     return nothing
 end
 
+# The not yet bound entities that own a requested Point, Curve or Surface:
+# every Volume whose boundary contains it; failing a Volume, every Surface;
+# failing that, every Curve.
+function _geo_occ_lazy_owners(m::GeoModel,entities,kernel)
+    owners=Tuple{Int,Int}[]
+    for (dim,tag) in entities
+        d=Int(dim);t=Int(tag)
+        0<=d<=2 || continue
+        has_curve(c)=d==1 ? c==t :
+            d==0 && haskey(m.curves,c) && t in m.curves[c]
+        has_surface(s)=d==2 ? s==t : haskey(m.surfaces,s) &&
+            any(loop->any(c->has_curve(abs(c)),get(m.loops,loop,Int[])),m.surfaces[s])
+        has_volume(v)=any(shell->any(s->has_surface(abs(s)),
+            get(m.surface_loops,shell,Int[])),m.volumes[v])
+        found=false
+        for (od,candidates,has) in ((3,keys(m.volumes),has_volume),
+                                    (2,keys(m.surfaces),has_surface),
+                                    (1,keys(m.curves),has_curve))
+            od>d || continue
+            for o in sort!(collect(candidates))
+                has(o) || continue
+                found=true
+                haskey(kernel.bindings,(od,o)) || (od,o) in owners ||
+                    push!(owners,(od,o))
+            end
+            found && break
+        end
+    end
+    return owners
+end
+
 # Run a kernel transform endpoint (`translate`/`rotate`/`dilate`/`symmetry`)
 # on resolved `.geo` entities: bind lazily, transform, sync. Endpoint
 # failures report upstream's recoverable "Could not ..." wording.
@@ -5917,6 +5948,12 @@ function _geo_occ_apply_transform!(m::GeoModel,entities,t::Model._AffineTransfor
                                    caller::AbstractString,what::AbstractString)
     kernel=_geo_occ_prepare_kernel!(m)
     try
+        # Upstream every shape is in the kernel, so a sub-entity transform
+        # sees the solid, face or edge that owns it. Bind those owners first:
+        # alone, the sub-entity would enter the kernel as a free copy that
+        # nothing uses.
+        _geo_occ_bind_entities!(m,_geo_occ_lazy_owners(m,entities,kernel),
+                                kernel,caller)
         _geo_occ_bind_entities!(m,entities,kernel,caller)
         Model._model_occ_transform!(m,entities,t,caller)
     catch err

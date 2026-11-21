@@ -351,15 +351,18 @@ end
     @test collect(r.model.points[2])≈[0.0,0.0,0.0]
     @test collect(r.model.points[6])≈[sqrt(2)/2,sqrt(2)/2,0.0]  # (1,0,0) corner
 
-    # Sub-entity transform on a materialized box drops the encoding when the
-    # shell no longer matches the encoded corners.
+    # A vertex of a box moves as a free copy that keeps the tag; the box stays
+    # a box and its corner is bound again under the next tag (Gmsh 4.15.2).
     r=_execute_transform_source("""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 1,1,1};
         Translate {0,0,1} { Point{1}; }
         """)
-    @test !haskey(r.model.box_extents,1)
-    @test r.model.points[1]==(0.0,0.0,2.0)  # (x0,y0,z1) corner
+    @test r.model.points[1]==(0.0,0.0,2.0)
+    @test r.model.points[9]==(0.0,0.0,1.0)
+    @test haskey(r.model.box_extents,1)
+    @test Tuple(r.model.curves[1])==(2,9) && Tuple(r.model.curves[2])==(9,3) &&
+        Tuple(r.model.curves[10])==(9,5)
 
     # Implicit primitives update their encodings.
     r=_execute_transform_source("""
