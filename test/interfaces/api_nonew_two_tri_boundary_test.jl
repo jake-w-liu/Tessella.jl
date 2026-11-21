@@ -189,8 +189,6 @@ function check_quadratic(carriers,levels,laterals,direction)
     return signature
 end
 
-    "two_tri_$(profile)_R$(laterals)_D$(direction)_P$(order)"
-
 
 @testset "Two-Tri NoNew actual P2 carriers and public lifecycle" begin
     @testset "Twelve normal-translation ownership fixtures" begin

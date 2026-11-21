@@ -203,8 +203,6 @@ function check_quadratic(carriers,f,expected)
     return signature
 end
 
-    "rect_grid_$(grid[1])x$(grid[2])_$(profile)_R$(laterals)_D$(direction)_P$(order)"
-
 
 function run_tests()
 @testset "Rectangular-grid actual P2 carriers and public lifecycle" begin

@@ -168,8 +168,6 @@ function check_quadratic(carriers,f,expected)
     return signature
 end
 
-    "quad_patch_$(profile)_R$(laterals)_D$(direction)_P$(order)"
-
 
 function node_geometry(volume=nothing)
     tags=volume===nothing ? API.mesh.get_nodes()[1] : API.mesh.get_nodes(3,volume,true)[1]
