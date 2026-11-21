@@ -623,6 +623,8 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                              for i in axes(mesh.coords,2)]
     node_entities=copy(class.node_entities)
     keys=Dict{Tuple,Int32}()
+    # Midpoints already created, by the packed rows of their edge.
+    edge_nodes=Dict{UInt64,Int32}()
     parameters=deepcopy(class.node_parametric)
     curve_geometry=Dict{Int,Any}()
     point_positions=Dict{Tuple{Int,Int32},Int32}()
@@ -655,9 +657,31 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                 edge_directions[minmax(a+1,b+1)]=(a+1,b+1)
             end
         end
+        # The two cell rows of each slot that is a half-weight edge, (0, 0)
+        # for any other support: a typed table for the lookup below.
+        edge_rows=NTuple{2,Int}[length(support)==2 && weights[support[1]]==0.5 &&
+            weights[support[2]]==0.5 ? (support[1],support[2]) : (0,0)
+            for (weights,support) in interpolants]
+        cell_rows=cells::Matrix{Int32}
         major,minor=cell_order ? (axes(cells,2),slots) : (slots,axes(cells,2))
         for outer in major,inner in minor
                 slot,column=cell_order ? (inner,outer) : (outer,inner)
+                # Most cell edges meet a midpoint another cell created. It is
+                # found by the packed rows of the edge; the weighted key below
+                # is only built for a support met for the first time. (Two
+                # half-weight terms have the same key exactly when they have
+                # the same two rows.)
+                packed=UInt64(0)
+                first_row,second_row=edge_rows[slot-nprimary]
+                if first_row!=0
+                    low,high=minmax(cell_rows[first_row,column],cell_rows[second_row,column])
+                    packed=(UInt64(low)<<32)|UInt64(high)
+                    known=get(edge_nodes,packed,Int32(0))
+                    if known!=0
+                        nodes[slot,column]=known
+                        continue
+                    end
+                end
                 weights,support=interpolants[slot-nprimary]
                 terms=sort!([(cells[j,column],Float64(weights[j])) for j in support])
                 key=Tuple(terms)
@@ -772,6 +796,7 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                     Int32(length(points))
                 end
                 nodes[slot,column]=node
+                packed==0 || (edge_nodes[packed]=node)
         end
         push!(blocks,ElementBlock(target,nodes,mesh.blocks[bi].tags))
         append!(get!(()->Int32[],owners,target),cell_owners)
