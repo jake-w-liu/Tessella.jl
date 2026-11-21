@@ -352,10 +352,13 @@ end
 # general affine matrix) takes a sphere to an ellipsoid and a circle to an
 # ellipse: no sphere, cylinder, cone or torus record can hold the image.
 # OpenCASCADE converts such shapes to NURBS first (`BRepBuilderAPI_GTransform`)
-# and so does this: the quadric faces and conic edges of the closure become
-# rational B-splines, on which any affine map acts exactly through the
-# poles, and a solid's compact primitive record gives way to its shell.
-# Nothing happens for a similarity or a closure of planes and lines.
+# and so does this: the faces and edges of the closure become B-splines, on
+# which any affine map acts exactly through the poles, and a solid's compact
+# primitive record gives way to its shell. Planes are converted too, into
+# degree-1 patches: a plane record whose frame took the stretch (X = (2,0,0)
+# after a dilation by 2 along x) is no orthonormal frame any more, and what
+# meshes a plane assumes one (the cap of a dilated cone had half of Gmsh's
+# triangles, with edges 4.6 sizes long). Nothing happens for a similarity.
 function _model_occ_affine_prepare!(m::GeoModel,kernel,union,dim_tags,
                                     t::_AffineTransform,caller)
     _linear_isotropy(t.linear)===nothing || return nothing
@@ -379,7 +382,15 @@ function _model_occ_affine_prepare!(m::GeoModel,kernel,union,dim_tags,
             (haskey(g,:primitive) || haskey(g,:sector)) && (curved=true)
         end
     end
-    curved || return nothing
+    # a closure of planes that carry no parameter bounds cannot be turned
+    # into patches: it keeps its plane records, as before
+    curved || all(id->begin
+            shape=kernel.shapes[id]
+            shape.dimension==2 || return true
+            rec=shape.geometry.geometry
+            rec isa NamedTuple && (haskey(rec,:patch) ||
+                (get(rec,:occ,nothing)===:plane && haskey(rec,:uvb)))
+        end,union) || return nothing
     _model_occ_convert_to_nurbs!(m,dim_tags,caller)
     # The conversion keeps each quadric's analytic record beside its patch
     # (the shadow a similarity carries along); here the patch is all that
@@ -393,23 +404,20 @@ function _model_occ_affine_prepare!(m::GeoModel,kernel,union,dim_tags,
                 (kernel.shapes[id]=_ModelOCCShape(3,(kind=:solid,),shape.children))
         elseif shape.dimension==2
             rec=g.geometry
-            if rec isa NamedTuple && haskey(rec,:patch) &&
-                    get(rec,:occ,nothing)===:plane
-                # an affine image of a plane is a plane: its record takes
-                # the map as it is (the frame absorbs the stretch), so the
-                # patch the conversion added is dropped again
-                kernel.shapes[id]=_ModelOCCShape(2,merge(g,(geometry=
-                    Base.structdiff(rec,(patch=nothing,)),)),shape.children)
-                continue
-            end
             (rec isa NamedTuple && haskey(rec,:patch) &&
-             haskey(rec,:analytic_chart)) || continue
+             (haskey(rec,:analytic_chart) ||
+              get(rec,:occ,nothing)===:plane)) || continue
             plain=(occ=:tensor_bspline,patch=rec.patch,pcurves=rec.pcurves,
                    reversed=get(rec,:reversed,false),
                    vertex_uv=get(rec,:vertex_uv,Dict{Int,NTuple{2,Float64}}()))
+            # A plane keeps its frame for the measures (the patch alone
+            # would be measured over its whole rectangle, or its trimmed
+            # region by quadrature): the exact area of a stretched cap.
+            get(rec,:occ,nothing)===:plane && (plain=merge(plain,(trimmed=true,
+                plane_rec=Base.structdiff(rec,(patch=nothing,)))))
             push!(replaced,(rec,plain))
-            kernel.shapes[id]=_ModelOCCShape(2,merge(g,(geometry=plain,)),
-                                             shape.children)
+            kernel.shapes[id]=_ModelOCCShape(2,
+                merge(g,(kind=:tensor_bspline,geometry=plain)),shape.children)
         end
     end
     # pole and iso edges embed their face's record: follow it
@@ -418,8 +426,8 @@ function _model_occ_affine_prepare!(m::GeoModel,kernel,union,dim_tags,
         shape.dimension==1 || continue
         rec=shape.geometry.geometry
         if rec isa NamedTuple &&
-                get(rec,:converted_from,nothing) in (:circle,:ellipse)
-            # a converted conic keeps only its rational curve as well
+                get(rec,:converted_from,nothing) in (:circle,:ellipse,:line)
+            # a converted line or conic keeps only its B-spline as well
             kernel.shapes[id]=_ModelOCCShape(1,merge(shape.geometry,
                 (geometry=(occ=:copied_curve,curve=rec.curve,
                            t0=rec.t0,t1=rec.t1),)),shape.children)
