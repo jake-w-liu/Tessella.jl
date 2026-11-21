@@ -21,7 +21,8 @@ function _native_recombine_state(product,world,frame,caller)
     mesh=product.mesh
     return _NativeSurfaceRecombine(copy(world),copy(mesh.coords[1:2,:]),
         copy(product.node_owners),copy(product.node_tags),
-        NTuple{3,Int32}[Tuple(mesh.tris[:,i]) for i in axes(mesh.tris,2)],
+        NTuple{3,Int32}[(mesh.tris[1,i],mesh.tris[2,i],mesh.tris[3,i])
+                        for i in axes(mesh.tris,2)],
         copy(product.element_tags),NTuple{4,Int32}[],UInt64[],trues(nnodes(mesh)),
         product.element_high_water,_GmshNativeSurfaceLift(frame),String(caller))
 end
@@ -483,8 +484,137 @@ function _native_recombine_laplace_admit!(s,node,actual,trial,incident,
         (area_new,minimum_new)
 end
 
+# The star measure over rows `lo:hi` of a node-to-triangle table: the same
+# numbers as `_native_recombine_star` on the same cells in the same order,
+# without a cell reference whose type is only known at run time.
+function _native_recombine_star(s,cells::Vector{Int32},lo::Int,hi::Int)
+    area=0.0
+    lead=-Inf;runner=-Inf;lead_sine=0.0;lead_cosine=0.0
+    decided=true
+    @inbounds for k in lo:hi
+        t=s.triangles[cells[k]]
+        area+=_native_recombine_uv_triangle_area(s,t[1],t[2],t[3])
+        p=(_native_recombine_point(s,t[1]),_native_recombine_point(s,t[2]),
+           _native_recombine_point(s,t[3]))
+        for i in 1:3
+            first=Mesh2D._gmsh_sub3(p[i],p[mod1(i+1,3)])
+            second=Mesh2D._gmsh_sub3(p[mod1(i+2,3)],p[mod1(i+1,3)])
+            sine=Mesh2D._gmsh_norm3(Mesh2D._gmsh_cross3(first,second))
+            sine>0 || (decided=false)
+            cosine=Mesh2D._gmsh_dot3(first,second)
+            cotangent=cosine/sine
+            if cotangent>lead
+                runner=lead;lead=cotangent;lead_sine=sine;lead_cosine=cosine
+            elseif cotangent>runner
+                runner=cotangent
+            end
+        end
+    end
+    if decided && isfinite(lead) && lead-runner>1e-6*(1.0+lead*lead)
+        smallest=180.0*_gm87_atan2(lead_sine,lead_cosine)/pi
+        return area,min(1.0-abs(60.0-smallest)*(1.0/60.0),1.0)
+    end
+    area=0.0;minimum=1.0
+    @inbounds for k in lo:hi
+        t=s.triangles[cells[k]]
+        area+=_native_recombine_uv_triangle_area(s,t[1],t[2],t[3])
+        minimum=min(_native_recombine_triangle_eta(s,t),minimum)
+    end
+    return area,minimum
+end
+
+# `_native_recombine_laplace!` for a mesh of triangles only, which is every
+# mesh the plane producer smooths before recombination. The general loop
+# built a vector of cell references per node, a neighbour vector and a hash
+# set per node and pass, and read every cell through a reference that is a
+# triangle or a quadrangle only at run time, which boxed each cell and each
+# area: 28 heap objects per triangle. Here the node-to-triangle table is two
+# arrays, the neighbour list is one reused buffer, and nothing is allocated
+# per node. Order of every sum is the one of the general loop, so the moves
+# are the same to the last bit.
+function _native_recombine_laplace_triangles!(s,iterations,frame)
+    nodes=size(s.world,2)
+    offsets=zeros(Int,nodes+1)
+    @inbounds for t in s.triangles,node in t
+        offsets[node+1]+=1
+    end
+    @inbounds for node in 1:nodes
+        offsets[node+1]+=offsets[node]
+    end
+    cells=Vector{Int32}(undef,offsets[nodes+1])
+    cursor=copy(offsets)
+    @inbounds for (cell,t) in enumerate(s.triangles),node in t
+        cursor[node]+=1
+        cells[cursor[node]]=Int32(cell)
+    end
+    order=_native_recombine_node_order(s)
+    tags=s.node_tags
+    metric=(Mesh2D._gmsh_dot3(frame.first,frame.first),
+        Mesh2D._gmsh_dot3(frame.second,frame.first),
+        Mesh2D._gmsh_dot3(frame.second,frame.second))
+    neighbors=Int32[]
+    @inbounds for _ in 1:iterations,node in order
+        s.alive[node] && s.owners[node][1]==2 || continue
+        lo=offsets[node]+1;hi=offsets[node+1]
+        lo<=hi || continue
+        empty!(neighbors)
+        for k in lo:hi
+            t=s.triangles[cells[k]]
+            slot=t[1]==node ? 1 : t[2]==node ? 2 : 3
+            for other in (t[mod1(slot-1,3)],t[mod1(slot+1,3)])
+                other in neighbors || push!(neighbors,other)
+            end
+        end
+        # Ascending node label, as `sort!(...;by=label)` orders them.
+        for i in 2:length(neighbors)
+            moving=neighbors[i];j=i-1
+            while j>=1 && tags[neighbors[j]]>tags[moving]
+                neighbors[j+1]=neighbors[j];j-=1
+            end
+            neighbors[j+1]=moving
+        end
+        before=(s.uv[1,node],s.uv[2,node])
+        u=0.0;v=0.0;count=0.0
+        for neighbor in neighbors
+            adj=(s.uv[1,neighbor],s.uv[2,neighbor])
+            direction=_native_recombine_unit((adj[1]-before[1],adj[2]-before[2],0.0))
+            weight=sqrt(metric[1]*direction[1]*direction[1]+
+                2.0*metric[2]*direction[1]*direction[2]+
+                metric[3]*direction[2]*direction[2])
+            u+=adj[1]*weight;v+=adj[2]*weight;count+=weight
+        end
+        inverse=1.0/count;after=(u*inverse,v*inverse)
+        factor=1.0;actual=before
+        star=_native_recombine_star(s,cells,lo,hi)
+        for _ in 1:5
+            trial=(after[1]*factor+before[1]*(1.0-factor),
+                after[2]*factor+before[2]*(1.0-factor))
+            previous=_native_recombine_point(s,node)
+            lifted=s.lift(trial[1],trial[2])
+            s.uv[1,node]=trial[1];s.uv[2,node]=trial[2]
+            s.world[1,node]=lifted[1];s.world[2,node]=lifted[2];s.world[3,node]=lifted[3]
+            star_trial=_native_recombine_star(s,cells,lo,hi)
+            if (1.0+1e-10)*star[1]<star_trial[1] || star_trial[2]<star[2]
+                s.uv[1,node]=actual[1];s.uv[2,node]=actual[2]
+                s.world[1,node]=previous[1];s.world[2,node]=previous[2]
+                s.world[3,node]=previous[3]
+            else
+                actual=trial;star=star_trial
+            end
+            factor/=1.4
+        end
+    end
+    return nothing
+end
+
 function _native_recombine_laplace!(s,iterations,frame)
     iterations==0 && return nothing
+    isempty(s.quads) && return _native_recombine_laplace_triangles!(s,iterations,frame)
+    return _native_recombine_laplace_general!(s,iterations,frame)
+end
+
+# Triangles and quadrangles mixed: the mesh after recombination.
+function _native_recombine_laplace_general!(s,iterations,frame)
     adjacency=_native_recombine_adjacency(s)
     order=_native_recombine_node_order(s)
     metric=(Mesh2D._gmsh_dot3(frame.first,frame.first),

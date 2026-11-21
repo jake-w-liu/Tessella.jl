@@ -73,5 +73,64 @@ const atan2=Tessella.GmshLibm._gm87_atan2
     state.uv[:,1].=trial;state.world[1:2,1].=trial
     @test measure===plain_star(state,incident)
     @test admitted isa Bool
+
+    # The same measure through the node-to-triangle table of the
+    # triangles-only loop.
+    for (state,incident) in cases
+        cells=Int32[cell for (_,cell) in incident]
+        @test M._native_recombine_star(state,cells,1,length(cells))===
+            plain_star(state,incident)
+    end
+end
+
+# A mesh of triangles is smoothed by a loop that keeps its node-to-triangle
+# table in two arrays and allocates nothing per node (the general loop made
+# 28 heap objects per triangle). It must move every node exactly as the
+# general loop does.
+@testset "triangles-only smoothing equals the general loop" begin
+    # A 6x6 lattice over the unit square, interior nodes displaced, each
+    # square cut along alternating diagonals; only interior nodes are owned
+    # by the face.
+    function lattice()
+        n=6;uv=zeros(2,n*n);owners=Vector{Tuple{Int,Int32}}(undef,n*n)
+        row(i,j)=Int32((j-1)*n+i)
+        for j in 1:n,i in 1:n
+            inner=1<i<n && 1<j<n
+            shift=inner ? 0.07*sinpi(0.37*i*j) : 0.0
+            uv[:,row(i,j)].=((i-1)/(n-1)+shift,(j-1)/(n-1)-0.6*shift)
+            owners[row(i,j)]=inner ? (2,Int32(1)) : (1,Int32(1))
+        end
+        triangles=NTuple{3,Int32}[]
+        for j in 1:n-1,i in 1:n-1
+            a,b,c,d=row(i,j),row(i+1,j),row(i+1,j+1),row(i,j+1)
+            if iseven(i+j)
+                push!(triangles,(a,b,c),(a,c,d))
+            else
+                push!(triangles,(a,b,d),(b,c,d))
+            end
+        end
+        # Node labels in an order unrelated to the rows: the loop visits
+        # nodes and sums neighbours by label.
+        labels=UInt64[UInt64(mod(17*k,n*n+1)) for k in 1:n*n]
+        return M._NativeSurfaceRecombine(vcat(uv,zeros(1,n*n)),copy(uv),owners,
+            labels,triangles,UInt64.(1:length(triangles)),NTuple{4,Int32}[],
+            UInt64[],trues(n*n),UInt64(n*n),(u,v)->(u,v,0.0),"test")
+    end
+    frame=M._GmshNativePlaneFrame((0.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),
+                                  (0.0,0.0,1.0))
+    for passes in (1,3)
+        general=lattice();fast=lattice()
+        M._native_recombine_laplace_general!(general,passes,frame)
+        M._native_recombine_laplace!(fast,passes,frame)
+        @test fast.uv==general.uv && fast.world==general.world
+        @test fast.uv!=lattice().uv
+    end
+    # The suite runs interpreted, where every call allocates; the bound holds
+    # for compiled code. The loop owns five arrays, whatever the node count.
+    if Base.JLOptions().compile_enabled==1
+        state=lattice()
+        M._native_recombine_laplace!(lattice(),1,frame)
+        @test (@allocated M._native_recombine_laplace!(state,3,frame))<=4096
+    end
 end
 end
