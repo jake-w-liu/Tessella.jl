@@ -269,6 +269,7 @@ include("functional/fixtures.jl")
         "geometry/geo_occ_extrude_numbering_test.jl",
         "structured/transfinite_composite_sides_test.jl",
         "geometry/extrude_full_turn_unstructured_test.jl",
+        "fields/geo_extend_context_field_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

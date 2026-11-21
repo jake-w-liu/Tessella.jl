@@ -10327,6 +10327,9 @@ function _geo_mesh_context_fields(m::GeoModel,
     elseif lowercase(spec.kind)=="automaticmeshsizefield"
         return _automatic_context_field(
             m,spec,config,entities,"execute_geo")
+    elseif lowercase(spec.kind)=="extend"
+        return Model._extend_context_field(m,spec,config,params,"execute_geo";
+            mesh1d=()->_geo_mesh_1d_options(m,context,"execute_geo"))
     elseif lowercase(spec.kind)=="boundarylayer"
         # Scalar BoundaryLayer over the discretized wall targets: upstream
         # feeds the boundary edges' mesh vertices (and endpoint chords) to

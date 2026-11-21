@@ -35,7 +35,7 @@ using ..SizeField: AbstractField, AbstractSizeField, AbstractAnisoField,
                    MinAnisoField, Metric3, metric_size, PostViewField,
                    BoundedSize,
                    field_value, size_at,
-                   AutomaticMeshSizeField,
+                   AutomaticMeshSizeField, ExtendField,
                    GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length, _metric_scale,
                    _metric_displacement
 import ..SizeField: metric_at, field_value
@@ -6042,6 +6042,75 @@ function _automatic_context_field(m::GeoModel,spec,config,entities,
         hbulk=config.hbulk>=0 ? config.hbulk : nothing,
         gradation=config.gradation,smoothing=config.smoothing,
         features=config.features)
+end
+
+# Upstream `ExtendField` reads the boundary mesh when the first surface is
+# meshed (`recomputeCurves`: one sample per mesh line of each listed curve,
+# barycentre and length). The field is built before any curve is meshed, so
+# the samples are collected from the model's curve meshes on the first
+# surface query; earlier (dim 0/1) and entity-free queries return MAX_LC.
+# A listed curve the model holds no mesh for yet (the generation pipeline
+# keeps its curve product outside the model) is discretized with the
+# caller's 1-D options (`mesh1d`, a thunk), the same `meshGEdge` run.
+mutable struct _ModelExtendField <: AbstractSizeField
+    m::GeoModel
+    curves::Vector{Int}
+    config::Any
+    global_factor::Float64
+    caller::String
+    mesh1d::Any
+    field::Union{Nothing,ExtendField}
+end
+
+function _model_extend_samples!(f::_ModelExtendField)
+    f.field===nothing || return f.field
+    seeds=NTuple{3,Float64}[];sizes=Float64[]
+    for tag in f.curves
+        params=get(f.m.curve_params,tag,nothing)
+        if params===nothing && f.mesh1d!==nothing && haskey(f.m.curves,tag)
+            result=_model_mesh_curve!(f.m,tag,f.mesh1d(),f.caller)
+            result isa AbstractVector && (params=result)
+        end
+        params===nothing && continue
+        previous=nothing
+        for u in params
+            p=_model_curve_part_point(f.m,tag,Float64(u),f.caller)
+            if previous!==nothing
+                push!(seeds,((previous[1]+p[1])/2,(previous[2]+p[2])/2,
+                             (previous[3]+p[3])/2))
+                push!(sizes,hypot(p[1]-previous[1],p[2]-previous[2],
+                                  p[3]-previous[3]))
+            end
+            previous=p
+        end
+    end
+    config=f.config
+    field=ExtendField(;
+        curve_seeds=isempty(seeds) ? nothing : seeds,curve_sizes=sizes,
+        dist_max=config.dist_max,size_max=config.size_max,power=config.power,
+        global_factor=f.global_factor)
+    # Upstream recomputes while `_sizeCurves` is still empty.
+    isempty(seeds) || (f.field=field)
+    return field
+end
+
+field_value(::_ModelExtendField,x,y,z)=GMSH_MAX_SIZE
+field_value(::_ModelExtendField,x,y,z,::Nothing)=GMSH_MAX_SIZE
+function field_value(f::_ModelExtendField,x,y,z,entity::Tuple{T,U}) where
+        {T<:Integer,U<:Integer}
+    Int(entity[1])==2 || return GMSH_MAX_SIZE
+    return field_value(_model_extend_samples!(f),x,y,z,entity)
+end
+
+function _extend_context_field(m::GeoModel,spec,config,params,
+                               caller::AbstractString;mesh1d=nothing)
+    isempty(config.surfaces) || throw(ArgumentError(
+        "$caller: Field[$(spec.tag)] Extend SurfacesList (volume extension " *
+        "from surface meshes) is not supported"))
+    factor=params.mesh_size_factor
+    return _ModelExtendField(m,collect(Int,config.curves),config,
+        (isfinite(factor) && factor>0) ? Float64(factor) : 1.0,
+        String(caller),mesh1d,nothing)
 end
 
 function _model_periodic_surface_mesh(

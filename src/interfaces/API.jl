@@ -10869,6 +10869,9 @@ function _session_size_field_locked(m::GeoModel;raw::Bool=false)
         elseif kind=="automaticmeshsizefield"
             return _automatic_context_field(
                 m,spec,config,entities,"gmsh API")
+        elseif kind=="extend"
+            return Model._extend_context_field(m,spec,config,_params,"gmsh API";
+                mesh1d=()->_session_mesh1d_options(m,"gmsh API"))
         elseif kind=="boundarylayer"
             # Scalar BoundaryLayer over the discretized wall targets — the
             # same resolution `_geo_mesh_context_fields` performs for `.geo`
