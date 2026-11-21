@@ -28,6 +28,15 @@ end
 # repartition after `unpartitionMesh` reuses the freed tags the way upstream
 # does. Transported parent memberships are kept; the encoded tags are what
 # `writePartitionedTopology` parses.
+#
+# Gmsh 4.15.2 does not create these groups: partitioning a model through the
+# API, a `.geo` `PartitionMesh` statement or an opened file, with
+# `Mesh.PartitionCreatePhysicals` 0 or 1 and `Mesh.PartitionCreateTopology` 0 or
+# 1, leaves exactly the parent's physical groups (the partition entities join
+# them) and writes no `_part{..}` name. Tessella therefore keeps the encoded
+# groups off; the switch below restores them for the producers' own tests.
+const _PARTITION_ENCODED_PHYSICALS=Ref(false)
+
 function _partition_create_physicals!(staged,part_entities,blocks,block_entities)
     counter=maximum((Int(key[2]) for key in keys(staged.physical));init=0)
     cache=Dict{String,Int32}()
@@ -47,7 +56,7 @@ function _partition_create_physicals!(staged,part_entities,blocks,block_entities
         cache[name]=tag
         return tag
     end
-    for ((dimension,tag),entity) in sort!(collect(part_entities),by=first)
+    _PARTITION_ENCODED_PHYSICALS[] && for ((dimension,tag),entity) in sort!(collect(part_entities),by=first)
         pstr="_part{"*join((Int(p) for p in entity.partitions),",")*"}"
         encoded=Int32[]
         for physical in entity.physical_tags

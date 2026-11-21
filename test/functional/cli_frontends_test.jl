@@ -73,14 +73,14 @@ Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};""")
             [box_msh,"-part","2","-part_topo","-o",partitioned])
         # Native (non-BRep-import) volume meshes carry complete entity
         # transport, so the partition-topology plan now publishes real
-        # $PartitionedEntities children and `_part{...}` physical groups —
-        # the canonical upstream `-part_topo` use case.
+        # $PartitionedEntities children (gmsh 4.15.2 adds no `_part{...}`
+        # physical groups) — the canonical upstream `-part_topo` use case.
         @test Tessella.CLI.main(
             [box_geo,"-3","-part","2","-part_topo","-o",partitioned])==
             partitioned
         partitioned_text=read(partitioned,String)
         @test occursin("\$PartitionedEntities",partitioned_text)
-        @test occursin("_part{",partitioned_text)
+        @test !occursin("_part{",partitioned_text)
 
         # -merge combines sources before meshing.
         line2_geo=joinpath(directory,"line2.geo")
