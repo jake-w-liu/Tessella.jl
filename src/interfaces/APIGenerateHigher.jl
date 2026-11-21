@@ -797,6 +797,8 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
         assembly.cell_max=max(assembly.cell_max,cell_high_water)
     end
     birth_offset=0
+    # Cells arrive grouped by owner: ask for the physical tag once per run.
+    physical_memo=_dim01_physical_memo()
     for (bi,(msh,dim,_,cells,owners)) in enumerate(_cache_catalog(mesh,class))
         dim==dimension || continue
         physical=_cache_native_blocks(mesh)[bi][3]
@@ -805,7 +807,7 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
             # One vector per cell: the mapped connectivity, which the cell keeps.
             connectivity=native!==nothing && bi==native.block ? Base.view(native.nodes,:,column) :
                 Base.view(cells,:,column)
-            legacy_physical=data===nothing ? _dim01_physical(m,(dim,Int(owners[source_column]))) :
+            legacy_physical=data===nothing ? _dim01_physical!(physical_memo,m,(dim,Int32(owners[source_column]))) :
                             physical[source_column]
             _dim01_add_cell!(assembly,msh,(dim,owners[source_column]),mapping[connectivity],
                 !isempty(cell_births) ? cell_births[birth_offset+source_column] :
