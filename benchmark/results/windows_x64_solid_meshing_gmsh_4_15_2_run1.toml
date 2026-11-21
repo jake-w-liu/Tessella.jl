@@ -1,4 +1,4 @@
-# Tessella commit fa0b2268 (released as v0.1.2). Intel Core Ultra 7 265K, Windows 11, one thread.
+# Tessella commit ebf3fed7 (0.1.3). Intel Core Ultra 7 265K, Windows 11, one thread.
 implementation = "Gmsh 4.15.2"
 threads = 1
 
@@ -11,8 +11,8 @@ tetrahedra = 4979
 volume = 1.000000
 gamma_min = 0.3001
 gamma_mean = 0.7852
-surface_seconds = 0.0144
-volume_seconds = 0.0293
+surface_seconds = 0.0143
+volume_seconds = 0.0316
 
 [[case]]
 solid = "box"
@@ -23,8 +23,8 @@ tetrahedra = 37262
 volume = 1.000000
 gamma_min = 0.3001
 gamma_mean = 0.7952
-surface_seconds = 0.0550
-volume_seconds = 0.2137
+surface_seconds = 0.0537
+volume_seconds = 0.2263
 
 [[case]]
 solid = "box"
@@ -35,8 +35,8 @@ tetrahedra = 178869
 volume = 1.000000
 gamma_min = 0.2777
 gamma_mean = 0.7972
-surface_seconds = 0.1527
-volume_seconds = 1.5459
+surface_seconds = 0.1585
+volume_seconds = 1.3365
 
 [[case]]
 solid = "box"
@@ -47,8 +47,8 @@ tetrahedra = 560591
 volume = 1.000000
 gamma_min = 0.2574
 gamma_mean = 0.7988
-surface_seconds = 0.4663
-volume_seconds = 7.2450
+surface_seconds = 0.3439
+volume_seconds = 6.0469
 
 [[case]]
 solid = "sphere"
@@ -59,8 +59,8 @@ tetrahedra = 2583
 volume = 4.129795
 gamma_min = 0.2700
 gamma_mean = 0.7777
-surface_seconds = 0.0191
-volume_seconds = 0.0205
+surface_seconds = 0.0144
+volume_seconds = 0.0168
 
 [[case]]
 solid = "sphere"
@@ -71,8 +71,8 @@ tetrahedra = 20564
 volume = 4.174131
 gamma_min = 0.2905
 gamma_mean = 0.7901
-surface_seconds = 0.0716
-volume_seconds = 0.1500
+surface_seconds = 0.0562
+volume_seconds = 0.1121
 
 [[case]]
 solid = "sphere"
@@ -83,8 +83,8 @@ tetrahedra = 91035
 volume = 4.183397
 gamma_min = 0.3000
 gamma_mean = 0.7951
-surface_seconds = 0.1957
-volume_seconds = 0.7328
+surface_seconds = 0.1442
+volume_seconds = 0.5739
 
 [[case]]
 solid = "sphere"
@@ -95,8 +95,8 @@ tetrahedra = 294952
 volume = 4.186352
 gamma_min = 0.1909
 gamma_mean = 0.7967
-surface_seconds = 0.4407
-volume_seconds = 3.2004
+surface_seconds = 0.3238
+volume_seconds = 2.6066
 
 [[case]]
 solid = "cylinder"
@@ -107,8 +107,8 @@ tetrahedra = 7933
 volume = 1.563263
 gamma_min = 0.3002
 gamma_mean = 0.7828
-surface_seconds = 0.0355
-volume_seconds = 0.0666
+surface_seconds = 0.0250
+volume_seconds = 0.0520
 
 [[case]]
 solid = "cylinder"
@@ -119,8 +119,8 @@ tetrahedra = 59581
 volume = 1.568854
 gamma_min = 0.2097
 gamma_mean = 0.7953
-surface_seconds = 0.1349
-volume_seconds = 0.5039
+surface_seconds = 0.0997
+volume_seconds = 0.4136
 
 [[case]]
 solid = "cylinder"
@@ -131,8 +131,8 @@ tetrahedra = 265942
 volume = 1.570097
 gamma_min = 0.2760
 gamma_mean = 0.7981
-surface_seconds = 0.3572
-volume_seconds = 3.2261
+surface_seconds = 0.2794
+volume_seconds = 2.6794
 
 [[case]]
 solid = "torus"
@@ -143,8 +143,8 @@ tetrahedra = 14468
 volume = 9.760711
 gamma_min = 0.2631
 gamma_mean = 0.7800
-surface_seconds = 0.0809
-volume_seconds = 0.1714
+surface_seconds = 0.0619
+volume_seconds = 0.1338
 
 [[case]]
 solid = "torus"
@@ -155,8 +155,8 @@ tetrahedra = 47127
 volume = 9.822002
 gamma_min = 0.1530
 gamma_mean = 0.7830
-surface_seconds = 0.1629
-volume_seconds = 0.5740
+surface_seconds = 0.1394
+volume_seconds = 0.4558
 
 [[case]]
 solid = "torus"
@@ -167,8 +167,8 @@ tetrahedra = 133188
 volume = 9.845973
 gamma_min = 0.1191
 gamma_mean = 0.7910
-surface_seconds = 0.3155
-volume_seconds = 1.7949
+surface_seconds = 0.2855
+volume_seconds = 1.4868
 
 [[case]]
 solid = "drilled_block"
@@ -179,8 +179,8 @@ tetrahedra = 10345
 volume = 6.445704
 gamma_min = 0.3003
 gamma_mean = 0.7862
-surface_seconds = 0.0386
-volume_seconds = 0.0807
+surface_seconds = 0.0360
+volume_seconds = 0.0659
 
 [[case]]
 solid = "drilled_block"
@@ -191,8 +191,8 @@ tetrahedra = 59861
 volume = 6.434069
 gamma_min = 0.3002
 gamma_mean = 0.7917
-surface_seconds = 0.1397
-volume_seconds = 0.5012
+surface_seconds = 0.1090
+volume_seconds = 0.4001
 
 [[case]]
 solid = "drilled_block"
@@ -203,5 +203,5 @@ tetrahedra = 236283
 volume = 6.431145
 gamma_min = 0.2377
 gamma_mean = 0.7963
-surface_seconds = 0.3656
-volume_seconds = 2.6932
+surface_seconds = 0.2913
+volume_seconds = 2.2255

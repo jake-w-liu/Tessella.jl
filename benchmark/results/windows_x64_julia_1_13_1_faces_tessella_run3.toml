@@ -1,0 +1,25 @@
+# Tessella commit ebf3fed7 (0.1.3). Intel Core Ultra 7 265K, Windows 11, one thread.
+implementation = "Tessella 0.1.3"
+julia = "1.13.1"
+threads = 1
+
+[[grid]]
+faces = 25
+nodes = 886
+triangles = 1670
+curve_seconds = 0.0012
+surface_seconds = 0.0081
+
+[[grid]]
+faces = 100
+nodes = 3430
+triangles = 6658
+curve_seconds = 0.0042
+surface_seconds = 0.0325
+
+[[grid]]
+faces = 400
+nodes = 13473
+triangles = 26544
+curve_seconds = 0.0179
+surface_seconds = 0.1586

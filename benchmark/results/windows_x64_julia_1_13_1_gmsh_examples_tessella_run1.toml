@@ -1,0 +1,317 @@
+# Tessella commit ebf3fed7 (0.1.3). Intel Core Ultra 7 265K, Windows 11, one thread.
+# Tessella 0.1.3, Julia 1.13.1, 1 thread(s)
+
+[[file]]
+name = "tutorials/t1.geo"
+open_seconds = 0.0020
+generate_seconds = [0.0003, 0.0029, 0.0018]
+nodes = [80, 405, 405]
+surface_cells = [0, 728, 728]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t10.geo"
+open_seconds = 0.0056
+generate_seconds = [0.0229, 0.1636, 0.2370]
+nodes = [575, 23170, 23170]
+surface_cells = [0, 45762, 45762]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t11.geo"
+open_seconds = 0.0025
+generate_seconds = [0.0041, 0.1459, 0.0105]
+nodes = [66, 3518, 3518]
+surface_cells = [0, 3484, 3484]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t12.geo"
+open_seconds = 0.0037
+generate_seconds = [0.0008]
+nodes = [67]
+surface_cells = [0]
+volume_cells = [0]
+error = "generate(2): ArgumentError: API.mesh.generate: Point[9] is not coplanar with Surface[1]"
+
+[[file]]
+name = "tutorials/t14.geo"
+open_seconds = 0.0053
+generate_seconds = []
+nodes = []
+surface_cells = []
+volume_cells = []
+error = "generate(1): Cell Complex is empty: check the domain and the mesh"
+
+[[file]]
+name = "tutorials/t15.geo"
+open_seconds = 0.0060
+generate_seconds = [0.0005, 0.0027, 0.0050]
+nodes = [65, 160, 162]
+surface_cells = [0, 302, 302]
+volume_cells = [0, 0, 431]
+error = ""
+
+[[file]]
+name = "tutorials/t16.geo"
+open_seconds = 0.0165
+generate_seconds = [0.0287, 0.0651, 0.2567]
+nodes = [244, 1536, 3128]
+surface_cells = [0, 3048, 3048]
+volume_cells = [0, 0, 15307]
+error = ""
+
+[[file]]
+name = "tutorials/t18.geo"
+open_seconds = -1.0000
+generate_seconds = []
+nodes = []
+surface_cells = []
+volume_cells = []
+error = "open: mesh_boolean: non-general-position degeneracy between A-face 1 and B-face 1 (vertex/edge on the other's plane, or coplan"
+
+[[file]]
+name = "tutorials/t19.geo"
+open_seconds = 0.0162
+generate_seconds = [3.7323]
+nodes = [983]
+surface_cells = [0]
+volume_cells = [0]
+error = "generate(2): ArgumentError: insert_segment!: proposed constraint (82,83) overlaps existing constraint (81,82)"
+
+[[file]]
+name = "tutorials/t2.geo"
+open_seconds = 0.0066
+generate_seconds = [0.0016, 0.0119, 0.0172]
+nodes = [278, 1426, 1533]
+surface_cells = [0, 2724, 2724]
+volume_cells = [0, 0, 2348]
+error = ""
+
+[[file]]
+name = "tutorials/t20.geo"
+open_seconds = 0.6599
+generate_seconds = [0.2056]
+nodes = [474]
+surface_cells = [0]
+volume_cells = [0]
+error = "generate(2): ArgumentError: mesh_model_surface: Point[3] is not coplanar with Surface[13]"
+
+[[file]]
+name = "tutorials/t21.geo"
+open_seconds = 0.0466
+generate_seconds = [0.0032, 0.0117, 0.0138]
+nodes = [1193, 2054, 2054]
+surface_cells = [1878, 3756, 3756]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t3.geo"
+open_seconds = 0.0053
+generate_seconds = [0.0012, 0.0158, 0.2723]
+nodes = [434, 3558, 11358]
+surface_cells = [0, 5872, 5872]
+volume_cells = [0, 0, 34216]
+error = ""
+
+[[file]]
+name = "tutorials/t4.geo"
+open_seconds = 0.0081
+generate_seconds = [0.0016, 0.0052, 0.0028]
+nodes = [164, 787, 787]
+surface_cells = [0, 1449, 1449]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t5.geo"
+open_seconds = 0.0507
+generate_seconds = [0.0078, 0.0562, 0.1168]
+nodes = [364, 1819, 3724]
+surface_cells = [0, 3604, 3604]
+volume_cells = [0, 0, 18022]
+error = ""
+
+[[file]]
+name = "tutorials/t6.geo"
+open_seconds = 0.0059
+generate_seconds = [0.0004, 0.0033, 0.0024]
+nodes = [132, 700, 700]
+surface_cells = [0, 713, 713]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t7.geo"
+open_seconds = 0.0135
+generate_seconds = [0.0002, 0.0005, 0.0003]
+nodes = [4, 4, 4]
+surface_cells = [0, 2, 2]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/antenna.geo"
+open_seconds = 0.1862
+generate_seconds = [0.0295, 0.5162, 0.0893]
+nodes = [5110, 10716, 10716]
+surface_cells = [0, 21518, 21518]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/cone.geo"
+open_seconds = 0.0028
+generate_seconds = [0.0007, 0.0157]
+nodes = [124, 528]
+surface_cells = [0, 1160]
+volume_cells = [0, 0]
+error = "generate(3): mesh_model_volume: invalid mesh — 1 negatively-oriented tets"
+
+[[file]]
+name = "examples/simple_geo/cube.geo"
+open_seconds = 0.0023
+generate_seconds = [0.0004, 0.0025, 0.0030]
+nodes = [44, 132, 141]
+surface_cells = [0, 260, 260]
+volume_cells = [0, 0, 375]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/filter.geo"
+open_seconds = 0.0389
+generate_seconds = [0.0053, 0.0499, 0.0983]
+nodes = [570, 2228, 2852]
+surface_cells = [0, 4588, 4588]
+volume_cells = [0, 0, 11592]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/hex.geo"
+open_seconds = 0.0075
+generate_seconds = [0.0007, 0.0036, 0.0037]
+nodes = [132, 294, 375]
+surface_cells = [0, 288, 288]
+volume_cells = [0, 0, 192]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/homology.geo"
+open_seconds = 0.0098
+generate_seconds = []
+nodes = []
+surface_cells = []
+volume_cells = []
+error = "generate(1): Cell Complex is empty: check the domain and the mesh"
+
+[[file]]
+name = "examples/simple_geo/indheat.geo"
+open_seconds = 0.0337
+generate_seconds = [0.0423, 0.2105, 0.3307]
+nodes = [1807, 3985, 6764]
+surface_cells = [0, 7362, 7362]
+volume_cells = [0, 0, 37893]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/machine.geo"
+open_seconds = 0.1151
+generate_seconds = [0.0106, 0.0498, 0.0297]
+nodes = [1296, 7483, 7483]
+surface_cells = [0, 14823, 14823]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/piece-extr-rec.geo"
+open_seconds = 0.0122
+generate_seconds = [0.0044, 0.0537, 0.0639]
+nodes = [1215, 6106, 15324]
+surface_cells = [0, 6146, 6146]
+volume_cells = [0, 0, 12230]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/piece-extr.geo"
+open_seconds = 0.0119
+generate_seconds = [0.0050, 0.0281, 0.2398]
+nodes = [1179, 5748, 14228]
+surface_cells = [0, 11560, 11560]
+volume_cells = [0, 0, 67800]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/piece.geo"
+open_seconds = 0.0111
+generate_seconds = [0.0073, 0.0609, 0.1224]
+nodes = [817, 3548, 4198]
+surface_cells = [0, 7160, 7160]
+volume_cells = [0, 0, 14142]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/pripyrtet.geo"
+open_seconds = 0.0022
+generate_seconds = [0.0005, 0.0012, 0.0025]
+nodes = [35, 95, 133]
+surface_cells = [0, 150, 150]
+volume_cells = [0, 0, 162]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/sphere-discrete.geo"
+open_seconds = 0.0202
+generate_seconds = []
+nodes = []
+surface_cells = []
+volume_cells = []
+error = "generate(1): model_bounding_box: Volume[1] has no boundary curves; rebuild the model"
+
+[[file]]
+name = "examples/simple_geo/sphere.geo"
+open_seconds = 0.0043
+generate_seconds = [0.0008, 0.0060, 0.0023]
+nodes = [31, 58, 59]
+surface_cells = [0, 110, 110]
+volume_cells = [0, 0, 110]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/splines.geo"
+open_seconds = 0.0074
+generate_seconds = [0.0105, 0.0422, 0.0191]
+nodes = [782, 6538, 6538]
+surface_cells = [0, 12266, 12266]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/square_regular.geo"
+open_seconds = 0.0021
+generate_seconds = [0.0006, 0.0016, 0.0012]
+nodes = [72, 361, 361]
+surface_cells = [0, 162, 162]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/tower.geo"
+open_seconds = 0.0642
+generate_seconds = [0.0211, 0.0261, 0.0250]
+nodes = [2826, 9788, 9788]
+surface_cells = [0, 7200, 7200]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/transfinite.geo"
+open_seconds = 0.0096
+generate_seconds = [0.0015, 0.0173, 0.0248]
+nodes = [273, 1809, 4881]
+surface_cells = [0, 1944, 1944]
+volume_cells = [0, 0, 4374]
+error = ""

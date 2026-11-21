@@ -6,7 +6,8 @@
 #     julia --project=. --startup-file=no -O2 --threads=1 benchmark/solid_meshing.jl --faces [results.toml]
 #
 # Every case is meshed twice in the same process and the second run is
-# reported, so compilation is excluded. Times are wall-clock seconds for
+# reported, so compilation is excluded; garbage left by earlier cases is
+# collected before the clock starts. Times are wall-clock seconds for
 # `generate(2)` (curves and surfaces) and for the following `generate(3)`.
 # `--faces` runs the face-count cases instead: an n-by-n grid of unit plane
 # faces at size 0.2, timed for `generate(1)` and the following `generate(2)`.
@@ -44,6 +45,7 @@ function measure(build, size)
         A.model.occ.synchronize()
         A.option("Mesh.MeshSizeMin", size)
         A.option("Mesh.MeshSizeMax", size)
+        GC.gc()     # the previous case's garbage is not this case's time
         surface = @elapsed A.mesh.generate(2)
         volume = @elapsed A.mesh.generate(3)
         node_tags, coordinates, _ = A.mesh.get_nodes()
@@ -104,6 +106,7 @@ function measure_faces(n)
         plane_grid(n)
         A.option("Mesh.MeshSizeMin", 0.2)
         A.option("Mesh.MeshSizeMax", 0.2)
+        GC.gc()     # the previous case's garbage is not this case's time
         curves = @elapsed A.mesh.generate(1)
         surfaces = @elapsed A.mesh.generate(2)
         node_tags, _, _ = A.mesh.get_nodes()

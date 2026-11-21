@@ -1,139 +1,139 @@
-# Tessella commit fa0b2268 (released as v0.1.2). Intel Core Ultra 7 265K, Windows 11, one thread.
-implementation = "Tessella 0.1.1"
+# Tessella commit ebf3fed7 (0.1.3). Intel Core Ultra 7 265K, Windows 11, one thread.
+implementation = "Tessella 0.1.3"
 julia = "1.13.1"
 threads = 1
 
 [[case]]
 solid = "box"
 size = 0.1
-nodes = 1199
-triangles = 1472
-tetrahedra = 4966
+nodes = 1201
+triangles = 1470
+tetrahedra = 4977
 volume = 1.000000
-gamma_min = 0.3011
-gamma_mean = 0.7815
-surface_seconds = 0.0364
-volume_seconds = 0.0659
+gamma_min = 0.3001
+gamma_mean = 0.7855
+surface_seconds = 0.0070
+volume_seconds = 0.0299
 
 [[case]]
 solid = "box"
 size = 0.05
-nodes = 7457
-triangles = 5664
-tetrahedra = 37357
+nodes = 7435
+triangles = 5648
+tetrahedra = 37210
 volume = 1.000000
-gamma_min = 0.3001
-gamma_mean = 0.7950
-surface_seconds = 0.1052
-volume_seconds = 0.3669
+gamma_min = 0.2725
+gamma_mean = 0.7946
+surface_seconds = 0.0283
+volume_seconds = 0.2864
 
 [[case]]
 solid = "box"
 size = 0.03
-nodes = 32655
-triangles = 16430
-tetrahedra = 178145
+nodes = 32774
+triangles = 16436
+tetrahedra = 178858
 volume = 1.000000
-gamma_min = 0.2798
-gamma_mean = 0.7969
-surface_seconds = 0.4742
-volume_seconds = 1.9871
+gamma_min = 0.2644
+gamma_mean = 0.7971
+surface_seconds = 0.0987
+volume_seconds = 1.1902
 
 [[case]]
 solid = "box"
 size = 0.02
-nodes = 98561
-triangles = 34972
-tetrahedra = 562185
+nodes = 98270
+triangles = 34990
+tetrahedra = 560539
 volume = 1.000000
-gamma_min = 0.1951
-gamma_mean = 0.7993
-surface_seconds = 0.6657
-volume_seconds = 7.0714
+gamma_min = 0.2564
+gamma_mean = 0.7989
+surface_seconds = 0.2255
+volume_seconds = 3.9503
 
 [[case]]
 solid = "sphere"
 size = 0.2
-nodes = 667
+nodes = 661
 triangles = 806
-tetrahedra = 2736
-volume = 4.129705
-gamma_min = 0.3009
-gamma_mean = 0.7782
-surface_seconds = 0.0123
-volume_seconds = 0.0311
+tetrahedra = 2702
+volume = 4.130700
+gamma_min = 0.3001
+gamma_mean = 0.7779
+surface_seconds = 0.0061
+volume_seconds = 0.0165
 
 [[case]]
 solid = "sphere"
 size = 0.1
-nodes = 4079
+nodes = 4140
 triangles = 3184
-tetrahedra = 20225
-volume = 4.174146
-gamma_min = 0.2584
-gamma_mean = 0.7891
-surface_seconds = 0.0414
-volume_seconds = 0.1873
+tetrahedra = 20663
+volume = 4.174162
+gamma_min = 0.2978
+gamma_mean = 0.7883
+surface_seconds = 0.0216
+volume_seconds = 0.1095
 
 [[case]]
 solid = "sphere"
 size = 0.06
-nodes = 16666
+nodes = 16373
 triangles = 8600
-tetrahedra = 90510
-volume = 4.183392
-gamma_min = 0.3000
-gamma_mean = 0.7943
-surface_seconds = 0.1450
-volume_seconds = 1.3868
+tetrahedra = 88575
+volume = 4.183393
+gamma_min = 0.2505
+gamma_mean = 0.7949
+surface_seconds = 0.0588
+volume_seconds = 0.5160
 
 [[case]]
 solid = "sphere"
 size = 0.04
-nodes = 52270
+nodes = 52655
 triangles = 19036
-tetrahedra = 297451
+tetrahedra = 299836
 volume = 4.186356
-gamma_min = 0.2654
-gamma_mean = 0.7968
-surface_seconds = 0.2685
-volume_seconds = 3.9046
+gamma_min = 0.2145
+gamma_mean = 0.7970
+surface_seconds = 0.1276
+volume_seconds = 1.8045
 
 [[case]]
 solid = "cylinder"
 size = 0.1
-nodes = 1833
-triangles = 1954
-tetrahedra = 8136
-volume = 1.563252
-gamma_min = 0.3031
-gamma_mean = 0.7841
-surface_seconds = 0.0301
-volume_seconds = 0.0916
+nodes = 1771
+triangles = 1950
+tetrahedra = 7771
+volume = 1.563257
+gamma_min = 0.3001
+gamma_mean = 0.7824
+surface_seconds = 0.0123
+volume_seconds = 0.0584
 
 [[case]]
 solid = "cylinder"
 size = 0.05
-nodes = 11641
-triangles = 7432
-tetrahedra = 60828
-volume = 1.568858
-gamma_min = 0.3002
-gamma_mean = 0.7951
-surface_seconds = 0.1038
-volume_seconds = 0.7609
+nodes = 11840
+triangles = 7436
+tetrahedra = 62101
+volume = 1.568855
+gamma_min = 0.3004
+gamma_mean = 0.7945
+surface_seconds = 0.0422
+volume_seconds = 0.4462
 
 [[case]]
 solid = "cylinder"
 size = 0.03
-nodes = 47689
-triangles = 20550
-tetrahedra = 265991
+nodes = 47643
+triangles = 20546
+tetrahedra = 265908
 volume = 1.570099
-gamma_min = 0.2852
-gamma_mean = 0.7977
-surface_seconds = 0.4363
-volume_seconds = 3.5890
+gamma_min = 0.2580
+gamma_mean = 0.7973
+surface_seconds = 0.1280
+volume_seconds = 1.8149
 
 [[case]]
 solid = "torus"
@@ -144,8 +144,8 @@ tetrahedra = 14484
 volume = 9.760722
 gamma_min = 0.3007
 gamma_mean = 0.7816
-surface_seconds = 0.1692
-volume_seconds = 0.2041
+surface_seconds = 0.0308
+volume_seconds = 0.1373
 
 [[case]]
 solid = "torus"
@@ -156,8 +156,8 @@ tetrahedra = 46956
 volume = 9.821880
 gamma_min = 0.2184
 gamma_mean = 0.7853
-surface_seconds = 0.1870
-volume_seconds = 0.7963
+surface_seconds = 0.0658
+volume_seconds = 0.4747
 
 [[case]]
 solid = "torus"
@@ -168,41 +168,41 @@ tetrahedra = 133270
 volume = 9.845981
 gamma_min = 0.2066
 gamma_mean = 0.7907
-surface_seconds = 0.4518
-volume_seconds = 1.9560
+surface_seconds = 0.1442
+volume_seconds = 1.2465
 
 [[case]]
 solid = "drilled_block"
 size = 0.15
-nodes = 2525
-triangles = 3284
-tetrahedra = 10275
-volume = 6.445761
-gamma_min = 0.3001
-gamma_mean = 0.7878
-surface_seconds = 0.0605
-volume_seconds = 0.2412
+nodes = 2533
+triangles = 3286
+tetrahedra = 10366
+volume = 6.445809
+gamma_min = 0.3010
+gamma_mean = 0.7847
+surface_seconds = 0.0154
+volume_seconds = 0.0737
 
 [[case]]
 solid = "drilled_block"
 size = 0.08
-nodes = 12335
-triangles = 10760
-tetrahedra = 59725
-volume = 6.434070
-gamma_min = 0.2943
-gamma_mean = 0.7915
-surface_seconds = 0.2847
-volume_seconds = 0.6662
+nodes = 12306
+triangles = 10728
+tetrahedra = 59612
+volume = 6.434081
+gamma_min = 0.2070
+gamma_mean = 0.7919
+surface_seconds = 0.0526
+volume_seconds = 0.4667
 
 [[case]]
 solid = "drilled_block"
 size = 0.05
-nodes = 44664
-triangles = 26870
-tetrahedra = 236509
-volume = 6.431145
-gamma_min = 0.2568
-gamma_mean = 0.7973
-surface_seconds = 0.4974
-volume_seconds = 2.9641
+nodes = 44622
+triangles = 26852
+tetrahedra = 236664
+volume = 6.431146
+gamma_min = 0.2419
+gamma_mean = 0.7956
+surface_seconds = 0.1524
+volume_seconds = 1.6464

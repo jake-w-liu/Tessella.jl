@@ -46,9 +46,14 @@ digest(a) = bytes2hex(sha256(reinterpret(UInt8, vec(a))))
         capacities = [P._native_cell_cache_defaults(last(entry)...) for entry in reported]
         @test issorted(first.(reported))
         # Compiled, `detected` is what CPUID said; interpreted, it is the
-        # operating system's answer. Either way it is one of these.
+        # operating system's answer. On hardware it is one of these either
+        # way. A virtual machine can pass its host's caches through CPUID and
+        # list its own in the system tables (GitHub's Windows runner: 256 MiB
+        # of L3 against 32 MiB), so under a hypervisor, which sets bit 31 of
+        # ECX in CPUID leaf 1, the compiled answer is not held to the list.
         COMPILED && @test P._native_cell_cpuid(UInt32(0), UInt32(0))[1] > 0
-        @test detected in capacities
+        virtual = COMPILED && (P._native_cell_cpuid(UInt32(1), UInt32(0))[3] >> 31) % Bool
+        virtual || @test detected in capacities
     end
     @test P._native_cell_cache_defaults(0, 0, 0) == SMALL
     @test P._native_cell_cache_defaults(49152, 0, 31457280) == (49152, 262144, 31457280)

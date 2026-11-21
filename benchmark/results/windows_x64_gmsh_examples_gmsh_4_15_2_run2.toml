@@ -1,0 +1,317 @@
+# Tessella commit ebf3fed7 (0.1.3). Intel Core Ultra 7 265K, Windows 11, one thread.
+# Gmsh 4.15.2, Python API, 1 thread
+
+[[file]]
+name = "tutorials/t1.geo"
+open_seconds = 0.0003
+generate_seconds = [0.0001, 0.0061, 0.0002]
+nodes = [80, 405, 405]
+surface_cells = [0, 728, 728]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t10.geo"
+open_seconds = 0.0003
+generate_seconds = [0.0394, 0.4033, 0.0146]
+nodes = [575, 23170, 23170]
+surface_cells = [0, 45762, 45762]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t11.geo"
+open_seconds = 0.0002
+generate_seconds = [0.0062, 0.1500, 0.0017]
+nodes = [66, 3519, 3519]
+surface_cells = [0, 3485, 3485]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t12.geo"
+open_seconds = 0.0002
+generate_seconds = [0.0012, 0.0181, 0.0001]
+nodes = [111, 244, 244]
+surface_cells = [0, 308, 308]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t14.geo"
+open_seconds = 0.0005
+generate_seconds = []
+nodes = []
+surface_cells = []
+volume_cells = []
+error = "generate(1): Cell Complex is empty: check the domain and the mesh"
+
+[[file]]
+name = "tutorials/t15.geo"
+open_seconds = 0.0005
+generate_seconds = [0.0005, 0.0025, 0.0041]
+nodes = [65, 160, 165]
+surface_cells = [0, 302, 302]
+volume_cells = [0, 0, 466]
+error = ""
+
+[[file]]
+name = "tutorials/t16.geo"
+open_seconds = 0.0072
+generate_seconds = [0.0086, 0.0378, 0.0920]
+nodes = [244, 1544, 3107]
+surface_cells = [0, 3064, 3064]
+volume_cells = [0, 0, 15152]
+error = ""
+
+[[file]]
+name = "tutorials/t18.geo"
+open_seconds = 0.3069
+generate_seconds = [0.0069, 0.0370, 0.1009]
+nodes = [433, 2493, 3709]
+surface_cells = [0, 5082, 5082]
+volume_cells = [0, 0, 15086]
+error = ""
+
+[[file]]
+name = "tutorials/t19.geo"
+open_seconds = 0.0198
+generate_seconds = [0.2205, 0.3740, 0.5079]
+nodes = [719, 8045, 13680]
+surface_cells = [0, 15838, 15838]
+volume_cells = [0, 0, 57656]
+error = ""
+
+[[file]]
+name = "tutorials/t2.geo"
+open_seconds = 0.0006
+generate_seconds = [0.0034, 0.0218, 0.0184]
+nodes = [278, 1424, 1535]
+surface_cells = [0, 2720, 2720]
+volume_cells = [0, 0, 2369]
+error = ""
+
+[[file]]
+name = "tutorials/t20.geo"
+open_seconds = 0.1764
+generate_seconds = [0.0531, 0.0406, 0.0452]
+nodes = [474, 1425, 1543]
+surface_cells = [0, 3042, 3042]
+volume_cells = [0, 0, 5648]
+error = ""
+
+[[file]]
+name = "tutorials/t21.geo"
+open_seconds = 0.0247
+generate_seconds = [0.0005, 0.0187, 0.0188]
+nodes = [332, 1194, 1193]
+surface_cells = [0, 1880, 1878]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t3.geo"
+open_seconds = 0.0007
+generate_seconds = [0.0003, 0.0161, 0.0758]
+nodes = [434, 3558, 11358]
+surface_cells = [0, 5872, 5872]
+volume_cells = [0, 0, 34216]
+error = ""
+
+[[file]]
+name = "tutorials/t4.geo"
+open_seconds = 0.0005
+generate_seconds = [0.0032, 0.0117, 0.0004]
+nodes = [164, 787, 787]
+surface_cells = [0, 1449, 1449]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t5.geo"
+open_seconds = 0.0011
+generate_seconds = [0.0093, 0.0303, 0.0844]
+nodes = [364, 1581, 2984]
+surface_cells = [0, 3128, 3128]
+volume_cells = [0, 0, 14082]
+error = ""
+
+[[file]]
+name = "tutorials/t6.geo"
+open_seconds = 0.0002
+generate_seconds = [0.0005, 0.0007, 0.0002]
+nodes = [132, 700, 700]
+surface_cells = [0, 713, 713]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "tutorials/t7.geo"
+open_seconds = 0.0057
+generate_seconds = [0.0104, 0.0295, 0.0009]
+nodes = [259, 1788, 1788]
+surface_cells = [0, 3315, 3315]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/antenna.geo"
+open_seconds = 0.0057
+generate_seconds = [0.0392, 0.3050, 0.0083]
+nodes = [5110, 10716, 10716]
+surface_cells = [0, 21518, 21518]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/cone.geo"
+open_seconds = 0.0004
+generate_seconds = [0.0006, 0.0126, 0.0173]
+nodes = [124, 572, 648]
+surface_cells = [0, 1248, 1248]
+volume_cells = [0, 0, 2460]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/cube.geo"
+open_seconds = 0.0002
+generate_seconds = [0.0003, 0.0022, 0.0028]
+nodes = [44, 132, 141]
+surface_cells = [0, 260, 260]
+volume_cells = [0, 0, 373]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/filter.geo"
+open_seconds = 0.0012
+generate_seconds = [0.0076, 0.0443, 0.0818]
+nodes = [570, 2228, 2820]
+surface_cells = [0, 4588, 4588]
+volume_cells = [0, 0, 11369]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/hex.geo"
+open_seconds = 0.0006
+generate_seconds = [0.0003, 0.0005, 0.0004]
+nodes = [132, 294, 375]
+surface_cells = [0, 288, 288]
+volume_cells = [0, 0, 192]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/homology.geo"
+open_seconds = 0.0003
+generate_seconds = []
+nodes = []
+surface_cells = []
+volume_cells = []
+error = "generate(1): Cell Complex is empty: check the domain and the mesh"
+
+[[file]]
+name = "examples/simple_geo/indheat.geo"
+open_seconds = 0.0156
+generate_seconds = [0.0611, 0.0868, 0.2581]
+nodes = [1807, 4010, 6741]
+surface_cells = [0, 7412, 7412]
+volume_cells = [0, 0, 37741]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/machine.geo"
+open_seconds = 0.0019
+generate_seconds = [0.0241, 0.1245, 0.0044]
+nodes = [1296, 7503, 7503]
+surface_cells = [0, 14863, 14863]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/piece-extr-rec.geo"
+open_seconds = 0.0028
+generate_seconds = [0.0052, 0.0641, 0.0260]
+nodes = [1215, 6106, 15324]
+surface_cells = [0, 6146, 6146]
+volume_cells = [0, 0, 12230]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/piece-extr.geo"
+open_seconds = 0.0028
+generate_seconds = [0.0052, 0.0310, 0.1499]
+nodes = [1179, 5748, 14228]
+surface_cells = [0, 11560, 11560]
+volume_cells = [0, 0, 67800]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/piece.geo"
+open_seconds = 0.0028
+generate_seconds = [0.0121, 0.0620, 0.1161]
+nodes = [817, 3551, 4201]
+surface_cells = [0, 7166, 7166]
+volume_cells = [0, 0, 14131]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/pripyrtet.geo"
+open_seconds = 0.0002
+generate_seconds = [0.0006, 0.0008, 0.0004]
+nodes = [35, 95, 133]
+surface_cells = [0, 150, 150]
+volume_cells = [0, 0, 162]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/sphere-discrete.geo"
+open_seconds = 0.0035
+generate_seconds = [0.0002, 0.0002, 0.0107]
+nodes = [326, 326, 452]
+surface_cells = [648, 648, 648]
+volume_cells = [0, 0, 1639]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/sphere.geo"
+open_seconds = 0.0002
+generate_seconds = [0.0008, 0.0017, 0.0011]
+nodes = [31, 59, 60]
+surface_cells = [0, 112, 112]
+volume_cells = [0, 0, 112]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/splines.geo"
+open_seconds = 0.0003
+generate_seconds = [0.0231, 0.0990, 0.0034]
+nodes = [782, 6538, 6538]
+surface_cells = [0, 12266, 12266]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/square_regular.geo"
+open_seconds = 0.0001
+generate_seconds = [0.0002, 0.0004, 0.0004]
+nodes = [72, 361, 361]
+surface_cells = [0, 162, 162]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/tower.geo"
+open_seconds = 0.0016
+generate_seconds = [0.0341, 0.0028, 0.0025]
+nodes = [2826, 9788, 9788]
+surface_cells = [0, 7200, 7200]
+volume_cells = [0, 0, 0]
+error = ""
+
+[[file]]
+name = "examples/simple_geo/transfinite.geo"
+open_seconds = 0.0008
+generate_seconds = [0.0012, 0.0010, 0.0020]
+nodes = [273, 1809, 4881]
+surface_cells = [0, 1944, 1944]
+volume_cells = [0, 0, 4374]
+error = ""

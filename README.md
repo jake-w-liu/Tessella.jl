@@ -15,12 +15,17 @@ contexts and limitations; complete Gmsh parity is not guaranteed.
 
 ## Install
 
-Until registration is complete, install from the repository:
+Tessella is in Julia's General registry:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/jake-w-liu/Tessella.jl")
+Pkg.add("Tessella")
 ```
+
+The first load compiles the package and a set of common meshing calls, which
+takes several minutes and several gigabytes of memory; later sessions load in
+a few seconds. For the development version use
+`Pkg.add(url="https://github.com/jake-w-liu/Tessella.jl")`.
 
 ## Generate a mesh
 

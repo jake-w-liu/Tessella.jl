@@ -164,63 +164,132 @@ tetrahedra, with one uniform mesh size and default options. It measures the
 whole pipeline a user runs, including entity bookkeeping, not the kernels alone.
 
 On the measured Windows host (Intel Core Ultra 7 265K, Julia 1.13.1, Gmsh
-4.15.2, one thread each), Tessella's volume pass took between 0.92 and 1.30
-times Gmsh's on the six meshes above 100,000 tetrahedra, and between 1.0 and
-1.1 times on the largest mesh of each curved solid. It took 1.3 to 1.7 times
-as long between 20,000 and 100,000 tetrahedra and 1.15 to 2.2 times below
-20,000. The surfaces of the sphere, cylinder and torus meshed in 0.5 to 1.0
-times Gmsh's time; the planar faces of the box took 1.4 to 2.1 times as long
-and the drilled block 1.1 to 2.0 times. Tessella is faster than Gmsh in one
-volume case, the 562,000-tetrahedron box.
+4.15.2, one thread each, Tessella 0.1.3), Tessella's volume pass took between
+0.65 and 0.89 times Gmsh's on the six meshes above 100,000 tetrahedra, between
+0.91 and 1.30 times on the six between 20,000 and 100,000, and between 0.95
+and 1.13 times on the five below 20,000. Its surface pass took between 0.37
+and 0.65 times Gmsh's in every case. Tessella is the faster program on large
+meshes and on surfaces; on small and medium volumes the two are within a
+third of each other, and Gmsh is ahead on seven of those eleven.
 
 | Solid | Size | Tetrahedra (T / G) | Min. gamma (T / G) | Surface s (T / G) | Volume s (T / G) | Volume T/G |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| box | 0.1 | 4,966 / 4,979 | 0.30 / 0.30 | 0.024 / 0.014 | 0.064 / 0.029 | 2.20 |
-| box | 0.05 | 37,357 / 37,262 | 0.30 / 0.30 | 0.097 / 0.054 | 0.356 / 0.214 | 1.67 |
-| box | 0.03 | 178,145 / 178,869 | 0.28 / 0.28 | 0.328 / 0.153 | 1.944 / 1.494 | 1.30 |
-| box | 0.02 | 562,185 / 560,591 | 0.20 / 0.26 | 0.637 / 0.465 | 6.658 / 7.245 | 0.92 |
-| sphere | 0.2 | 2,736 / 2,583 | 0.30 / 0.27 | 0.009 / 0.019 | 0.031 / 0.021 | 1.52 |
-| sphere | 0.1 | 20,225 / 20,564 | 0.26 / 0.29 | 0.041 / 0.072 | 0.186 / 0.146 | 1.28 |
-| sphere | 0.06 | 90,510 / 91,035 | 0.30 / 0.30 | 0.113 / 0.195 | 1.220 / 0.707 | 1.73 |
-| sphere | 0.04 | 297,451 / 294,952 | 0.27 / 0.19 | 0.269 / 0.434 | 3.322 / 3.192 | 1.04 |
-| cylinder | 0.1 | 8,136 / 7,933 | 0.30 / 0.30 | 0.020 / 0.035 | 0.075 / 0.066 | 1.15 |
-| cylinder | 0.05 | 60,828 / 59,581 | 0.30 / 0.21 | 0.104 / 0.135 | 0.723 / 0.504 | 1.43 |
-| cylinder | 0.03 | 265,991 / 265,942 | 0.29 / 0.28 | 0.341 / 0.357 | 3.262 / 3.226 | 1.01 |
-| torus | 0.15 | 14,484 / 14,468 | 0.30 / 0.26 | 0.043 / 0.070 | 0.204 / 0.158 | 1.29 |
-| torus | 0.1 | 46,956 / 47,127 | 0.22 / 0.15 | 0.143 / 0.157 | 0.738 / 0.574 | 1.28 |
-| torus | 0.07 | 133,270 / 133,188 | 0.21 / 0.12 | 0.312 / 0.316 | 1.921 / 1.781 | 1.08 |
-| drilled block | 0.15 | 10,275 / 10,345 | 0.30 / 0.30 | 0.043 / 0.039 | 0.122 / 0.081 | 1.51 |
-| drilled block | 0.08 | 59,725 / 59,861 | 0.29 / 0.30 | 0.282 / 0.139 | 0.662 / 0.485 | 1.37 |
-| drilled block | 0.05 | 236,509 / 236,283 | 0.26 / 0.24 | 0.421 / 0.366 | 2.727 / 2.668 | 1.02 |
+| box | 0.1 | 4,977 / 4,979 | 0.30 / 0.30 | 0.007 / 0.014 | 0.030 / 0.032 | 0.95 |
+| box | 0.05 | 37,210 / 37,262 | 0.27 / 0.30 | 0.028 / 0.053 | 0.281 / 0.216 | 1.30 |
+| box | 0.03 | 178,858 / 178,869 | 0.26 / 0.28 | 0.099 / 0.159 | 1.190 / 1.337 | 0.89 |
+| box | 0.02 | 560,539 / 560,591 | 0.26 / 0.26 | 0.222 / 0.342 | 3.908 / 6.047 | 0.65 |
+| sphere | 0.2 | 2,702 / 2,583 | 0.30 / 0.27 | 0.006 / 0.014 | 0.016 / 0.016 | 1.04 |
+| sphere | 0.1 | 20,663 / 20,564 | 0.30 / 0.29 | 0.021 / 0.053 | 0.105 / 0.112 | 0.93 |
+| sphere | 0.06 | 88,575 / 91,035 | 0.25 / 0.30 | 0.059 / 0.144 | 0.516 / 0.569 | 0.91 |
+| sphere | 0.04 | 299,836 / 294,952 | 0.21 / 0.19 | 0.119 / 0.324 | 1.804 / 2.607 | 0.69 |
+| cylinder | 0.1 | 7,771 / 7,933 | 0.30 / 0.30 | 0.012 / 0.025 | 0.058 / 0.052 | 1.12 |
+| cylinder | 0.05 | 62,101 / 59,581 | 0.30 / 0.21 | 0.042 / 0.100 | 0.446 / 0.414 | 1.08 |
+| cylinder | 0.03 | 265,908 / 265,942 | 0.26 / 0.28 | 0.123 / 0.279 | 1.815 / 2.655 | 0.68 |
+| torus | 0.15 | 14,484 / 14,468 | 0.30 / 0.26 | 0.027 / 0.060 | 0.130 / 0.134 | 0.97 |
+| torus | 0.1 | 46,956 / 47,127 | 0.22 / 0.15 | 0.066 / 0.138 | 0.475 / 0.456 | 1.04 |
+| torus | 0.07 | 133,270 / 133,188 | 0.21 / 0.12 | 0.144 / 0.285 | 1.246 / 1.482 | 0.84 |
+| drilled block | 0.15 | 10,366 / 10,345 | 0.30 / 0.30 | 0.015 / 0.034 | 0.074 / 0.065 | 1.13 |
+| drilled block | 0.08 | 59,612 / 59,861 | 0.21 / 0.30 | 0.051 / 0.109 | 0.467 / 0.400 | 1.17 |
+| drilled block | 0.05 | 236,664 / 236,283 | 0.24 / 0.24 | 0.144 / 0.287 | 1.634 / 2.225 | 0.73 |
 
 `T` is Tessella and `G` is Gmsh. Times are seconds; each driver meshes a case
 twice in one process and reports the second run, which excludes compilation,
-and the table gives the faster of two such driver runs. The
+and the table gives the faster of two such driver runs. The Tessella driver
+collects the garbage of earlier cases before it starts the clock. The
 [retained results](results/) hold both runs of each program. Minimum gamma is
-Gmsh's `gamma` quality of the worst tetrahedron. The two programs do not produce
-the same meshes: tetrahedron counts differ by under 3%, 6% on the coarsest
-sphere, and the errors of the enclosed volumes against the exact solids agree
-to within 1%.
+Gmsh's `gamma` quality of the worst tetrahedron: Tessella's is lower on five
+rows, by up to 0.09 (the drilled block at 0.08), and higher on seven. The two
+programs do not produce the same meshes: tetrahedron counts differ by under
+5%, and the errors of the enclosed volumes against the exact solids agree to
+within 1%.
 
 The drilled block is a 2×2×2 box with a cylinder of radius 0.5 cut through it.
 
 ### Models with many faces
 
-The cost that the table above does not show grows with the number of CAD
-faces. Tessella rebuilds its mesh bookkeeping after every face it meshes, so
-the surface pass grows with the square of the face count. For an n×n grid of
-unit plane faces at size 0.2, where both programs produce identical node and
-triangle counts:
+An n×n grid of unit plane faces at size 0.2 measures the cost that grows with
+the number of CAD faces. Both programs produce identical node and triangle
+counts. Times are the median of four driver runs:
 
 | Faces | Triangles | Curves s (T / G) | Surfaces s (T / G) |
 | ---: | ---: | ---: | ---: |
-| 25 | 1,670 | 0.013 / 0.001 | 0.091 / 0.014 |
-| 100 | 6,658 | 0.048 / 0.005 | 0.659 / 0.052 |
-| 400 | 26,544 | 0.206 / 0.018 | 9.760 / 0.206 |
+| 25 | 1,670 | 0.001 / 0.002 | 0.008 / 0.014 |
+| 100 | 6,658 | 0.004 / 0.005 | 0.031 / 0.054 |
+| 400 | 26,544 | 0.016 / 0.019 | 0.156 / 0.217 |
 
-The triangulation itself takes about a quarter of a second of the 400-face
-run; the rest is the per-face rebuild. Until that is made incremental, expect
-models with hundreds of faces to mesh far more slowly than in Gmsh.
+Tessella 0.1.2 took 9.8 s for the surfaces of the 400-face grid: it rebuilt
+its mesh bookkeeping after every face. That is gone. What remains of the
+bookkeeping is a record per mesh cell at several stages of a generation: in
+the examples below, `tutorials/t10.geo` meshes its 46,000 triangles in 0.16 s
+where Gmsh takes 0.40 s, and the `generate(3)` that follows, which has no
+volume to mesh, takes 0.24 s and allocates 174 MiB where Gmsh takes 0.015 s.
+
+### Gmsh's tutorials and examples
+
+The third comparison runs Gmsh's own `.geo` files: every file of `tutorials`
+and `examples/simple_geo` in the Gmsh 4.15.2 source tree, opened and meshed in
+one, two and three dimensions by both programs. Four files that need a
+post-processing view, a surface mesh or a background mesh file are left out.
+
+Of the 35 files, Gmsh completes 33 (the two homology files stop for want of a
+mesh, in both programs). Tessella completes 27 and stops on six more: a
+compound surface (`t12`), two OpenCASCADE Boolean models (`t18`, `t19`), a
+sliced STEP solid in two dimensions (`t20`), the volume of `cone.geo` and the
+discrete `sphere-discrete.geo`. Its node counts equal Gmsh's on 27 files in
+one dimension; node and cell counts are equal on 17 files in two dimensions
+and on 14 in three. On the files that complete, a count that differs does so
+by under 3%, except on `t5` (15% more triangles on its ruled sphere patches
+and 28% more tetrahedra), `t15` (8% fewer tetrahedra), `t7`, where the
+background mesh view is not applied (2 triangles against 3,315), and `t21`,
+a partitioned mesh (3,756 cells against 1,880).
+
+End to end (open and three `generate` calls), on the 26 files that both
+programs mesh, Tessella took a median of 1.5 times Gmsh's time (4.4 s against
+2.8 s in total) and was the faster program on three (`splines.geo`, `t2`,
+`t10`). The largest ratios are on the smallest structured files, where a few
+milliseconds of bookkeeping are the whole run: `transfinite.geo` takes 0.053 s
+against 0.005 s. These are small models, of at most 70,000 cells.
+
+| File | 1-D nodes (T / G) | 2-D cells (T / G) | 3-D cells (T / G) | Seconds (T / G) | Tessella stops at |
+| --- | ---: | ---: | ---: | ---: | --- |
+| t1.geo | 80 / 80 | 728 / 728 | 0 / 0 | 0.01 / 0.01 |  |
+| t10.geo | 575 / 575 | 45,762 / 45,762 | 0 / 0 | 0.43 / 0.46 |  |
+| t11.geo | 66 / 66 | 3,484 / 3,485 | 0 / 0 | 0.16 / 0.16 |  |
+| t12.geo | 67 / 111 | – / 308 | – / 0 | 0.00 / 0.02 | generate(2) |
+| t14.geo | – / – | – / – | – / – | 0.01 / 0.00 | as Gmsh: generate(1) |
+| t15.geo | 65 / 65 | 302 / 302 | 431 / 466 | 0.01 / 0.01 |  |
+| t16.geo | 244 / 244 | 3,048 / 3,064 | 15,307 / 15,152 | 0.37 / 0.15 |  |
+| t18.geo | – / 433 | – / 5,082 | – / 15,086 | 0.00 / 0.45 | open |
+| t19.geo | 983 / 719 | – / 15,838 | – / 57,656 | 3.75 / 1.11 | generate(2) |
+| t2.geo | 278 / 278 | 2,724 / 2,720 | 2,348 / 2,369 | 0.04 / 0.04 |  |
+| t20.geo | 474 / 474 | – / 3,042 | – / 5,648 | 0.87 / 0.32 | generate(2) |
+| t21.geo | 1,193 / 332 | 3,756 / 1,880 | 0 / 0 | 0.07 / 0.06 |  |
+| t3.geo | 434 / 434 | 5,872 / 5,872 | 34,216 / 34,216 | 0.29 / 0.09 |  |
+| t4.geo | 164 / 164 | 1,449 / 1,449 | 0 / 0 | 0.02 / 0.02 |  |
+| t5.geo | 364 / 364 | 3,604 / 3,128 | 18,022 / 14,082 | 0.23 / 0.13 |  |
+| t6.geo | 132 / 132 | 713 / 713 | 0 / 0 | 0.01 / 0.00 |  |
+| t7.geo | 4 / 259 | 2 / 3,315 | 0 / 0 | 0.01 / 0.05 |  |
+| antenna.geo | 5,110 / 5,110 | 21,518 / 21,518 | 0 / 0 | 0.82 / 0.36 |  |
+| cone.geo | 124 / 124 | 1,160 / 1,248 | – / 2,460 | 0.02 / 0.03 | generate(3) |
+| cube.geo | 44 / 44 | 260 / 260 | 375 / 373 | 0.01 / 0.01 |  |
+| filter.geo | 570 / 570 | 4,588 / 4,588 | 11,592 / 11,369 | 0.19 / 0.13 |  |
+| hex.geo | 132 / 132 | 288 / 288 | 192 / 192 | 0.01 / 0.00 |  |
+| homology.geo | – / – | – / – | – / – | 0.01 / 0.00 | as Gmsh: generate(1) |
+| indheat.geo | 1,807 / 1,807 | 7,362 / 7,412 | 37,893 / 37,741 | 0.61 / 0.42 |  |
+| machine.geo | 1,296 / 1,296 | 14,823 / 14,863 | 0 / 0 | 0.20 / 0.15 |  |
+| piece-extr-rec.geo | 1,215 / 1,215 | 6,146 / 6,146 | 12,230 / 12,230 | 0.13 / 0.10 |  |
+| piece-extr.geo | 1,179 / 1,179 | 11,560 / 11,560 | 67,800 / 67,800 | 0.28 / 0.19 |  |
+| piece.geo | 817 / 817 | 7,160 / 7,166 | 14,142 / 14,131 | 0.20 / 0.19 |  |
+| pripyrtet.geo | 35 / 35 | 150 / 150 | 162 / 162 | 0.01 / 0.00 |  |
+| sphere-discrete.geo | – / 326 | – / 648 | – / 1,639 | 0.02 / 0.01 | generate(1) |
+| sphere.geo | 31 / 31 | 110 / 112 | 110 / 112 | 0.01 / 0.00 |  |
+| splines.geo | 782 / 782 | 12,266 / 12,266 | 0 / 0 | 0.08 / 0.13 |  |
+| square_regular.geo | 72 / 72 | 162 / 162 | 0 / 0 | 0.01 / 0.00 |  |
+| tower.geo | 2,826 / 2,826 | 7,200 / 7,200 | 0 / 0 | 0.14 / 0.04 |  |
+| transfinite.geo | 273 / 273 | 1,944 / 1,944 | 4,374 / 4,374 | 0.05 / 0.00 |  |
+
+Times are seconds for the whole file, the faster of two driver runs; a dash
+marks a step that was not reached.
 
 ### Running it
 
@@ -232,9 +301,13 @@ julia --project=. --startup-file=no -O2 --threads=1 benchmark/solid_meshing.jl t
 python benchmark/solid_meshing_gmsh.py gmsh.toml
 julia --project=. --startup-file=no -O2 --threads=1 benchmark/solid_meshing.jl --faces tessella_faces.toml
 python benchmark/solid_meshing_gmsh.py --faces gmsh_faces.toml
+julia --project=. --startup-file=no -O2 --threads=1 benchmark/gmsh_examples.jl /path/to/gmsh-4.15.2-source tessella_examples.toml
+python benchmark/gmsh_examples_gmsh.py /path/to/gmsh-4.15.2-source gmsh_examples.toml
 ```
 
 Run the programs one after the other on an idle host. Each TOML lists, per
 case, the node, triangle and tetrahedron counts, the enclosed volume, the
-minimum and mean gamma, and the two times. Omit the file name to print to
-standard output.
+minimum and mean gamma, and the two times; the examples files list, per
+`.geo` file, the time to open it, the time and the node and cell counts of
+each `generate` call, and the step and message of an error. Omit the file
+name to print to standard output.

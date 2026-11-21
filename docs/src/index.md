@@ -7,12 +7,17 @@ Julia 1.12 and 1.13 on Linux, Windows, and macOS.
 
 ## Install
 
-While the first registration is under review, install from GitHub:
+Tessella is in Julia's General registry:
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/jake-w-liu/Tessella.jl")
+Pkg.add("Tessella")
 ```
+
+The first load compiles the package and a set of common meshing calls, which
+takes several minutes and several gigabytes of memory; later sessions load in
+a few seconds. For the development version use
+`Pkg.add(url="https://github.com/jake-w-liu/Tessella.jl")`.
 
 ## Generate a volume mesh
 
