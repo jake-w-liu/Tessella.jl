@@ -317,6 +317,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_distance_edge_end_test.jl",
         "geometry/geo_negative_plane_loop_test.jl",
         "geometry/geo_periodic_shared_edge_test.jl",
+        "interfaces/api_occ_revolve_full_turn_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

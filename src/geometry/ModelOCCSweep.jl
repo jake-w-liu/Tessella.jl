@@ -1653,6 +1653,11 @@ function _model_occ_revolve(m::GeoModel,dim_tags,x,y,z,ax,ay,az,angle;
     a<=_OCC_TWO_PI || throw(ArgumentError(
         "$caller: angle magnitude must not exceed 2*Pi"))
     full=a==_OCC_TWO_PI
+    # `OCC_Internals::_setExtrudedAttributes`: "Extruded meshes by
+    # revolution only for angle < 2*Pi" — a full turn keeps its geometry but
+    # drops the Layers attributes (OCC removes the origin edge of a closed
+    # sweep), so every created entity meshes as an ordinary one.
+    full && (params=nothing)
     # The sweep-end rotation — partial turns place a rotated copy of
     # every profile entity at u=a (rim arcs, rotated edges and faces);
     # at 2*Pi the copies coincide with the sources and are skipped.

@@ -418,7 +418,10 @@ end
     check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,NaN,2pi))
     check(()->occ.revolve([(0,999)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
     check(()->occ.revolve([(4,1)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
-    check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+    # A full turn drops its Layers (OCC_Internals: "Extruded meshes by
+    # revolution only for angle < 2*Pi"), so subdivision counts that a
+    # layered full turn could not tile are accepted, as in Gmsh 4.15.2.
+    @test !isempty(occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
         numElements=[1]))
     check(()->occ.revolve([(0,p_off)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
         heights=[0.5]))
@@ -443,13 +446,11 @@ end
         occ.add_line(pi_[3],pi_[4]),occ.add_line(pi_[4],pi_[1])]
     fh2=occ.add_plane_surface([occ.add_wire(eo),occ.add_wire(ei)])
     check(()->occ.revolve([(2,fh2)],0.0,0.0,0.0,0.0,0.0,1.0,2pi))
-    # Under Layers a two-subdivision full turn welds coincident cells
-    # onto the source row, and an axis-touching profile collapses the
-    # column machinery — both reject before any bind.
-    check(()->occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
-        numElements=[2]))
+    # Under Layers an axis-touching profile collapses the column
+    # machinery and rejects before any bind; a full turn has no Layers
+    # (see above), so only a partial one reaches that check.
     _,_,fax=_meridian_rect(occ,0.0,2.0,0.0,1.0)
-    check(()->occ.revolve([(2,fax)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
+    check(()->occ.revolve([(2,fax)],0.0,0.0,0.0,0.0,0.0,1.0,pi;
         numElements=[4]))
     # Spindle disk and axis-parallel disk reject.
     dbad=occ.add_disk(0.5,0.0,0.0,1.0,1.0;zAxis=[0.0,1.0,0.0])
@@ -503,22 +504,26 @@ end
     element_types,_,_=A.mesh.get_elements(1,rim_tag)
     @test element_types==Int32[1]
 
-    # Annular profile -> revolved solid: the swept volume grades at the
-    # normalized heights; recombination emits prisms (type 6).
+    # Annular profile -> revolved solid over a partial turn: the swept
+    # volume grades at the normalized heights; recombination emits prisms.
     occ=_occ_setup()
     _,_,f=_meridian_rect(occ,1.0,2.0,0.0,1.0)
-    out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
-                    numElements=[4])
+    out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,1.5pi;
+                    numElements=[2,2],heights=[0.4,1.0],recombine=true)
     solid_tag=out[2][2]
     occ.synchronize()
     A.mesh.generate(3)
     _,coords=A.mesh.get_nodes(3,solid_tag,true)
     phis=sort!(unique!(round.(
-        [let a=mod(atan(coords[i+1],coords[i]),2pi)
-             a>2pi-1e-6 ? 0.0 : a
-         end for i in 1:3:length(coords)],digits=9)))
-    @test phis≈collect(range(0.0,2pi,length=5)[1:4]) atol=1e-9
+        [mod(atan(coords[i+1],coords[i]),2pi)
+         for i in 1:3:length(coords)],digits=9)))
+    @test phis≈[0.0,0.3pi,0.6pi,1.05pi,1.5pi] atol=1e-9   # Gmsh 4.15.2
+    element_types,_,_=A.mesh.get_elements(3,solid_tag)
+    @test 6 in element_types
+    @test !(4 in element_types)
 
+    # A full turn keeps no Layers (OCC_Internals drops the attributes for
+    # angle >= 2*Pi): the annulus meshes with tetrahedra, as in Gmsh 4.15.2.
     occ=_occ_setup()
     _,_,f=_meridian_rect(occ,1.0,2.0,0.0,1.0)
     out=occ.revolve([(2,f)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
@@ -527,28 +532,7 @@ end
     occ.synchronize()
     A.mesh.generate(3)
     element_types,_,_=A.mesh.get_elements(3,solid_tag)
-    @test 6 in element_types
-    @test !(4 in element_types)
-
-    # Disk -> torus with graded heights: layers [2,2] at cumulative
-    # boundaries 0.4/1.0 grade the turn at 0, 0.2, 0.4, 0.7 of a turn —
-    # azimuths 0, 0.4pi, 0.8pi, 1.4pi (the 2pi level welds onto 0).
-    occ=_occ_setup()
-    d=occ.add_disk(5.0,0.0,0.0,1.0,1.0;zAxis=[0.0,1.0,0.0])
-    out=occ.revolve([(2,d)],0.0,0.0,0.0,0.0,0.0,1.0,2pi;
-                    numElements=[2,2],heights=[0.4,1.0],
-                    recombine=true)
-    solid_tag=out[2][2]
-    occ.synchronize()
-    A.mesh.generate(3)
-    _,coords=A.mesh.get_nodes(3,solid_tag,true)
-    phis=sort!(unique!(round.(
-        [let a=mod(atan(coords[i+1],coords[i]),2pi)
-             a>2pi-1e-6 ? 0.0 : a
-         end for i in 1:3:length(coords)],digits=9)))
-    @test phis≈[0.0,0.4pi,0.8pi,1.4pi] atol=1e-9
-    element_types,_,_=A.mesh.get_elements(3,solid_tag)
-    @test 6 in element_types
+    @test element_types==Int32[4]
 
     # Partial turn: the same transport grades the open sector — the
     # closing column lands on the rotated copy, not the source row, so
