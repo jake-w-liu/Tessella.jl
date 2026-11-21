@@ -500,6 +500,28 @@ function _model_mesh_product(authority::_ModelMeshAuthority,dim::Int,tag::Int;
         Vector{Int32}[fill(Int32(tag),size(block.nodes,2)) for block in blocks],true)
 end
 
+# An entity's actual product read in place: no mesh is built and nothing is
+# checked again, because the pass that produced the entity validated it.
+#
+#     view=_model_mesh_product_rows(authority,dim,tag)   # `nothing` when absent
+#     view.mesh           the authority's mesh; `view.mesh.entity_data` holds
+#                         each row's label, owner and parameters
+#     view.rows[i]        the row of `view.mesh` that is the product's node i
+#     view.blocks         the product's cells; a node index is a position in
+#                         `view.rows`
+#     view.element_tags   the cells' labels, one vector per block
+#
+# Node i here is node i of `_model_mesh_product(authority,dim,tag)` in its
+# default order, and the blocks and labels are that cut's too. Everything
+# returned is the authority's own storage: read it, do not edit or keep it
+# beyond the authority.
+function _model_mesh_product_rows(authority::_ModelMeshAuthority,dim::Int,tag::Int)
+    product=get(authority.products,(dim,Int32(tag)),nothing)
+    product===nothing && return nothing
+    return (mesh=authority.mesh::MixedMesh,rows=product.rows,blocks=product.blocks,
+        element_tags=product.element_tags)
+end
+
 # The node labels of one linear triangle or quadrangle in increasing order,
 # padded to four: the cell's support without a vector per cell.
 @inline function _model_surface_cell_support(tags::Vector{UInt64},nodes::Matrix{Int32},column::Int)

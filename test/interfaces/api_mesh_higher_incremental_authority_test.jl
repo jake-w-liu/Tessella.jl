@@ -197,4 +197,41 @@ end
         A.finalize()
     end
 end
+
+# A producer reads a face's boundary Curves row by row from the authority
+# instead of cutting a validated mesh per Curve per face. The rows must be the
+# cut's rows, and reading them must not allocate with the size of the Curve.
+@testset "product rows are the product cut, read in place" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.option("Mesh.MeshSizeMin",0.25);A.option("Mesh.MeshSizeMax",0.25)
+        A.mesh.generate(2)
+        authority=A.CURRENT[].meshing.mesh_authority
+        @test M._model_mesh_product_rows(authority,1,10_000)===nothing
+        for (dim,tag) in ((1,1),(1,7),(2,3),(0,5))
+            cut=M._model_mesh_product(authority,dim,tag)
+            view=M._model_mesh_product_rows(authority,dim,tag)
+            @test (cut===nothing)==(view===nothing)
+            cut===nothing && continue
+            data=view.mesh.entity_data
+            @test length(view.rows)==size(cut.coords,2)
+            @test view.mesh.coords[:,view.rows]==cut.coords
+            @test data.external_node_tags[view.rows]==cut.entity_data.external_node_tags
+            @test data.node_entities[view.rows]==cut.entity_data.node_entities
+            @test isequal(data.node_parametric[view.rows],cut.entity_data.node_parametric)
+            @test [(block.msh,block.nodes,block.tags) for block in view.blocks]==
+                [(block.msh,block.nodes,block.tags) for block in cut.blocks]
+            @test view.element_tags==cut.entity_data.external_element_tags
+        end
+        if Base.JLOptions().compile_enabled==1
+            read_rows(authority,tag)=M._model_mesh_product_rows(authority,1,tag)
+            read_rows(authority,1)
+            @test (@allocated read_rows(authority,1))<=256
+        end
+    finally
+        A.finalize()
+    end
+end
 end
