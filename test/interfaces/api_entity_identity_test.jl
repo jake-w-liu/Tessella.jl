@@ -10,11 +10,10 @@ const _IDENTITY_API=Tessella.API
         _IDENTITY_API.initialize()
         _IDENTITY_API.model.add_box(0,0,0,1,1,1;tag=1)
         generated=_IDENTITY_API.mesh.generate(3)
+        generated_crc=mesh_crc(generated)
         # Regeneration must reproduce the public mesh exactly: Gmsh 4.15.2
         # returns identical node and element arrays from generate(3),
-        # generate(3) again and generate(3) after setEntityName. The Mesh
-        # object `generate` returns is Tessella's own and keeps its producer's
-        # node order on the first call, so it is compared by statistics.
+        # generate(3) again and generate(3) after setEntityName.
         statistics(mesh)=Base.structdiff(mesh_crc(mesh),(;sha=""))
         public()=(_IDENTITY_API.mesh.get_nodes(),_IDENTITY_API.mesh.get_elements())
         generated_statistics=statistics(generated)
@@ -35,6 +34,16 @@ const _IDENTITY_API=Tessella.API
         @test _IDENTITY_API.LAST_MESH[]===nothing
         @test _IDENTITY_API.model.get_entity_name(3,1)=="domain"
         regenerated=_IDENTITY_API.mesh.generate(3)
+        # Determinism defect, open since the round that started at 2ed5bc8f
+        # (the assertion passed there): the Mesh object returned by the first
+        # generate(3) of a session orders its nodes differently from the one
+        # every later generate(3) returns for the same model. Same node set
+        # and tetrahedron count, 34 of 335 coordinate columns in other
+        # positions; later calls agree with each other, and the public
+        # arrays below are identical throughout. Identical input should
+        # return an identical object.
+        @test_broken mesh_crc(regenerated)==generated_crc
+        regenerated_crc=mesh_crc(regenerated)
         @test statistics(regenerated)==generated_statistics
         @test public()==generated_public
         cached=_IDENTITY_API.LAST_MESH[]
@@ -47,6 +56,7 @@ const _IDENTITY_API=Tessella.API
         @test _IDENTITY_API.model.get_entity_name(3,1)==""
         @test _IDENTITY_API.model.get_entity_name(3,10)=="domain"
         retagged=_IDENTITY_API.mesh.generate(3)
+        @test mesh_crc(retagged)==regenerated_crc
         @test statistics(retagged)==generated_statistics
         @test public()==generated_public
         cached=_IDENTITY_API.LAST_MESH[]
@@ -64,7 +74,9 @@ const _IDENTITY_API=Tessella.API
         @test _IDENTITY_API.model.remove_entity_name("domain")===nothing
         @test _IDENTITY_API.LAST_MESH[]===nothing
         @test _IDENTITY_API.model.get_entity_name(3,10)==""
-        @test statistics(_IDENTITY_API.mesh.generate(3))==generated_statistics
+        renamed=_IDENTITY_API.mesh.generate(3)
+        @test mesh_crc(renamed)==regenerated_crc
+        @test statistics(renamed)==generated_statistics
         @test public()==generated_public
         cached=_IDENTITY_API.LAST_MESH[]
         @test _IDENTITY_API.model.remove_entity_name("")===nothing
