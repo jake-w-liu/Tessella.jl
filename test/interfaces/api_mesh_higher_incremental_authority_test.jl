@@ -414,4 +414,73 @@ end
         A.finalize()
     end
 end
+
+# A refinement labels the cells of the refined carrier parent by parent, after
+# checking that each parent is the actual cell of its label on the same rows.
+# The check used a catalog of the whole previous mesh; it now looks each
+# parent up by position. `catalog_cell_tags` is the catalog route, kept here
+# as the reference.
+function catalog_cell_tags(plan,previous)
+    catalog,_=M._model_mesh_primary_catalog(previous.mesh)
+    output=Vector{Union{Nothing,UInt64}}[]
+    for (bi,(msh,cells)) in enumerate(M._model_mesh_carrier_blocks(previous.carrier))
+        children=msh==1 ? 2 : msh==2 ? 4 : 8
+        tags=Union{Nothing,UInt64}[]
+        for parent in axes(cells,2)
+            source=previous.carrier_cells[bi][parent]
+            source===nothing && return Vector{Union{Nothing,UInt64}}[]
+            actual=get(catalog,source,nothing)
+            actual!==nothing && actual[2]==previous.carrier_rows[cells[:,parent]] ||
+                return Vector{Union{Nothing,UInt64}}[]
+            append!(tags,plan.refine_cell_tags[source])
+        end
+        push!(output,tags)
+    end
+    return output
+end
+
+function with_carrier(previous,carrier;cells=previous.carrier_cells)
+    return M._ModelMeshAuthority(previous.mesh,previous.products,previous.done,
+        previous.private_rank,previous.native_inputs,carrier,previous.carrier_rows,
+        previous.producer_rows,cells,previous.surface_constructor_inputs,
+        previous.emitted_geometry,previous.derived)
+end
+
+@testset "refined carrier cell labels match the catalog route" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.option("Mesh.MeshSizeMin",0.4);A.option("Mesh.MeshSizeMax",0.4)
+        A.mesh.generate(2)
+        previous=A.CURRENT[].meshing.mesh_authority
+        carrier=previous.carrier
+        @test carrier isa Tessella.Mesh
+        @test !isempty(previous.carrier_cells)
+        children=Dict{UInt64,Vector{UInt64}}()
+        for (bi,(msh,cells)) in enumerate(M._model_mesh_carrier_blocks(carrier)),parent in axes(cells,2)
+            label=previous.carrier_cells[bi][parent]
+            label===nothing && continue
+            children[label]=UInt64[1000*label+child for child in 1:(msh==1 ? 2 : msh==2 ? 4 : 8)]
+        end
+        plan=(refine_cell_tags=children,)
+        expected=catalog_cell_tags(plan,previous)
+        @test !isempty(expected) && sum(length,expected)>0
+        @test M._model_mesh_refined_cell_tags(plan,previous)==expected
+        # A parent listed on the same rows in another order is not the actual
+        # cell: both routes give up.
+        triangles=copy(carrier.tris);triangles[1,1],triangles[2,1]=triangles[2,1],triangles[1,1]
+        permuted=with_carrier(previous,Tessella.Mesh(carrier.coords;segs=carrier.segs,tris=triangles,
+            tets=carrier.tets,seg_tag=carrier.seg_tag,tri_tag=carrier.tri_tag,tet_tag=carrier.tet_tag))
+        @test isempty(catalog_cell_tags(plan,permuted))
+        @test isempty(M._model_mesh_refined_cell_tags(plan,permuted))
+        # So do they for a parent whose label names no actual cell.
+        unknown=[copy(tags) for tags in previous.carrier_cells]
+        block=findfirst(!isempty,unknown);unknown[block][1]=typemax(UInt64)
+        @test isempty(M._model_mesh_refined_cell_tags(plan,with_carrier(previous,carrier;cells=unknown)))
+        @test isempty(catalog_cell_tags(plan,with_carrier(previous,carrier;cells=unknown)))
+    finally
+        A.finalize()
+    end
+end
 end
