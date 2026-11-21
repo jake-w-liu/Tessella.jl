@@ -8518,10 +8518,12 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         caller="execute_geo: Plane Surface"
         (tag,zero_literal)=_geo_exec_def_tag(
             mm.captures[1],context,"$caller tag")
-        # `SetSurfaceGeneratrices` resolves each wire through `abs(iLoop)`.
-        loops=_geo_exec_entity_rhs_tags(
+        # `SetSurfaceGeneratrices` resolves each wire through `abs(iLoop)`;
+        # the sign of the exterior wire orients the face (below).
+        signed_loops=_geo_exec_entity_rhs_tags(
             mm.captures[2],context,"$caller loops";
-            abs_refs=true,allow_empty=true)
+            signed=true,allow_empty=true)
+        loops=Int[abs(loop) for loop in signed_loops]
         _geo_dup_entity!(context,haskey(m.surfaces,trunc(Int,tag)),
                          :surface,"plane surface",tag,zero_literal,
                          allocator_state) && return
@@ -8534,7 +8536,18 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         t=Base.inferencebarrier(_geo_entity_tag)(m,2,tag,caller,zero_literal)
         ok=Base.inferencebarrier(_geo_check_surface_wires!)(m,context,loops,t)
         m.surfaces[t]=loops
-        if ok && allocator_state!==nothing && allocator_state.factory===:opencascade
+        occ=allocator_state!==nothing && allocator_state.factory===:opencascade
+        # Upstream `SetSurfaceGeneratrices` walks a negative exterior wire
+        # backwards with every curve negated, so the face (its normal, its
+        # mesh orientation and its oriented boundary) runs the other way.
+        # The reversed wire becomes a derived loop of the surface.
+        if ok && !occ && signed_loops[1]<0 && haskey(m.loops,loops[1])
+            lt=_geo_derived_loop_tag(m,t)
+            m.loops[lt]=Int[-curve for curve in Iterators.reverse(m.loops[loops[1]])]
+            push!(m.derived_loops,lt)
+            m.surfaces[t][1]=lt
+        end
+        if ok && occ
             geometry=Base.inferencebarrier(_geo_occ_axis_plane_geometry)(m,loops)
             geometry===nothing || (m.surface_geometry[t]=geometry)
         end
