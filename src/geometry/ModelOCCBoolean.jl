@@ -1009,13 +1009,7 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                 S=reps[k]
                 face=k==sec.oi ? S.faces[sec.fa] : S.faces[sec.fb]
                 spc=k==sec.oi ? sec.pcA : sec.pcB
-                uper=_brep_uperiod(face.sg)
-                uper>0 || continue
-                ulo=_brep_face_ubase(S.edges,face)
-                pieces=_brep_pc_split_all_useams(spc,lo,hi,uper,ulo,tol)
-                for p in pieces[2:end]
-                    push!(cuts,p[1])
-                end
+                append!(cuts,_brep_pc_seam_cuts(S.edges,face,spc,lo,hi,tol))
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
                 a0=s0-lo<tol ? va : nothing

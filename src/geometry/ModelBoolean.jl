@@ -1815,6 +1815,10 @@ function _brep_face_sections(fa,fb,caller)
         return _brep_sec_plane_cone(fa.sg,fb.sg,true,caller)
     elseif ka===:cone && kb===:plane
         return _brep_sec_plane_cone(fb.sg,fa.sg,false,caller)
+    elseif ka===:plane && kb===:torus
+        return _brep_sec_plane_torus(fa.sg,fb.sg,true,caller)
+    elseif ka===:torus && kb===:plane
+        return _brep_sec_plane_torus(fb.sg,fa.sg,false,caller)
     elseif ka===:sphere && kb===:sphere
         return _brep_sec_sphere_sphere(fa.sg,fb.sg,caller)
     elseif ka===:cylinder && kb===:sphere
@@ -1985,6 +1989,51 @@ function _brep_sec_plane_cone(pl,cn,plane_is_a,caller)
     # non-axial section — a conic the analytic path can't emit; the
     # generic level-set section traces it on the cone domain
     return _brep_sec_msq(cn,pl,!plane_is_a,caller)
+end
+
+# Plane × torus. Two positions of the plane give circles, exact in space and
+# straight lines in the torus chart: normal to the axis it cuts the tube in
+# up to two parallels (v constant), through the axis in the two meridian
+# circles (u constant). Any other plane meets the torus in a quartic (a
+# spiric section when it is parallel to the axis), which the level-set
+# tracer follows on the torus chart.
+function _brep_sec_plane_torus(pl,to,plane_is_a,caller)
+    dot=_b3dot(pl.axis,to.axis)
+    out=NamedTuple[]
+    emit(curve,pc_pl,pc_to)=push!(out,(curve=curve,closed=true,
+        pcA=plane_is_a ? pc_pl : pc_to,pcB=plane_is_a ? pc_to : pc_pl))
+    if abs(abs(dot)-1.0)<_BREP_TOL
+        h=_b3dot(_b3(pl.center,to.center),to.axis)
+        abs(h)>to.r2+_BREP_TOL && return out
+        abs(abs(h)-to.r2)<=_BREP_TOL && throw(ArgumentError(
+            "$caller: tangent plane×torus contact is unsupported"))
+        v1=asin(clamp(h/to.r2,-1.0,1.0))
+        c=_b3add(to.center,_b3mul(to.axis,h))
+        y=_b3cross(to.axis,to.X)
+        for v in (v1,π-v1)
+            ρ=to.r1+to.r2*cos(v)
+            ρ<=_BREP_TOL && continue
+            curve=(kind=:circle,c=c,n=to.axis,x=to.X,y=y,r=ρ)
+            emit(curve,_brep_pc_circ_on_plane(pl,c,to.axis,to.X,ρ),
+                 (lin2d=((0.0,mod(v,_OCC_TWO_PI)),(1.0,0.0)),))
+        end
+        return out
+    end
+    if abs(dot)<_BREP_TOL &&
+            abs(_b3dot(_b3(to.center,pl.center),pl.axis))<_BREP_TOL
+        e=_b3unit(_b3cross(to.axis,pl.axis))
+        for x in (e,_b3mul(e,-1.0))
+            u=atan(_b3dot(x,_b3cross(to.axis,to.X)),_b3dot(x,to.X))
+            u<0 && (u+=_OCC_TWO_PI)
+            c=_b3add(to.center,_b3mul(x,to.r1))
+            n=_b3cross(x,to.axis)
+            curve=(kind=:circle,c=c,n=n,x=x,y=to.axis,r=to.r2)
+            emit(curve,_brep_pc_circ_on_plane(pl,c,n,x,to.r2),
+                 (lin2d=((u,0.0),(0.0,1.0)),))
+        end
+        return out
+    end
+    return _brep_sec_msq(to,pl,!plane_is_a,caller)
 end
 
 function _brep_sec_sphere_sphere(sa,sb,caller)
@@ -2525,6 +2574,30 @@ function _brep_face_ubase(edges,face)
     return isfinite(ulo) ? ulo : 0.0
 end
 
+# lowest v of a face's own wire arcs — the cut domain's origin in the second
+# periodic direction (a torus's tube angle); 0 for surfaces without one
+function _brep_face_vbase(edges,face)
+    _brep_vperiod(face.sg)>0 || return 0.0
+    vlo=Inf
+    for wire in face.wires,(eidx,sign,pc) in wire
+        e=edges[eidx]
+        lo,_=_brep_pc_vrange(pc,e.t0,e.t1)
+        vlo=min(vlo,lo)
+    end
+    return isfinite(vlo) ? vlo : 0.0
+end
+
+# wrap a uv point into the face's cut domain in both periodic directions. A
+# section that crosses a torus's v seam continues a whole tube turn away in
+# the unwrapped chart; probing it there, outside the face's wire, read every
+# such piece as "not on the face", and half of each plane×torus section was
+# dropped.
+@inline function _brep_wrap_uv(uv,ulo,uper,vlo,vper)
+    u=uper>0 ? ulo+mod(uv[1]-ulo,uper) : uv[1]
+    v=vper>0 ? vlo+mod(uv[2]-vlo,vper) : uv[2]
+    return (u,v)
+end
+
 # wrap a uv point's u into [ulo, ulo+period) for periodic faces
 @inline function _brep_wrap_u(uv,ulo,period)
     period>0 || return uv
@@ -2551,6 +2624,7 @@ function _brep_trim_section(solid,face,pc,closed,tol;scrv=nothing)
     uper=_brep_uperiod(face.sg)
     vper=_brep_vperiod(face.sg)
     ulo=_brep_face_ubase(solid.edges,face)
+    vlo=_brep_face_vbase(solid.edges,face)
     if uper>0
         # fold the section pcurve into the face's canonical u band so its
         # crossings with the wires compare in the same coordinates — a trace
@@ -2583,7 +2657,7 @@ function _brep_trim_section(solid,face,pc,closed,tol;scrv=nothing)
     # handled as an open curve — the seam cut normalizes the wrap
     if _brep_pc_iscirc(pc)
         isempty(uniq) && begin
-            uv0=_brep_wrap_u(_brep_pc_eval(pc,0.0),ulo,uper)
+            uv0=_brep_wrap_uv(_brep_pc_eval(pc,0.0),ulo,uper,vlo,vper)
             (_brep_uv_in_face(solid.edges,face,uv0,tol) ||
              _brep_uv_on_wire(solid.edges,face,pc,uv0,tol)) &&
                 push!(out,(0.0,_OCC_TWO_PI))
@@ -2599,7 +2673,7 @@ function _brep_trim_section(solid,face,pc,closed,tol;scrv=nothing)
         for i in 1:length(uniq)-1
             a,b=uniq[i],uniq[i+1]
             b-a<tol && continue
-            uvm=_brep_wrap_u(_brep_pc_eval(pc,(a+b)/2),ulo,uper)
+            uvm=_brep_wrap_uv(_brep_pc_eval(pc,(a+b)/2),ulo,uper,vlo,vper)
             (_brep_uv_in_face(solid.edges,face,uvm,tol) ||
              _brep_uv_on_wire(solid.edges,face,pc,uvm,tol)) || continue
             push!(out,(a,b))
@@ -2619,7 +2693,7 @@ function _brep_trim_section(solid,face,pc,closed,tol;scrv=nothing)
         for i in 1:length(cuts)-1
             a,b=cuts[i],cuts[i+1]
             b-a<tol && continue
-            uvm=_brep_wrap_u(_brep_pc_eval(pc,(a+b)/2),ulo,uper)
+            uvm=_brep_wrap_uv(_brep_pc_eval(pc,(a+b)/2),ulo,uper,vlo,vper)
             (_brep_uv_in_face(solid.edges,face,uvm,tol) ||
              _brep_uv_on_wire(solid.edges,face,pc,uvm,tol)) || continue
             push!(out,(a,b))
@@ -2636,7 +2710,7 @@ function _brep_trim_section(solid,face,pc,closed,tol;scrv=nothing)
         else
             a,b=uniq[i],uniq[i+1];probe=(a+b)/2
         end
-        uvm=_brep_wrap_u(_brep_pc_eval(pc,probe),ulo,uper)
+        uvm=_brep_wrap_uv(_brep_pc_eval(pc,probe),ulo,uper,vlo,vper)
         (_brep_uv_in_face(solid.edges,face,uvm,tol) ||
          _brep_uv_on_wire(solid.edges,face,pc,uvm,tol)) || continue
         push!(out,(a,b))
@@ -3506,6 +3580,68 @@ function _brep_pc_split_all_useams(pc,t0,t1,period,ulo,tol)
     return out
 end
 
+# The second periodic direction (a torus's tube angle) is cut exactly like
+# the first: a pcurve with its coordinates exchanged crosses a u seam where
+# the original crosses a v seam. Only straight and fitted traces occur on a
+# torus chart.
+function _brep_pc_swap_uv(pc)
+    hasproperty(pc,:neg2d) && return (neg2d=(_brep_pc_swap_uv(pc.neg2d[1]),),)
+    if hasproperty(pc,:lin2d)
+        o,d=pc.lin2d
+        return (lin2d=((o[2],o[1]),(d[2],d[1])),)
+    elseif hasproperty(pc,:spl2d)
+        knots,p,cps=pc.spl2d
+        return (spl2d=(knots,p,NTuple{2,Float64}[(c[2],c[1]) for c in cps]),)
+    end
+    throw(ArgumentError("_brep_pc_swap_uv: unsupported pcurve record"))
+end
+
+_brep_pc_split_all_vseams(pc,t0,t1,period,vlo,tol)=
+    _brep_pc_split_all_useams(_brep_pc_swap_uv(pc),t0,t1,period,vlo,tol)
+
+# shift a pcurve record's v-coordinate by -shift
+function _brep_shift_pc_v(pc,shift)
+    hasproperty(pc,:neg2d) &&
+        return (neg2d=(_brep_shift_pc_v(pc.neg2d[1],shift),),)
+    if hasproperty(pc,:lin2d)
+        o,d=pc.lin2d
+        return (lin2d=((o[1],o[2]-shift),d),)
+    elseif hasproperty(pc,:spl2d)
+        knots,p,cps=pc.spl2d
+        out=(spl2d=(knots,p,
+            NTuple{2,Float64}[(c[1],c[2]-shift) for c in cps]),)
+        if hasproperty(pc,:lvl2d)
+            l=pc.lvl2d
+            out=merge(out,(lvl2d=(uv->l((uv[1],uv[2]+shift))),))
+        end
+        hasproperty(pc,:per2d) && (out=merge(out,(per2d=pc.per2d,)))
+        return out
+    end
+    throw(ArgumentError("_brep_shift_pc_v: unsupported pcurve record"))
+end
+
+# Parameters in (lo,hi) where a section's trace on `face` crosses one of the
+# face's chart seams, in either periodic direction. Each is the end of a
+# result edge: a face is never continued across its seam.
+function _brep_pc_seam_cuts(edges,face,spc,lo,hi,tol)
+    cuts=Float64[]
+    uper=_brep_uperiod(face.sg)
+    if uper>0
+        ulo=_brep_face_ubase(edges,face)
+        for p in _brep_pc_split_all_useams(spc,lo,hi,uper,ulo,tol)[2:end]
+            push!(cuts,p[1])
+        end
+    end
+    vper=_brep_vperiod(face.sg)
+    if vper>0
+        vlo=_brep_face_vbase(edges,face)
+        for p in _brep_pc_split_all_vseams(spc,lo,hi,vper,vlo,tol)[2:end]
+            push!(cuts,p[1])
+        end
+    end
+    return cuts
+end
+
 # split [t0,t1] at strictly-interior params (sorted, deduplicated)
 function _brep_split_ranges(t0,t1,params,tol)
     uniq=Float64[]
@@ -3555,6 +3691,7 @@ end
 # first); a cycle is a Vector of (arc_index, forward).
 function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
     uper=_brep_uperiod(f.sg)
+    vper=_brep_vperiod(f.sg)
     if get(ENV,"BREP_DEBUG_ARCS","")!=""
         println("DBG face sg=$(f.sg.occ) stag=$(get(f,:stag,0)) secs=",
                 [(se=sf.se,span=sf.span) for sf in secs],
@@ -3625,40 +3762,72 @@ function _brep_face_regions(solid,f,side,edge_splits,secs,extras,tol,caller)
         end
         isfinite(ulo) || (ulo=0.0)
     end
+    vlo=0.0
+    if vper>0
+        vlo=Inf
+        for ar in raw
+            ar.key[1]===:e || continue
+            lo,_=_brep_pc_vrange(ar.pc,ar.t0,ar.t1)
+            vlo=min(vlo,lo)
+        end
+        isfinite(vlo) || (vlo=0.0)
+    end
     arcs=NamedTuple[]
     for ar in raw
         # `neg` arcs are imprinted pcurves evaluated at s = −t_edge — the
         # result edge's own parameter range is recovered as (−t1,−t0)
         neg=get(ar,:neg,false)
         if uper>0
-            for (k,(ta,tb)) in enumerate(
-                    _brep_pc_split_all_useams(ar.pc,ar.t0,ar.t1,uper,ulo,tol))
-                umid=_brep_pc_eval(ar.pc,(ta+tb)/2)[1]
+            for (ua,ub) in _brep_pc_split_all_useams(ar.pc,ar.t0,ar.t1,
+                                                    uper,ulo,tol)
+                umid=_brep_pc_eval(ar.pc,(ua+ub)/2)[1]
                 band=floor(Int,(umid-ulo)/uper)
                 band>0 && umid-ulo-band*uper<tol && (band-=1)
-                pc2=band==0 ? ar.pc : _brep_shift_pc(ar.pc,band*uper)
-                # section arcs keep (:s,se) — spans were already split at
-                # both faces' seams, so each se maps to one result edge on
-                # either side; wire arcs carry their own piece key
-                va,vb=neg ? (-tb,-ta) : (ta,tb)
-                fx0=ta==ar.t0 ? get(ar,:fix0,nothing) : nothing
-                fx1=tb==ar.t1 ? get(ar,:fix1,nothing) : nothing
-                # anchor fixes are expressed in the face's canonical u
-                # chart while a fitted trace's pcurve can sit whole
-                # periods off (unwrapped contour, right-seam wedge):
-                # lift each fix onto the band its own piece's endpoint
-                # eval occupies so the shared vertex stays bitwise
-                fx0!==nothing &&
-                    (fx0=(fx0[1]+round(Int,
-                          (_brep_pc_eval(pc2,ta)[1]-fx0[1])/uper)*uper,
-                          fx0[2]))
-                fx1!==nothing &&
-                    (fx1=(fx1[1]+round(Int,
-                          (_brep_pc_eval(pc2,tb)[1]-fx1[1])/uper)*uper,
-                          fx1[2]))
-                push!(arcs,(pc=pc2,t0=ta,t1=tb,key=ar.key,crv=ar.crv,
-                            vt0=va,vt1=vb,neg=neg,a=0,b=0,
-                            fix0=fx0,fix1=fx1))
+                pcu=band==0 ? ar.pc : _brep_shift_pc(ar.pc,band*uper)
+                # a torus chart is cut along its v seam as well: split and
+                # fold each piece into [vlo, vlo+vper] the same way, arcs on
+                # the upper seam staying there
+                vpieces=vper>0 ?
+                    _brep_pc_split_all_vseams(pcu,ua,ub,vper,vlo,tol) :
+                    [(ua,ub)]
+                for (ta,tb) in vpieces
+                    pc2=pcu
+                    if vper>0
+                        vmid=_brep_pc_eval(pcu,(ta+tb)/2)[2]
+                        vband=floor(Int,(vmid-vlo)/vper)
+                        vband>0 && vmid-vlo-vband*vper<tol && (vband-=1)
+                        vband==0 || (pc2=_brep_shift_pc_v(pcu,vband*vper))
+                    end
+                    # section arcs keep (:s,se) — spans were already split
+                    # at both faces' seams, so each se maps to one result
+                    # edge on either side; wire arcs carry their own piece
+                    # key
+                    va,vb=neg ? (-tb,-ta) : (ta,tb)
+                    fx0=ta==ar.t0 ? get(ar,:fix0,nothing) : nothing
+                    fx1=tb==ar.t1 ? get(ar,:fix1,nothing) : nothing
+                    # anchor fixes are expressed in the face's canonical
+                    # chart while a fitted trace's pcurve can sit whole
+                    # periods off (unwrapped contour, right-seam wedge), and
+                    # an anchor on a seam was read from one of the seam
+                    # edge's two uses: lift each fix onto the band its own
+                    # piece's endpoint eval occupies so the shared vertex
+                    # stays bitwise
+                    if fx0!==nothing
+                        e0=_brep_pc_eval(pc2,ta)
+                        fx0=(fx0[1]+round(Int,(e0[1]-fx0[1])/uper)*uper,
+                             vper>0 ? fx0[2]+round(Int,(e0[2]-fx0[2])/vper)*
+                                      vper : fx0[2])
+                    end
+                    if fx1!==nothing
+                        e1=_brep_pc_eval(pc2,tb)
+                        fx1=(fx1[1]+round(Int,(e1[1]-fx1[1])/uper)*uper,
+                             vper>0 ? fx1[2]+round(Int,(e1[2]-fx1[2])/vper)*
+                                      vper : fx1[2])
+                    end
+                    push!(arcs,(pc=pc2,t0=ta,t1=tb,key=ar.key,crv=ar.crv,
+                                vt0=va,vt1=vb,neg=neg,a=0,b=0,
+                                fix0=fx0,fix1=fx1))
+                end
             end
         else
             va,vb=neg ? (-ar.t1,-ar.t0) : (ar.t0,ar.t1)
@@ -5050,6 +5219,17 @@ function _brep_seam_pair(a,b,uper,tol)
     return abs(abs(a0-b0)-uper)<=10tol
 end
 
+# The same for the second periodic direction: constant-v traces a whole tube
+# turn apart are the two uses of a torus's v seam.
+function _brep_seam_pair_v(a,b,vper,tol)
+    vper>0 || return false
+    (hasproperty(a.pc,:lin2d) && hasproperty(b.pc,:lin2d)) || return false
+    a0,a1=_brep_pc_vrange(a.pc,a.t0,a.t1)
+    b0,b1=_brep_pc_vrange(b.pc,b.t0,b.t1)
+    (abs(a1-a0)<tol && abs(b1-b0)<tol) || return false
+    return abs(abs(a0-b0)-vper)<=10tol
+end
+
 function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
     reps=Int[];gid=zeros(Int,length(kept))
     for (i,s) in enumerate(kept)
@@ -5073,6 +5253,13 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
             x
         end
         uperg=_brep_uperiod(kept[reps[g]].sg)
+        # A torus face is cut along two seams that cross; its pieces around
+        # that crossing cannot be laid out on one chart, and OpenCASCADE
+        # leaves them as separate faces in a fuse too (a box fused with a
+        # torus poking through an edge has four torus faces in Gmsh
+        # 4.15.2). They are never continued across either seam.
+        vperg=_brep_vperiod(kept[reps[g]].sg)
+        split_seams=same_uses || vperg>0
         keyowner=Dict{Any,Tuple{Int,Any}}()
         for mi in mem,w in kept[mi].wires,ar in w
             o=get(keyowner,ar.key,nothing)
@@ -5085,7 +5272,8 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
                 # `Geometry.OCCBooleanSimplify` — and nothing else); a
                 # common keeps the pieces on either side as separate faces
                 # sharing the seam edge, like OCC's
-                same_uses && _brep_seam_pair(o[2],ar,uperg,tol) && continue
+                split_seams && _brep_seam_pair(o[2],ar,uperg,tol) && continue
+                _brep_seam_pair_v(o[2],ar,vperg,tol) && continue
                 ra,rb=findr(mi),findr(o[1])
                 ra!=rb && (uf[ra]=rb)
             end
@@ -5117,7 +5305,7 @@ function _brep_unify_union(kept,tol,caller;same_uses::Bool=false)
                         abs(ub1-ub0)<tol || continue
                         abs(abs(ua0-ub0)-uperg)>10tol && continue
                         # one seam edge used on both sides is no slit pair
-                        same_uses && aa.key==bb.key && continue
+                        split_seams && aa.key==bb.key && continue
                         vb0,vb1=_brep_pc_vrange(bb.pc,bb.t0,bb.t1)
                         min(va1,vb1)-max(va0,vb0)>tol || continue
                         sb=(wj==1)==bb.fwd ? 1 : -1
@@ -5641,13 +5829,9 @@ function _brep_collect_faces(m::GeoModel,op::Symbol,ta::Int,tb::Int,caller)
             seamcuts=Tuple{Float64,Int}[]
             for (side,(S,face,spc)) in enumerate(((A,A.faces[sec.fa],sec.pcA),
                                  (B,B.faces[sec.fb],sec.pcB)))
-                uper=_brep_uperiod(face.sg)
-                uper>0 || continue
-                ulo=_brep_face_ubase(S.edges,face)
-                pieces=_brep_pc_split_all_useams(spc,lo,hi,uper,ulo,tol)
-                for p in pieces[2:end]
-                    push!(cuts,p[1])
-                    push!(seamcuts,(p[1],side))
+                for t in _brep_pc_seam_cuts(S.edges,face,spc,lo,hi,tol)
+                    push!(cuts,t)
+                    push!(seamcuts,(t,side))
                 end
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)
@@ -6166,13 +6350,9 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                 S=solids[k]
                 face=k==sec.oi ? S.faces[sec.fa] : S.faces[sec.fb]
                 spc=k==sec.oi ? sec.pcA : sec.pcB
-                uper=_brep_uperiod(face.sg)
-                uper>0 || continue
-                ulo=_brep_face_ubase(S.edges,face)
-                pieces=_brep_pc_split_all_useams(spc,lo,hi,uper,ulo,tol)
-                for p in pieces[2:end]
-                    push!(cuts,p[1])
-                    push!(seamcuts,(p[1],side))
+                for t in _brep_pc_seam_cuts(S.edges,face,spc,lo,hi,tol)
+                    push!(cuts,t)
+                    push!(seamcuts,(t,side))
                 end
             end
             for (s0,s1) in _brep_split_ranges(lo,hi,cuts,tol)

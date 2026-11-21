@@ -292,6 +292,7 @@ include("functional/fixtures.jl")
         "geometry/geo_occ_thru_sections_shell_test.jl",
         "geometry/native_surface_source_test.jl",
         "meshing/mesh2d_refine_incremental_test.jl",
+        "interfaces/api_occ_boolean_torus_seams_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
