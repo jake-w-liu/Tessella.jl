@@ -4,7 +4,12 @@ const M=Tessella.Model
 const N=Tessella.MeshTypes
 const F=Tessella.SizeField
 
-@testset "factory Box extends boundary sizing without a selected field" begin
+# A Box is filled from its six face meshes by Gmsh's Delaunay insertion, like
+# any explicit Volume. Until 0.1.3 it was filled by bisecting every edge
+# longer than twice the size, which this file asserted as `edge <= 2h` on
+# every edge; Gmsh itself does not satisfy that (its longest edge on this
+# model is 2.1 h) and the bisection gave several times its tetrahedra.
+@testset "A Box extends boundary sizing without a selected field" begin
     model=GeoModel()
     M.add_box!(model,0.,0.,0.,1.,1.,1.;tag=1)
     model.meshing.algorithm_2d=6
@@ -26,9 +31,15 @@ const F=Tessella.SizeField
         p=N.node(mesh,a);q=N.node(mesh,b)
         midpoint=ntuple(i->(p[i]+q[i])/2,3)
         h=minimum(F.size_at(field,r...) for r in (p,midpoint,q))
-        return hypot((q[1]-p[1],q[2]-p[2],q[3]-p[3])...)/(2h)
+        return hypot((q[1]-p[1],q[2]-p[2],q[3]-p[3])...)/h
     end
-    @test maximum(ratios)<=1+1e-10
+    sort!(ratios)
+    # The interior follows the size of the boundary: the typical edge is the
+    # prescribed size and none is far from it (Gmsh 4.15.2 on the same Box:
+    # median 1.03 h, longest 2.1 h, 386 tetrahedra on its own 264 triangles).
+    @test 0.8<=ratios[end÷2]<=1.25
+    @test ratios[end]<=3
+    @test size(surface.tris,2)<size(mesh.tets,2)<2.5*size(surface.tris,2)
     actual=Set(Tuple(sort([N.node(mesh,v) for v in cell]))
                for cell in first(N.boundary_faces(mesh.tets)))
     expected=Set(Tuple(sort([N.node(surface,v) for v in cell]))

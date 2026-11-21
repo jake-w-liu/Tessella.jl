@@ -10864,18 +10864,22 @@ function _model_volume_uses_meshadapt(m::GeoModel,t::Int,caller)
 end
 
 # Primitive factories retain their established deterministic geometry encoding.
-# This provenance is independent of ordinary explicitly assembled CAD PLCs;
-# native Gmsh 3-D parity for all primitive factories is still a separate task.
+# This provenance is independent of ordinary explicitly assembled CAD PLCs.
 function _model_factory_surface_encoding(m::GeoModel,t::Int)
     geometry=get(m.surface_geometry,t,nothing)
     return geometry!==nothing && hasproperty(geometry,:primitive) && geometry.primitive===:box
 end
 
+# A Volume whose boundary is tessellated analytically instead of being read
+# from its Surfaces: a curved primitive or a Boolean snapshot outside
+# conforming-solids mode. A Box is not one. Its six faces are ordinary plane
+# Surfaces with their own meshes, and the Region is filled from them like any
+# explicit Volume. It used to be filled by bisecting edges down to the size
+# field, which gave about six times Gmsh's tetrahedra (29,120 against 4,979 on
+# a unit Box at size 0.1) in a hundred times the time.
 function _model_factory_volume_encoding(m::GeoModel,t::Int)
     _model_volume_uses_meshadapt(m,t,"factory volume encoding") && return false
-    (haskey(m.box_extents,t) || _implicit_volume_surface(m,t)) && return true
-    boundaries=_model_volume_boundary_surfaces(m,t,"factory volume encoding")
-    return !isempty(boundaries) && all(surface->_model_factory_surface_encoding(m,abs(surface)),boundaries)
+    return _implicit_volume_surface(m,t)
 end
 
 function _volume_surface(m::GeoModel,t::Int,caller::AbstractString="mesh_model_volume")
