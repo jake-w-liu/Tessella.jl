@@ -304,6 +304,7 @@ include("functional/fixtures.jl")
         "geometry/metric_area_sign_test.jl",
         "interfaces/api_occ_boolean_tangent_sphere_test.jl",
         "interfaces/api_occ_transform_owned_vertex_test.jl",
+        "interfaces/api_refine_clear_regenerate_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

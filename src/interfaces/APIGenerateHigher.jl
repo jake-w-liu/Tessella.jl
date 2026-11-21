@@ -4276,6 +4276,14 @@ function _higher_bound_rows_check(authority,mesh,rows,tag,caller)
     return nothing
 end
 
+function _higher_rows_cover_product(product,rows)
+    bound=Set(rows)
+    for block in product.blocks,node in block.nodes
+        product.rows[node] in bound || return false
+    end
+    return true
+end
+
 function _higher_bind_producer_rows(authority,assembly,parts,previous;node_tag_map=nothing,
                                     curve_births=nothing)
     positions=Dict(tag=>Int32(row) for (row,tag) in
@@ -4298,6 +4306,11 @@ function _higher_bind_producer_rows(authority,assembly,parts,previous;node_tag_m
                     "$(assembly.caller): retained producer $owner loses actual node $source_tag"))
                 push!(rows,row)
             end
+            # A mesh edit after the producer ran (refine splits every cell
+            # through new nodes) leaves the retained cells outside the old
+            # binding: the entity's current mesh is then the input, as for a
+            # loaded mesh, and carries no producer order.
+            _higher_rows_cover_product(authority.products[owner],rows) || continue
             produced[owner]=rows
         end
     end
