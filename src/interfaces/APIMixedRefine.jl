@@ -362,7 +362,10 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
         save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
         linear_nodes=!iszero(OPTIONS["Mesh.SecondOrderLinear"]))
     if result.plan!==nothing
-        _commit_tagged_plan_locked!(result.plan;authority=stored_class.public_tags.authority)
+        # The assembly already reconciled the records of every entity, so the
+        # commit does not fill its subset of them a second time.
+        _commit_tagged_plan_locked!(result.plan;authority=stored_class.public_tags.authority,
+            reconcile_records=!_dim01_plan_records_reconciled(result.plan))
         authority=result.plan.model.meshing.mesh_authority
         authority===nothing || return _copy_mesh(authority.carrier)
     else
