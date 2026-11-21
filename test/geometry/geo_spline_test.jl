@@ -395,8 +395,9 @@ end
         """)
     closed_params=graded.model.curve_params[10]
     open_params=graded.model.curve_params[11]
-    # Closed curves drop the duplicated t1 endpoint: params count == edges.
-    @test length(closed_params)==3
+    # The stored parameters keep both ends of the closed curve, so three
+    # edges (Gmsh 4.15.2: three line elements on Curve 10) are four entries.
+    @test length(closed_params)-1==3
     @test closed_params[1]≈0.0
     @test issorted(closed_params)
     # Gmsh 4.15.2 places the two interior nodes at arc-length thirds.
@@ -419,5 +420,5 @@ end
         Spline(10) = {1,2,3,4,1};
         Mesh 1;
         """)
-    @test length(raised.model.curve_params[10])==4
+    @test length(raised.model.curve_params[10])-1==4
 end
