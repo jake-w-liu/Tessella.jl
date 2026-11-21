@@ -222,6 +222,7 @@ include("functional/fixtures.jl")
         "interfaces/cli_meshadapt_view_frontend_test.jl",
         "interfaces/msh_import_identity_test.jl",
         "interfaces/msh_import_derived_lazily_test.jl",
+        "core/msh_ascii_scan_test.jl",
         "interfaces/msh2_type_order_test.jl",
         "interfaces/msh_open_gmsh_parity_test.jl",
         "interfaces/io_gmsh_format_parity_test.jl",

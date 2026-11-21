@@ -3612,6 +3612,9 @@ end
 @inline function _binary_available(io,bytes::Int,context::AbstractString)
     bytes>=0 || throw(ArgumentError(
         "read_mixed_msh: binary byte count overflows Int in $context"))
+    # Bytes already buffered need no `fstat`; a file with thousands of small
+    # blocks otherwise pays one system call per block.
+    io isa IOStream && bytes<=bytesavailable(io) && return nothing
     remaining=try
         Base.checked_sub(filesize(io),position(io))
     catch err
@@ -5391,12 +5394,210 @@ function _mixed_elementary_entity!(acc,value::Int,dim::Int,context::AbstractStri
     return entity
 end
 
+# ASCII element records are read a line at a time into a byte buffer and
+# scanned without a `split`: a line that holds exactly the tokens a record
+# needs, each a plain run of at most 19 decimal digits, is translated in place;
+# any other line (a sign, a stray character, a record spread over several lines,
+# a blank line, a line longer than the buffer) is left unread in the stream for
+# the caller's general tokenizer, which keeps every diagnostic. Lines are never
+# materialized past `_ASCII_LINE_LIMIT` bytes, so a huge record costs nothing
+# here.
+const _ASCII_LINE_LIMIT=65536
+
+# The next line of `io`, terminator included, in `buf` (at least
+# `_ASCII_LINE_LIMIT` long): its length, 0 at end of file, or -1 when it is
+# longer than the limit (the stream is then left at the start of the line).
+function _ascii_line!(io::IO,buf::Vector{UInt8})
+    cap=1024
+    while true
+        n=readbytes!(io,buf,cap)
+        n==0 && return 0
+        hit=GC.@preserve buf ccall(:memchr,Ptr{UInt8},(Ptr{UInt8},Cint,Csize_t),
+                                    pointer(buf),0x0a,n)
+        if hit!=C_NULL
+            i=Int(hit-pointer(buf))+1
+            i<n && skip(io,i-n)
+            return i
+        end
+        n<cap && return n
+        skip(io,-n)
+        cap>=_ASCII_LINE_LIMIT && return -1
+        cap=min(8cap,_ASCII_LINE_LIMIT)
+    end
+end
+
+@inline function _scan_uint(bytes::Vector{UInt8},pos::Int,n::Int)
+    start=pos; value=UInt64(0)
+    @inbounds while pos<=n
+        c=bytes[pos]-0x30
+        c<=0x09 || break
+        value=value*UInt64(10)+UInt64(c); pos+=1
+    end
+    len=pos-start
+    (len==0 || len>19) && return (value,0)
+    @inbounds pos<=n && bytes[pos]!=0x20 && bytes[pos]!=0x09 && return (value,0)
+    return (value,pos)
+end
+
+# The unsigned tokens of the line in `bytes[1:n]` into `scratch`; their count,
+# or -1 when the line is not made of plain unsigned tokens (or has more than
+# fit).
+function _scan_uint_line!(scratch::Vector{UInt64},bytes::Vector{UInt8},n::Int)
+    if n>0 && @inbounds(bytes[n])==0x0a
+        n-=1
+        n>0 && @inbounds(bytes[n])==0x0d && (n-=1)
+    end
+    pos=1; count=0
+    @inbounds while true
+        while pos<=n && (bytes[pos]==0x20 || bytes[pos]==0x09)
+            pos+=1
+        end
+        pos>n && return count
+        value,next=_scan_uint(bytes,pos,n)
+        next==0 && return -1
+        count+=1
+        count>length(scratch) && return -1
+        scratch[count]=value; pos=next
+    end
+end
+
+# MSH 4.1 ASCII element block: up to `want` lines of `tag node...`. Returns the
+# cells read and the range of their tags.
+function _mixed_ascii_cells_v4!(io::IO,buf::Vector{UInt8},bucket::_MixedReadBucket,
+        scratch::Vector{UInt64},want::Int,nn::Int,physical::Int32,entity::Int32,
+        nodevec::Union{Nothing,Vector{Int32}},nodemap::Dict{UInt64,Int32},
+        seen::_TagSet,allow_zero::Bool,
+        events::Union{Nothing,Vector{Tuple{Int,Int32,UInt64}}},etype::Int)
+    lo=typemax(UInt64); hi=zero(UInt64); done=0
+    while done<want
+        n=_ascii_line!(io,buf)
+        n<=0 && return (done,lo,hi)
+        if _scan_uint_line!(scratch,buf,n)!=nn+1
+            skip(io,-n)
+            return (done,lo,hi)
+        end
+        @inbounds tag=scratch[1]
+        (tag>0 || allow_zero) || throw(ArgumentError(
+            "read_mixed_msh: element tags must be positive"))
+        tag in seen && throw(ArgumentError(
+            "read_mixed_msh: duplicate element tag $tag"))
+        push!(seen,tag)
+        lo=min(lo,tag); hi=max(hi,tag)
+        @inbounds for i in 1:nn
+            external=scratch[i+1]
+            internal=_mixed_node_internal(nodevec,nodemap,external)
+            internal!=0 || throw(ArgumentError(
+                "read_mixed_msh: element references unknown node tag $external"))
+            push!(bucket.nodes,internal)
+        end
+        push!(bucket.partitions,Int32(0)); push!(bucket.tags,physical)
+        push!(bucket.entities,entity); push!(bucket.external_tags,tag)
+        events===nothing || push!(events,(etype,entity,tag))
+        done+=1
+    end
+    return (done,lo,hi)
+end
+
+# MSH 2.2 ASCII records `tag type ntags tag... node...` of fixed-connectivity
+# types. Returns the cells read and the number of connectivity entries added.
+function _mixed_ascii_cells_v2!(io::IO,buf::Vector{UInt8},
+        buckets::Dict{Int,_MixedReadBucket},
+        scratch::Vector{UInt64},want::Int,switch_tags::Bool,old_partition::Bool,
+        nodevec::Union{Nothing,Vector{Int32}},nodemap::Dict{UInt64,Int32},
+        seen::_TagSet,keys::Set{Tuple{Int,Int}},
+        events::Union{Nothing,Vector{Tuple{Int,Int32,UInt64}}})
+    done=0; connectivity=0
+    last_etype=typemin(Int); nn=0; dim=0
+    bucket=_MixedReadBucket(15); last_elementary=0
+    while done<want
+        n=_ascii_line!(io,buf)
+        n<=0 && return (done,connectivity)
+        count=_scan_uint_line!(scratch,buf,n)
+        if count<3
+            skip(io,-n); return (done,connectivity)
+        end
+        @inbounds etype_raw=scratch[2]; @inbounds ntags_raw=scratch[3]
+        if etype_raw>UInt64(typemax(Int32)) || ntags_raw>UInt64(typemax(Int32))
+            skip(io,-n); return (done,connectivity)
+        end
+        etype=Int(etype_raw); ntags=Int(ntags_raw)
+        if etype!=last_etype
+            fixed=get(MSH_CATALOG,etype,nothing)
+            if fixed===nothing
+                skip(io,-n); return (done,connectivity)
+            end
+            nn=Int(fixed.nnodes); dim=Int(fixed.dim); last_etype=etype
+            bucket=get!(buckets,etype) do
+                _MixedReadBucket(etype)
+            end
+        end
+        if count!=3+ntags+nn || (ntags>3 && !old_partition)
+            skip(io,-n); return (done,connectivity)
+        end
+        physical_value=0; elementary_value=0; partition_value=0
+        @inbounds begin
+            if ntags>0
+                if scratch[4]>UInt64(typemax(Int32))
+                    skip(io,-n); return (done,connectivity)
+                end
+                physical_value=Int(scratch[4])
+            end
+            if ntags>1
+                if scratch[5]>UInt64(typemax(Int32))
+                    skip(io,-n); return (done,connectivity)
+                end
+                elementary_value=Int(scratch[5])
+            end
+            if old_partition && ntags>=3
+                partition_value=Int(min(scratch[6],UInt64(typemax(Int32))))
+            end
+        end
+        switch_tags && ((physical_value,elementary_value)=
+                        (elementary_value,physical_value))
+        @inbounds tag=scratch[1]
+        tag>0 || throw(ArgumentError("read_mixed_msh: element tags must be positive"))
+        tag in seen && throw(ArgumentError(
+            "read_mixed_msh: duplicate element tag $tag"))
+        push!(seen,tag)
+        if elementary_value!=0 && elementary_value!=last_elementary
+            push!(keys,(dim,elementary_value)); last_elementary=elementary_value
+        end
+        first_node=4+ntags
+        @inbounds for i in 1:nn
+            external=scratch[first_node+i-1]
+            internal=_mixed_node_internal(nodevec,nodemap,external)
+            internal!=0 || throw(ArgumentError(
+                "read_mixed_msh: element references unknown node tag $external"))
+            push!(bucket.nodes,internal)
+        end
+        push!(bucket.partitions,Int32(partition_value)); push!(bucket.tags,Int32(physical_value))
+        push!(bucket.entities,Int32(elementary_value)); push!(bucket.external_tags,tag)
+        events===nothing || push!(events,(etype,Int32(elementary_value),tag))
+        connectivity+=nn; done+=1
+    end
+    return (done,connectivity)
+end
+
 function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false,
                                   old_partition::Bool=false)
     remaining=limits.max_elements-length(acc.element_tags)
     count=_section_count(io,"v2 element",remaining)
     nodevec=_mixed_node_index_vector(acc)
-    for _ in 1:count
+    scratch=Vector{UInt64}(undef,256)
+    buf=Vector{UInt8}(undef,_ASCII_LINE_LIMIT)
+    cell=0
+    while cell<count
+        if acc.factory===nothing
+            done,connectivity=_mixed_ascii_cells_v2!(io,buf,acc.buckets,scratch,
+                count-cell,switch_tags,old_partition,nodevec,acc.node_map,
+                acc.element_tags,acc.elementary_entity_keys,
+                acc.track_source_events ? acc.source_cell_events : nothing)
+            connectivity>0 && _reserve_mixed_connectivity!(acc,limits,connectivity,
+                                                          "v2 element record")
+            cell+=done
+            cell>=count && break
+        end
+        cell+=1
         reader=_MshRecordReader(io)
         element_tag=_msh_record_size_t!(reader,"v2 element tag")
         _record_mixed_element_tag!(acc,element_tag)
@@ -5489,6 +5690,63 @@ function _read_mixed_elements_v2!(acc,io,limits;switch_tags::Bool=false,
     _expect_msh_end(io,"\$EndElements")
 end
 
+# Translate one binary MSH 2.2 block of ordinary (non-special) cells in place.
+# A function barrier with concrete argument types: the per-cell loop must not
+# allocate. Checks and their order per cell match the general loop below.
+function _mixed_fill_block_v2!(bucket::_MixedReadBucket,data::Vector{Int32},
+        nlocal::Int,ntags::Int,nn::Int,width::Int,dim::Int,switch_tags::Bool,
+        old_partition::Bool,nodevec::Union{Nothing,Vector{Int32}},
+        nodemap::Dict{UInt64,Int32},seen::_TagSet,
+        keys::Set{Tuple{Int,Int}})
+    n0=length(bucket.nodes); c0=length(bucket.tags)
+    resize!(bucket.nodes,n0+nlocal*nn); resize!(bucket.tags,c0+nlocal)
+    resize!(bucket.entities,c0+nlocal); resize!(bucket.external_tags,c0+nlocal)
+    resize!(bucket.partitions,c0+nlocal)
+    nodes=bucket.nodes; ptags=bucket.tags; entities=bucket.entities
+    externals=bucket.external_tags; partitions=bucket.partitions
+    last_elementary=0
+    @inbounds for k in 1:nlocal
+        offset=(k-1)*width+1
+        signed_tag=data[offset]
+        signed_tag>0 || throw(ArgumentError(
+            "read_mixed_msh: element tags must be positive"))
+        tag=UInt64(signed_tag)
+        tag in seen && throw(ArgumentError(
+            "read_mixed_msh: duplicate element tag $tag"))
+        push!(seen,tag)
+        physical_value=ntags>0 ? Int(data[offset+1]) : 0
+        elementary_value=ntags>1 ? Int(data[offset+2]) : 0
+        switch_tags && ((physical_value,elementary_value)=
+                        (elementary_value,physical_value))
+        physical_value>=0 || throw(ArgumentError(
+            "read_mixed_msh: physical tag must be non-negative and fit Int32"))
+        elementary_value>=0 || throw(ArgumentError(
+            "read_mixed_msh: elementary entity tag must be non-negative and fit Int32"))
+        if elementary_value!=0 && elementary_value!=last_elementary
+            push!(keys,(dim,elementary_value)); last_elementary=elementary_value
+        end
+        base=n0+(k-1)*nn
+        first_node=offset+1+ntags
+        for i in 1:nn
+            raw=data[first_node+i-1]
+            raw>0 || throw(ArgumentError(
+                "read_mixed_msh: element node tags must be positive"))
+            external=UInt64(raw)
+            internal=_mixed_node_internal(nodevec,nodemap,external)
+            internal!=0 || throw(ArgumentError(
+                "read_mixed_msh: element references unknown node tag $external"))
+            nodes[base+i]=internal
+        end
+        c=c0+k
+        ptags[c]=Int32(physical_value); entities[c]=Int32(elementary_value)
+        externals[c]=tag
+        partitions[c]=old_partition ?
+            (ntags>=3 ? _mixed_v2_partition(data[offset+3]) : Int32(0)) :
+            (ntags>3 ? _mixed_v2_partition(data[offset+4]) : Int32(0))
+    end
+    return nothing
+end
+
 function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
                                          switch_tags::Bool=false,old_partition::Bool=false)
     remaining=limits.max_elements-length(acc.element_tags)
@@ -5499,11 +5757,12 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
     sizehint!(acc.element_tags,length(acc.element_tags)+count)
     nodevec=_mixed_node_index_vector(acc)
     nread=0
+    last_etype=typemin(Int); layout=_msh_element_layout(15,"binary MSH 2.2")
     while nread<count
         etype=Int(_binary_i32(io,swap,"v2 binary element-block type"))
         nlocal=Int(_binary_i32(io,swap,"v2 binary element-block count"))
         ntags=Int(_binary_i32(io,swap,"v2 binary element tag count"))
-        layout=_msh_element_layout(etype,"binary MSH 2.2")
+        etype==last_etype || (layout=_msh_element_layout(etype,"binary MSH 2.2");last_etype=etype)
         layout.variable && throw(ArgumentError(
             "read_mixed_msh: binary MSH 2.2 has no record width for variable-connectivity type $etype"))
         0<nlocal<=count-nread || throw(ArgumentError(
@@ -5530,6 +5789,23 @@ function _read_mixed_elements_v2_binary!(acc,io,limits,swap::Bool;
         _reserve_mixed_connectivity!(acc,limits,connectivity_count,
                                      "v2 binary element block")
         data=_binary_i32_vector(io,words,swap,"v2 binary element block")
+        if !layout.special && acc.factory===nothing
+            bucket=get!(acc.buckets,etype) do
+                _MixedReadBucket(etype)
+            end
+            c0=length(bucket.tags)
+            _mixed_fill_block_v2!(bucket,data,nlocal,ntags,layout.nnodes,width,
+                layout.dim,switch_tags,old_partition,nodevec,acc.node_map,
+                acc.element_tags,acc.elementary_entity_keys)
+            if acc.track_source_events
+                @inbounds for k in 1:nlocal
+                    push!(acc.source_cell_events,(etype,bucket.entities[c0+k],
+                        bucket.external_tags[c0+k]))
+                end
+            end
+            nread+=nlocal
+            continue
+        end
         offset=1
         @inbounds for _ in 1:nlocal
             signed_element_tag=data[offset]
@@ -5594,6 +5870,7 @@ end
 function _read_mixed_elements_v4!(acc,io,limits)
     reader=_MshTokenReader(io)
     nodevec=_mixed_node_index_vector(acc)
+    buf=Vector{UInt8}(undef,_ASCII_LINE_LIMIT)
     nblocks=_msh_int(
         _msh_token!(reader,"v4 Elements header"),"v4 element-block count")
     count=_msh_int(
@@ -5652,7 +5929,26 @@ function _read_mixed_elements_v4!(acc,io,limits)
         0<=nlocal<=count-nread || throw(ArgumentError(
             "read_mixed_msh: invalid or excessive v4 element-block size"))
         physical=acc.entity_physical[(dim,entity)]
-        for _ in 1:nlocal
+        scratch=Vector{UInt64}(undef,layout.nnodes+1)
+        cell=0
+        while cell<nlocal
+            if reader.next>length(reader.tokens) && acc.factory===nothing && !layout.special
+                fast_bucket=get!(acc.buckets,etype) do
+                    _MixedReadBucket(etype)
+                end
+                done,lo,hi=_mixed_ascii_cells_v4!(io,buf,fast_bucket,scratch,
+                    nlocal-cell,layout.nnodes,physical,Int32(entity),nodevec,
+                    acc.node_map,acc.element_tags,false,
+                    acc.track_source_events ? acc.source_cell_events : nothing,etype)
+                if done>0
+                    _reserve_mixed_connectivity!(acc,limits,done*layout.nnodes,
+                                                 "v4 element record")
+                    actual_min=min(actual_min,lo); actual_max=max(actual_max,hi)
+                    nread+=done; cell+=done
+                end
+                cell>=nlocal && break
+            end
+            cell+=1
             tag=_msh_size_t(
                 _msh_token!(reader,"v4 element tag"),"v4 element tag")
             _record_mixed_element_tag!(acc,tag)
