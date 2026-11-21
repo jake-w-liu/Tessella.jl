@@ -41,6 +41,32 @@ _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,calle
     _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller,
         node_counter_wrapped,cell_counter_wrapped,0)
 
+# Mark every mutable object reachable from `value` through immutable wrappers
+# as its own copy, so that `deepcopy` shares it instead of cloning it.
+function _dim01_share!(memory::IdDict{Any,Any},@nospecialize(value))
+    if ismutable(value)
+        memory[value]=value
+    elseif !isbits(value)
+        for index in 1:nfields(value)
+            isdefined(value,index) && _dim01_share!(memory,getfield(value,index))
+        end
+    end
+    return memory
+end
+
+# The working copy of the model for one plan. The copy isolates the plan from
+# the session: a failed plan leaves the session's model as it was. The mesh
+# authority needs no copy for that. A plan reads the previous authority and
+# installs a new one; nothing edits one in place (the full-quad producer, the
+# one consumer that rewrites products, clones its input first). Cloning it
+# costs as much as the whole previous mesh, its products and its constructor
+# receipts: 58 ms of every operation on a 400-face model already meshed.
+function _dim01_transaction_copy(source_model)
+    memory=IdDict{Any,Any}()
+    _dim01_share!(memory,source_model.meshing.mesh_authority)
+    return Model._model_mesh_transaction_copy(source_model,memory)
+end
+
 function _dim01_next_tag!(assembly::_Dim01Assembly,node::Bool)
     previous=node ? assembly.node_max : assembly.cell_max
     value=previous+UInt64(1)
@@ -1837,7 +1863,7 @@ function _generate_dim01_plan(source_model,cached,cached_class,dimension::Int,
         throw(ArgumentError("$caller: max_nodes must be a nonnegative Int32-representable integer"))
     max_cells isa Integer && !(max_cells isa Bool) && 0<=max_cells<=typemax(Int32) ||
         throw(ArgumentError("$caller: max_cells must be a nonnegative Int32-representable integer"))
-    m=Model._model_mesh_transaction_copy(source_model)
+    m=_dim01_transaction_copy(source_model)
     # API options describe this generation, while source-cache completion above
     # it still uses the attributes of the mesh being retained. Apply only after
     # staging so a rejected request leaves the live model/session untouched.
@@ -1913,7 +1939,7 @@ function _set_order_dim01_plan(source_model,cached,cached_class,order::Int,calle
         throw(ArgumentError("$caller: max_nodes must be a nonnegative Int32-representable integer"))
     max_cells isa Integer && !(max_cells isa Bool) && 0<=max_cells<=typemax(Int32) ||
         throw(ArgumentError("$caller: max_cells must be a nonnegative Int32-representable integer"))
-    m=Model._model_mesh_transaction_copy(source_model)
+    m=_dim01_transaction_copy(source_model)
     entities=model_entities(m)
     assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
         UInt64(initial_max_node_tag),UInt64(initial_max_element_tag),

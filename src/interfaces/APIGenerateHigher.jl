@@ -4418,7 +4418,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
         preserve_geometry=false,geometry_layout=:top,geometry_merge=nothing)
     dimension in (2,3) || throw(ArgumentError("$caller: dim must be two or three"))
     geometry_layout in (:top,:all) || throw(ArgumentError("$caller: invalid geometry layout"))
-    m=Model._model_mesh_transaction_copy(source_model)
+    m=_dim01_transaction_copy(source_model)
     _apply_generation_meshing_options!(m,generation_meshing)
     # Each native Model dispatcher admits the ordinary algorithm after its
     # transfinite, extrusion and periodic construction paths. An early API
@@ -4867,7 +4867,7 @@ function _higher_frontend_input(m,cached,parts,remaps,node_owner,caller;
         _higher_authority_from_parts(m,cached,parts,remaps,node_owner,caller;
             node_max=initial_max_node_tag,element_max=initial_max_element_tag)
     end
-    source=Model._model_mesh_transaction_copy(m)
+    source=_dim01_transaction_copy(m)
     source.meshing.mesh_authority=authority
     actual=authority===nothing ? nothing : authority.mesh
     class=actual===nothing ? nothing : _higher_classification_from_data(actual,caller)

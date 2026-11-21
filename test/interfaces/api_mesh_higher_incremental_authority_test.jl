@@ -110,4 +110,39 @@ end
         A.finalize()
     end
 end
+
+# A plan works on a copy of the model that shares the previous mesh authority
+# with the session instead of cloning it. A plan that fails must still leave
+# the session's authority exactly as it was.
+const QUADTRI_WITHOUT_RECOMBINE="""
+lc=0.5;
+Point(1)={0,0,0,lc};Point(2)={1,0,0,lc};Point(3)={1,1,0,lc};Point(4)={0,1,0,lc};
+Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+Transfinite Curve{1,2,3,4}=3;Transfinite Surface{1};Recombine Surface{1};
+out[]=Extrude {0,0,1} { Surface{1}; Layers{2}; QuadTriNoNewVerts RecombLaterals; };
+"""
+
+@testset "a failed plan leaves the shared authority untouched" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        mktempdir() do directory
+            path=joinpath(directory,"quadtri.geo")
+            write(path,QUADTRI_WITHOUT_RECOMBINE)
+            A.open_geo!(path;mesh_dim=0)
+        end
+        A.mesh.generate(2)
+        authority=A.CURRENT[].meshing.mesh_authority
+        saved=deepcopy(authority)
+        nodes=A.mesh.get_nodes();elements=A.mesh.get_elements()
+        @test_throws ArgumentError A.mesh.generate(3)
+        @test A.CURRENT[].meshing.mesh_authority===authority
+        @test M._model_mesh_same(saved,authority)
+        @test A.mesh.get_nodes()==nodes
+        @test A.mesh.get_elements()==elements
+    finally
+        A.finalize()
+    end
+end
 end
