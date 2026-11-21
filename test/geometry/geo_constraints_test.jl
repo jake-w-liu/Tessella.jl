@@ -1318,7 +1318,7 @@ end
         digest,chain,owners=curve_digest(execution.model,part)
         expected_count=size==0.18 ? 7 : 2
         expected_digest=size==0.18 ?
-            "664ada8df794669435356a46cb39bfeac867612c74e5a56c4f4c0e83538c8968" :
+            "b7b87e6693ef2d52ec5c7b602ea6ccfec5360d1009916287999f537576edbec6" :
             "f7f5b024dbb79850422e5e5dd4b816b64f4d23df516ebd1e4890106362018247"
         @test length(chain)==expected_count
         @test nsegs(part)==expected_count-1

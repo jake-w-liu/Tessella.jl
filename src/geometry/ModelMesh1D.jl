@@ -388,7 +388,8 @@ end
 # that stay PENDING past `Mesh.MaxRetries` keep no stored parameters, like
 # upstream's silently-starved status.
 function _model_surface_mesh_curves!(m::GeoModel,curves,caller::AbstractString;
-        _mesh1d_options::Union{Nothing,_ModelMesh1DOptions}=nothing)
+        _mesh1d_options::Union{Nothing,_ModelMesh1DOptions}=nothing,
+        _native_producer::Bool=false)
     pending=Set{Int}()
     for curve in curves
         haskey(m.curve_params,Int(curve)) || push!(pending,Int(curve))
@@ -400,7 +401,7 @@ function _model_surface_mesh_curves!(m::GeoModel,curves,caller::AbstractString;
         isempty(pending) && break
         progressed=false
         for curve in sort!(collect(pending))
-            result=_model_mesh_curve!(m,curve,options,caller)
+            result=_model_mesh_curve!(m,curve,options,caller;_native_producer)
             if result===:pending
                 for dep in _model_curve_mesh_dependencies(m,curve)
                     haskey(m.curve_params,dep) && continue
@@ -409,7 +410,7 @@ function _model_surface_mesh_curves!(m::GeoModel,curves,caller::AbstractString;
                 end
                 continue
             end
-            result===:keep || (m.curve_params[curve]=result)
+            result===:keep || (m.curve_params[curve]=_model_curve_grade_parameters(result))
             delete!(pending,curve); progressed=true
         end
         progressed || break
@@ -2016,12 +2017,18 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
     return (Base.inferencebarrier(_model_curve_grade_params)(m,curve,t0,t1,options,caller;_native_producer))::Union{Vector{Float64},_ModelNativeCurveGrade}
 end
 
+# A native grader returns its parameters with their birth rows; the stored
+# discretization is the parameters. (`_ModelNativeCurveGrade` is defined
+# after this file, so it is tested in the body, not dispatched on.)
+_model_curve_grade_parameters(result)=
+    result isa _ModelNativeCurveGrade ? result.parameters : result
+
 # `Mesh1D` — every curve starts PENDING; periodic slaves and curve-extruded
 # tops wait for their source, mirroring upstream's retry loop bounded by
 # `Mesh.MaxRetries`. Curves still pending after the cap (periodic cycles)
 # keep no stored mesh, matching upstream's silently-starved status.
 function _model_mesh_curves!(m::GeoModel,options::_ModelMesh1DOptions,
-                           caller::AbstractString)
+                           caller::AbstractString;_native_producer::Bool=false)
     _model_require_point_mesh_geometry(m,caller)
     pending=Set{Int}(keys(m.curves))
     for (dim,tag) in keys(m.discrete)
@@ -2031,9 +2038,9 @@ function _model_mesh_curves!(m::GeoModel,options::_ModelMesh1DOptions,
     while !isempty(pending)
         before=length(pending)
         for curve in sort!(collect(pending))
-            result=_model_mesh_curve!(m,curve,options,caller)
+            result=_model_mesh_curve!(m,curve,options,caller;_native_producer)
             result===:pending && continue
-            result===:keep || (m.curve_params[curve]=result)
+            result===:keep || (m.curve_params[curve]=_model_curve_grade_parameters(result))
             delete!(pending,curve)
         end
         isempty(pending) && break
@@ -2046,9 +2053,9 @@ function _model_mesh_curves!(m::GeoModel,options::_ModelMesh1DOptions,
             seeds=_model_periodic_cycle_seeds(m,pending)
             for seed in seeds
                 result=_model_mesh_curve!(m,seed,options,caller;
-                                          _force_native=true)
+                                          _force_native=true,_native_producer)
                 result===:pending && continue
-                result===:keep || (m.curve_params[seed]=result)
+                result===:keep || (m.curve_params[seed]=_model_curve_grade_parameters(result))
                 delete!(pending,seed)
             end
             length(pending)<before && continue

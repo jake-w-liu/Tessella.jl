@@ -120,14 +120,16 @@ end
         @test mesh.coords[2:3,:]==zeros(2,length(expected))
         @test params==collect(mesh.coords[1,:])
     end
-    # Nonpositive, unit and direct/ungraded arms bypass native density
-    # placement, retaining their established uniform counts and endpoints.
+    # Nonpositive, unit and direct/ungraded arms place the uniform law
+    # through Gmsh's integration: Gmsh 4.15.2's nodes, a few 1e-13 below
+    # the exact fifths.
     for (law,coefficient) in (("Progression",-2.),("Progression",1.),("Beta",.5))
         execution=_nls_execute("""
             Point(1)={0,0,0,1};Point(2)={1,0,0,1};Line(1)={1,2};
             Transfinite Curve{1}=6 Using $law $coefficient;
             """;dim=1)
-        @test execution.model.curve_params[1]≈collect(range(0.,1.;length=6)) atol=2e-15 rtol=0
+        @test execution.model.curve_params[1]==[0.0,0.1999999999995569,
+            0.3999999999989731,0.599999999998945,0.7999999999994725,1.0]
         @test size(Tessella.geo_entity_mesh(execution,1,1;geometry=true).segs,2)==5
     end
 end

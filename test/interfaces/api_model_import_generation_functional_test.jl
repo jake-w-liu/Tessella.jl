@@ -12,14 +12,15 @@ const A=Tessella.API
             @test A.open(path)===nothing
             node_uids,coordinates,_=A.mesh.get_nodes()
             xyz=reshape(coordinates,3,:)
-            @test Set(node_uids)==Set(UInt64[1,2,3]) && sort(vec(xyz[1,:]))==[0.,.5,1.] && all(iszero,xyz[2:3,:])
+            # Gmsh 4.15.2 integrates the transfinite midpoint: 0.4999999999986921.
+            @test Set(node_uids)==Set(UInt64[1,2,3]) && sort(vec(xyz[1,:]))==[0.,0.4999999999986921,1.] && all(iszero,xyz[2:3,:])
             @test Set(A.model.get_entities())==Set([(0,1),(0,2),(1,3)])
             types,element_uids,connectivity=A.mesh.get_elements(1,3)
             @test types==[1] && element_uids==[UInt64[3,4]] && connectivity==[UInt64[1,3,3,2]]
             types,element_uids,_=A.mesh.get_elements()
             @test Set(types)==Set([1,15]) && Set(reduce(vcat,element_uids))==Set(UInt64[1,2,3,4])
             mid_uids,mid_coordinates,parameters=A.mesh.get_nodes(1,3)
-            @test mid_uids==[3] && mid_coordinates==[.5,0,0] && parameters==[.5]
+            @test mid_uids==[3] && mid_coordinates==[0.4999999999986921,0,0] && parameters==[0.4999999999986921]
 
             A.model.add("legacy generated");count=length(A.model.list())
             result=A.open_geo!(path;mesh_dim=1)

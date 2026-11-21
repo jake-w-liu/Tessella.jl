@@ -237,8 +237,12 @@ end
         Line(1)={1,2};Transfinite Curve{1}=3;Mesh 1;
         """)
     @test nnodes(line.mesh)==4
+    # `Mesh 1` grades like `Mesh 2`: Gmsh's integrated midpoint, next to
+    # the orphan Point(3) at exactly 0.5.
     @test count(j->Tuple(line.mesh.coords[:,j])==(0.5,0.0,0.0),
-                1:nnodes(line.mesh))==2
+                1:nnodes(line.mesh))==1
+    @test count(j->Tuple(line.mesh.coords[:,j])==(0.4999999999986921,0.0,0.0),
+                1:nnodes(line.mesh))==1
     @test length(Set(line.mesh.segs))==3
     square=_mesh_identity_execute("""
         Point(1)={0,0,0,1};Point(2)={1,0,0,1};

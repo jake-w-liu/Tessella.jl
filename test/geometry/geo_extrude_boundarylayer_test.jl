@@ -307,14 +307,14 @@ end
     @test r.errors == String[]
     @test r.lists["out"] == [2.0, 5.0, 4.0, -3.0]
 
-    # The generatrix keeps two Line cells; its regraded interior node is
-    # the arc midpoint Tessella's native grading produces (upstream emits
-    # the same point).
+    # The generatrix keeps two Line cells; its interior node is Gmsh
+    # 4.15.2's integrated arc midpoint (0.2928932203890201,
+    # 0.7071067827621151), not the exact one.
     gen = geo_entity_mesh(r, 1, 1)
     @test sum(size(b.nodes, 2) for b in gen.blocks) == 2
     @test Set(Tuple(round.(gen.coords[:, i]; digits=9))
               for i in axes(gen.coords, 2)) ==
-          Set([(0.0, 0.0, 0.0), (0.292893219, 0.707106781, 0.0),
+          Set([(0.0, 0.0, 0.0), (0.29289322, 0.707106783, 0.0),
                (1.0, 1.0, 0.0)])
 
     # Chapeau: one Line cell per generatrix element on the welded top row.

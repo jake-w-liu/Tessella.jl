@@ -10594,7 +10594,13 @@ function _geo_mesh_model(m::GeoModel,dim::Int,context::_GeoNumericContext)
     parts=Tuple{Int,Int,Union{Mesh,MixedMesh}}[]
     if dim==1
         options=Base.inferencebarrier(_geo_mesh_1d_options)(m,context,caller)
-        append!(parts,Base.inferencebarrier(_model_mesh_dim01!)(m,options,caller))
+        # `Mesh 1` grades with the same `meshGEdge` arithmetic as `Mesh 2`
+        # and `generate(1)`: one curve, one discretization.
+        Base.inferencebarrier(Model._model_mesh_curves!)(m,options,caller;
+                                                        _native_producer=true)
+        append!(parts,Base.inferencebarrier(_model_point_mesh_parts)(m,caller;
+                                                                     _mesh1d_options=options))
+        append!(parts,Base.inferencebarrier(_model_curve_mesh_parts)(m,caller))
     end
     isempty(parts) && throw(ArgumentError(
         "$caller $dim: no entities to mesh"))
