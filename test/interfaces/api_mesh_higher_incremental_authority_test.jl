@@ -584,4 +584,62 @@ end
         A.finalize()
     end
 end
+
+# A caller that only reads an entity's product takes a shared cut: the rows
+# sliced into arrays of its own, the entity records, parameter vectors, cell
+# labels and names left in the authority's storage, nothing checked again.
+# It must read exactly like the detached cut, in every order a cut can have.
+@testset "a shared product cut reads like the detached cut" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.option("Mesh.MeshSizeMin",0.3);A.option("Mesh.MeshSizeMax",0.3)
+        A.mesh.generate(2)
+        authority=A.CURRENT[].meshing.mesh_authority
+        source=authority.mesh
+        for (dim,tag) in ((0,5),(1,1),(1,7),(2,1),(2,4)),
+                flags in ((;),(;producer_order=true),(;producer_order=true,first_order=true))
+            detached=M._model_mesh_product(authority,dim,tag;flags...)
+            shared=M._model_mesh_product(authority,dim,tag;flags...,shared=true)
+            @test (detached===nothing)==(shared===nothing)
+            detached===nothing && continue
+            @test same_content(detached,shared)
+            @test shared.coords!==source.coords
+            @test shared.entity_data.external_element_tags===authority.products[(dim,Int32(tag))].element_tags
+            @test shared.physical_names===source.physical_names
+            @test detached.physical_names!==source.physical_names
+            @test all(record->any(other->other===record,values(source.entity_data.entities)),
+                values(shared.entity_data.entities))
+        end
+        @test M._model_mesh_product(authority,1,10_000;shared=true)===nothing
+        if Base.JLOptions().compile_enabled==1
+            cut(authority,shared)=M._model_mesh_product(authority,1,1;shared)
+            cut(authority,true);cut(authority,false)
+            @test 2*(@allocated cut(authority,true))<(@allocated cut(authority,false))
+        end
+        # The input of a merged Surface adopts the shared cut made for it. It
+        # must be the input the copying route builds from a detached cut.
+        stored=authority.surface_constructor_inputs[(2,Int32(1))]
+        data=stored.entity_data
+        production=(node_tags=data.external_node_tags,node_owners=data.node_entities,
+            node_parameters=data.node_parametric,
+            element_tags=reduce(vcat,data.external_element_tags),constructor_mesh=stored)
+        copying=M._model_surface_constructor_input(production,
+            M._model_mesh_product(authority,2,1;producer_order=true),"test")
+        cut=M._model_mesh_product(authority,2,1;producer_order=true,shared=true)
+        adopting=M._model_surface_constructor_input(production,cut,"test";adopt=true)
+        @test same_content(copying,adopting)
+        @test adopting.coords===cut.coords
+        @test adopting.entity_data.external_node_tags===cut.entity_data.external_node_tags
+        # What an input must own although the cut shares it with the authority.
+        @test all(first(pair)===nothing || first(pair)!==last(pair)
+            for pair in zip(adopting.entity_data.node_parametric,cut.entity_data.node_parametric))
+        @test adopting.physical_names!==source.physical_names
+        @test M._model_surface_constructor_binding(
+            M._model_mesh_product(authority,2,1;producer_order=true,first_order=true),adopting,"test")===nothing
+    finally
+        A.finalize()
+    end
+end
 end

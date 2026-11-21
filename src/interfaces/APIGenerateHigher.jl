@@ -772,7 +772,7 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
     # global position registry. COPIED_ENTITY tops carry transformed columns
     # rather than retaining their source UID on the cap.
     link=m.meshing.extrude_sources[(dimension,tag)]
-    source_product=Model._model_mesh_product(input,link[1],abs(link[2]);caller)
+    source_product=Model._model_mesh_product(input,link[1],abs(link[2]);caller,shared=true)
     source_product!==nothing &&
         size(production.column_rows,2)==length(production.source_node_tags) &&
         allunique(production.source_node_tags) &&
@@ -2212,8 +2212,10 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                         metric_surface!==nothing ||
                         (merged_product!==nothing &&
                          length(merged_product.rows)!=length(source_binding.node_tags))
+                    # The cut is read here and dropped, except by the
+                    # transfinite branch, which stores it as the input.
                     actual_product=Model._model_mesh_product(input,2,tag;
-                        caller=assembly.caller,producer_order=ordered)
+                        caller=assembly.caller,producer_order=ordered,shared=!transfinite_events)
                     if transfinite_events
                         constructor=_higher_transfinite_constructor_input(actual_product,
                             assembly.cells[first_cell_event:end],assembly,tag)
@@ -2221,12 +2223,12 @@ function _higher_surface_merge_product!(assembly,m,tag,produced,input,scope,disc
                     elseif source_binding.constructor_mesh===nothing
                         if !isempty(source_binding.element_tags)
                             constructor_inputs[(2,Int32(tag))]=Model._model_surface_constructor_input(
-                                source_binding,actual_product,assembly.caller;constructor=mesh)
+                                source_binding,actual_product,assembly.caller;constructor=mesh,adopt=true)
                             built=true
                         end
                     else
                         constructor_inputs[(2,Int32(tag))]=Model._model_surface_constructor_input(
-                            source_binding,actual_product,assembly.caller)
+                            source_binding,actual_product,assembly.caller;adopt=true)
                         built=true
                     end
                     # Building the input ends with its binding check against

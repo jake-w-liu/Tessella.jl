@@ -509,9 +509,39 @@ function _model_mesh_first_order_skeleton(actual::MixedMesh,caller)
         elementary_entities=actual.elementary_entities)
 end
 
+# The actual mesh of one entity, cut from the authority's mesh.
+#
+# The default cut is detached: every array, the entity records and the entity
+# table are its own, and its structure is checked. A caller may keep it, hand
+# it on or edit it.
+#
+# `shared=true` is for a caller that reads the cut and drops it. The rows of
+# the entity are still sliced into arrays of the cut's own (they are the size
+# of the entity's mesh), but everything that does not depend on the rows'
+# positions is the authority's own storage: the entity records, each node's
+# parameter vector, the cell labels, the physical names, and the blocks when
+# the cut keeps the product's order. Its entity table is the one table built
+# to select the records, and nothing is checked again: the rows come from a
+# mesh that was validated when the authority was built.
+#
+# What the caller of a shared cut must not do:
+#   - edit it in place: not its coordinates and not any of its tables or
+#     arrays. Stored meshes ARE edited in place elsewhere
+#     (`set_point_coordinates!` writes the coordinates of every mesh in
+#     `native_inputs` and `surface_constructor_inputs`, the coordinate
+#     publishers write `context.mesh_parts`), so a shared cut must never
+#     become a stored one;
+#   - keep it beyond the generation that produced the authority: not in a
+#     struct field, a plan, `native_inputs`, `surface_constructor_inputs` or
+#     `mesh_parts`, and not as a return value. Stored cuts are compared with
+#     `===` and used as identity keys, and they are expected to stay as they
+#     were while the authority's mesh is edited in place;
+#   - hand it to anything that does either.
+# A caller that needs any of that takes the default cut. For a Curve or a
+# Point read row by row, `_model_mesh_product_rows` builds nothing at all.
 function _model_mesh_product(authority::_ModelMeshAuthority,dim::Int,tag::Int;
                              caller="mesh authority",producer_order=false,
-                             first_order=false)
+                             first_order=false,shared::Bool=false)
     product=get(authority.products,(dim,Int32(tag)),nothing)
     product===nothing && return nothing
     source=authority.mesh;data=source.entity_data;rows=product.rows
@@ -547,6 +577,17 @@ function _model_mesh_product(authority::_ModelMeshAuthority,dim::Int,tag::Int;
         rows=produced
     end
     entities=_model_mesh_product_entities(source,product.owner,rows)
+    if shared
+        cut=Elements.MixedEntityData(Elements._OWNED_MIXED_ENTITY_DATA,entities,
+            data.node_entities[rows],data.node_parametric[rows],data.external_node_tags[rows],
+            Vector{Int32}[fill(Int32(tag),size(block.nodes,2)) for block in blocks],
+            product.element_tags,true)
+        return MixedMesh(Elements._TRUSTED_MIXED_STORAGE,source.coords[:,rows],
+            MixedElementBlock[block for block in blocks],source.physical_names,cut,
+            Vector{Int32}[fill(Int32(tag),size(block.nodes,2)) for block in blocks],
+            Elements.MixedPeriodicLink[],Elements.MshAncillarySection[],
+            Elements.MshDataSection[],nothing)
+    end
     # Every part is cut from the validated actual mesh: copy each once and
     # check the result once, instead of the public constructors' three copies.
     return Elements._detached_mixed_mesh(source.coords[:,rows],
@@ -713,9 +754,17 @@ function _model_surface_constructor_binding(actual::MixedMesh,constructor::Mixed
     return nothing
 end
 
+# `adopt=true`: `actual` is a shared cut made for this call and dropped after
+# it. The input then keeps the cut's own arrays (coordinates, node owners and
+# labels, cell owners) instead of copying them, shares the authority's entity
+# records through the cut's table, and copies only what the cut itself shares
+# with the authority and an input must own (the parameter vectors). Its
+# structure is not checked separately: the binding check that ends this
+# function compares every node and every cell with the validated product.
 function _model_surface_constructor_input(production,actual::MixedMesh,
                                            caller::AbstractString;
-                                           constructor=production.constructor_mesh)
+                                           constructor=production.constructor_mesh,
+                                           adopt::Bool=false)
     constructor===nothing && return nothing
     data=actual.entity_data
     data!==nothing || throw(ArgumentError(
@@ -779,6 +828,15 @@ function _model_surface_constructor_input(production,actual::MixedMesh,
             block_entities=deepcopy(data.block_entities),external_element_tags=labels)
         MixedMesh(copy(actual.coords),blocks;physical_names=copy(actual.physical_names),
             entity_data=metadata)
+    elseif adopt
+        MixedMesh(Elements._TRUSTED_MIXED_STORAGE,actual.coords,
+            MixedElementBlock[block for block in blocks],
+            Elements._copy_physical_names(actual.physical_names,"MixedMesh"),
+            Elements.MixedEntityData(Elements._OWNED_MIXED_ENTITY_DATA,data.entities,
+                data.node_entities,Elements._detached_mixed_parameters(data.node_parametric),
+                data.external_node_tags,data.block_entities,labels,true),
+            elementary,Elements.MixedPeriodicLink[],Elements.MshAncillarySection[],
+            Elements.MshDataSection[],nothing)
     else
         # The same mesh from one copy of each part: `actual` is a validated
         # product and the blocks above passed their own constructor.
@@ -810,7 +868,7 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
             # view a moment ago, and that construction ends with this check.
             if owner==only && !certified
                 actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
-                    producer_order=true,first_order=true)
+                    producer_order=true,first_order=true,shared=true)
                 _model_surface_constructor_binding(actual,constructor,caller)
             end
         end
@@ -840,7 +898,7 @@ function _model_mesh_with_surface_constructor_inputs(authority::_ModelMeshAuthor
                 !(record!==nothing && record[1]===authority.products[owner] &&
                 record[2]===get(authority.producer_rows,owner,nothing) && record[3]===constructor)
             actual=_model_mesh_product(authority,2,Int(owner[2]);caller,
-                producer_order=true,first_order=true)
+                producer_order=true,first_order=true,shared=true)
             _model_surface_constructor_binding(actual,constructor,caller)
         end
         bound[owner]=constructor
@@ -1259,7 +1317,7 @@ function _model_mesh_curve_births(authority,model,curve::Int,caller;used_only=fa
         # before consulting Point-cell incidence retained after order pruning.
         owned=findall(row->active[row] && data.node_entities[row]==(0,Int32(point_tag)),eachindex(active))
         isempty(owned) || return owned
-        product=_model_mesh_product(authority,0,point_tag;caller)
+        product=_model_mesh_product(authority,0,point_tag;caller,shared=true)
         point_tags=Set{UInt64}()
         if product!==nothing
             for block in product.blocks,column in axes(block.nodes,2)
@@ -1416,7 +1474,7 @@ function _model_mesh_first_order_surface_constructor_inputs(previous,current,ele
     rebound=Dict{Tuple{Int,Int32},MixedMesh}()
     for (owner,constructor) in previous.surface_constructor_inputs
         before=_model_mesh_product(previous,2,Int(owner[2]);caller,
-            producer_order=true,first_order=true)
+            producer_order=true,first_order=true,shared=true)
         before!==nothing || throw(ArgumentError(
             "$caller: constructor transition loses actual Surface $owner"))
         _model_surface_constructor_binding(before,constructor,caller)
@@ -1424,7 +1482,7 @@ function _model_mesh_first_order_surface_constructor_inputs(previous,current,ele
             before.entity_data.external_node_tags]
         bound=_model_mesh_with_producer_rows(current,Dict(owner=>rows);caller)
         after=_model_mesh_product(bound,2,Int(owner[2]);caller,
-            producer_order=true,first_order=true)
+            producer_order=true,first_order=true,shared=true)
         after!==nothing || throw(ArgumentError(
             "$caller: constructor transition loses actual Surface $owner"))
         copy_constructor=deepcopy(constructor)
