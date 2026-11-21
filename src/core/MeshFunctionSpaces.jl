@@ -872,7 +872,6 @@ function mesh_basis_functions(element_type_value,local_coord,
     return Int32(space.components),result,Int32(total_orientations)
 end
 
-"""Return the number of reference orientations for a supported function space."""
 # Orientation queries (`getBasisFunctionsOrientation`, its per-element form and
 # `getNumberOfOrientations`) never look at the family or order of the space in
 # Gmsh 4.15.2: a nodal space answers zero and any hierarchical name ranks the
@@ -884,6 +883,7 @@ function _orientation_element_contract(element_type_value,space::_FunctionSpace,
     return element_type,msh_spec(element_type).family,0,element_type
 end
 
+"""Return the number of reference orientations for a supported function space."""
 function mesh_number_of_orientations(element_type_value,function_space_type;
                                      caller::AbstractString=
                                          "mesh_number_of_orientations")
