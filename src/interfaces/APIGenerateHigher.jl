@@ -2742,18 +2742,23 @@ end
 # CAD proximity cannot replace either incidence certificate on a warped face.
 function _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
                                                   source_tags,retained,caller;grid_receipt=nothing,
-                                                  lattice_out=nothing)
+                                                  lattice_out=nothing,certified::Bool=false)
     input!==nothing && input.mesh.entity_data!==nothing || throw(ArgumentError(
         "$caller: transfinite Volume[$tag] lacks actual lower products"))
     length(source_tags)==length(retained)==nnodes(mesh) &&
         all(row->retained[row] ? source_tags[row]>0 : iszero(source_tags[row]),eachindex(source_tags)) &&
         allunique(source_tags[retained]) || throw(ArgumentError(
             "$caller: transfinite Volume[$tag] has inconsistent boundary row identities"))
-    certified=_classification_skeleton(mesh,get(m.meshing.reverse,(3,tag),false))
-    diagnostic=validate(certified)
-    diagnostic.ok || throw(ArgumentError(
-        "$caller: transfinite Volume[$tag] has invalid cell geometry — "*join(diagnostic.messages,"; ")))
-    Model._volume_projection_contract(certified,caller)
+    # A certified production was validated by the volume driver and its
+    # cells by the kernel's exact shadow orientation; proving the same mesh
+    # again here would repeat both passes.
+    if !certified
+        skeleton=_classification_skeleton(mesh,get(m.meshing.reverse,(3,tag),false))
+        diagnostic=validate(skeleton)
+        diagnostic.ok || throw(ArgumentError(
+            "$caller: transfinite Volume[$tag] has invalid cell geometry — "*join(diagnostic.messages,"; ")))
+        Model._volume_projection_contract(skeleton,caller)
+    end
     actual=input.mesh;data=actual.entity_data
     primary=(3,Int32(tag))
     closure=Model._model_mesh_projection_closure(m,3,tag,caller)
@@ -3993,7 +3998,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         refs=vi<parallel_last ? _parallel_surface_param_refs(m) : nothing
         mesh=extruded===nothing ? nothing : get(extruded.parts,tag,nothing)
         source_rows=nothing;source_row_retained=nothing;source_rows_existing_only=false
-        source_cells=nothing;source_cell_max=nothing;alternate=nothing;source_emission=nothing;hybrid_production=nothing
+        source_cells=nothing;source_cell_max=nothing;alternate=nothing;source_emission=nothing;hybrid_production=nothing;source_certified=false
         wb_receipt=nothing
         source_node_base=hybrid_batch_receipt===nothing ? assembly.node_max : hybrid_batch_receipt.node_base
         source_node_max=nothing
@@ -4040,6 +4045,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 source_rows_existing_only=true
                 alternate=production.geometry
                 source_emission=production.emission
+                source_certified=production.certified
             else
                 any(!iszero,production.boundary_node_tags) &&
                     (source_rows=production.boundary_node_tags)
@@ -4067,7 +4073,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         elseif source_rows_existing_only
             _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
                 source_rows,source_row_retained,assembly.caller;grid_receipt=source_emission.grid,
-                lattice_out=volume_lattice)
+                lattice_out=volume_lattice,certified=source_certified)
         elseif native_rows
             _higher_volume_input_classification(assembly,m,mesh,input,tag,source_rows,assembly.caller;
                 boundary_writeback=wb_receipt)

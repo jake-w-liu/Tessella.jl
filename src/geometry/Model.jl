@@ -11183,7 +11183,13 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                             _ModelTransfiniteVolumeLayout{_ModelTransfiniteCompactIndex}},
                         Vararg{Any}}}}
         mesh,bindings=_mesh_input===nothing ? (fill,nothing) : fill
+        kernel=mesh
         mesh=_consume_volume_attributes(m,t,mesh,caller)
+        # The six-face kernel validated its own output with these options
+        # (and the strip below only drops blocks); a mesh nothing smoothed or
+        # reversed afterwards needs no second validation.
+        validated=mesh===kernel && bindings!==nothing && length(bindings)>=4 &&
+            bindings[4]!==nothing
         # model_to_mixed expects an untagged pure volume complex — boundary
         # faces are re-derived from volume-cell faces downstream (or emitted
         # by the boundary-surface parts) and ownership comes from the model,
@@ -11191,11 +11197,13 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         # dim-3 blocks (tetrahedra/hexahedra/prisms) for the same reason.
         mesh=_volume_part_strip(mesh)
         reversed=get(m.meshing.reverse,(3,t),false)
-        diagnostic=mesh isa Mesh ?
-            validate(mesh;require_positive_tets=!reversed) : validate(mesh)
-        diagnostic.ok || throw(ErrorException(
-            "$caller: transfinite Volume[$t] produced an invalid mesh — " *
-            join(diagnostic.messages,"; ")))
+        if !validated
+            diagnostic=mesh isa Mesh ?
+                validate(mesh;require_positive_tets=!reversed) : validate(mesh)
+            diagnostic.ok || throw(ErrorException(
+                "$caller: transfinite Volume[$t] produced an invalid mesh — " *
+                join(diagnostic.messages,"; ")))
+        end
         _volume_cell_count(mesh)>0 || throw(ErrorException(
             "$caller: Volume[$t] produced no volume cells"))
         return _native_initial_births!==nothing && bindings!==nothing ?

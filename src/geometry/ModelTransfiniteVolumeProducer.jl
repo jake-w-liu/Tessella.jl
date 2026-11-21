@@ -332,6 +332,11 @@ struct _ModelTransfiniteVolumeProduction
     temporary_elements::UInt64
     element_tags::Vector{UInt64}
     element_high_water::UInt64
+    # The volume driver validated `mesh` and the kernel certified every cell
+    # by the exact orientation of its shadow tetrahedra (the simplex path by
+    # the tetrahedra themselves); nothing moved or reversed the cells after
+    # that. The API classification then has nothing left to prove.
+    certified::Bool
 end
 
 function _model_transfinite_face_source(input,surf,count,caller)
@@ -546,8 +551,10 @@ function _model_transfinite_volume_production(m,t,mesh,bindings,input,geometry_p
     end
     emission=_model_transfinite_volume_emission(mesh,layout,caller;
         reverse=get(m.meshing.reverse,(3,t),false))
+    certified=!get(m.meshing.reverse,(3,t),false) &&
+        get(m.meshing.smoothing,(3,t),0)==0 && !(t in m.meshing.quad_tri)
     return _ModelTransfiniteVolumeProduction(mesh,tags,retained,geometry,emission,
-        UInt64(node_high_water),UInt64(0),UInt64[],UInt64(element_high_water))
+        UInt64(node_high_water),UInt64(0),UInt64[],UInt64(element_high_water),certified)
 end
 
 # The standalone geometry rerun differs from the actual block only through
