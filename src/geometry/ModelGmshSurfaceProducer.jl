@@ -191,27 +191,46 @@ function _gmsh_native_surface_add_source!(source,m,mesh,row,frame,caller;
     return position
 end
 
-function _gmsh_native_surface_curve!(source,m,input,curve,frame,internal,caller;
-                                    surface_tag,ctx_lc)
+# The lower product of one boundary Curve, as the producer reads it: the mesh
+# holding the rows, the row of each product node, and the Line blocks whose
+# node indices are positions in `rows`. From an authority this is a view of
+# its own storage (`_model_mesh_product_rows`); the detached, validated
+# MixedMesh that `_model_mesh_product` cuts for the same Curve cost 46 KB and
+# 440 heap objects per face to read a polyline of about six nodes.
+function _gmsh_native_surface_curve_rows(input,curve,caller)
+    if input isa _ModelMeshAuthority
+        view=_model_mesh_product_rows(input,1,curve)
+        view===nothing || return view.mesh,view.rows,view.blocks
+    end
     mesh=_model_mesh_product(input,1,curve;caller)
     mesh!==nothing && mesh.entity_data!==nothing || throw(ArgumentError(
         "$caller: native Surface input lacks actual Curve[$curve] identities"))
+    return mesh,Int32.(1:nnodes(mesh)),mesh.blocks
+end
+
+function _gmsh_native_surface_curve!(source,m,input,curve,frame,internal,caller;
+                                    surface_tag,ctx_lc)
+    mesh,rows,blocks=_gmsh_native_surface_curve_rows(input,curve,caller)
+    mesh.entity_data!==nothing || throw(ArgumentError(
+        "$caller: native Surface input lacks actual Curve[$curve] identities"))
+    labels=mesh.entity_data.external_node_tags
     visited=Int32[]
-    for block in mesh.blocks
+    for block in blocks
         block.msh==1 || throw(ArgumentError(
             "$caller: native Curve[$curve] source must have linear Line cells"))
         append!(visited,vec(block.nodes))
     end
     isempty(visited) && throw(ArgumentError("$caller: native Curve[$curve] source has no Line cells"))
     unique!(visited)
-    sort!(visited;by=row->mesh.entity_data.external_node_tags[row])
-    mapping=zeros(Int,nnodes(mesh))
-    for row in visited
-        mapping[row]=_gmsh_native_surface_add_source!(source,m,mesh,row,frame,caller;
+    sort!(visited;by=node->labels[rows[node]])
+    mapping=zeros(Int,length(rows))
+    for node in visited
+        row=rows[node]
+        mapping[node]=_gmsh_native_surface_add_source!(source,m,mesh,row,frame,caller;
             surface_tag,ctx_lc)
-        push!(source.occurrence,mesh.entity_data.external_node_tags[row])
+        push!(source.occurrence,labels[row])
     end
-    for block in mesh.blocks,column in axes(block.nodes,2)
+    for block in blocks,column in axes(block.nodes,2)
         a=mapping[block.nodes[1,column]];b=mapping[block.nodes[2,column]]
         a!=b || throw(ArgumentError("$caller: actual Curve[$curve] has a repeated Line identity"))
         push!(source.segments,(a,b,curve))
