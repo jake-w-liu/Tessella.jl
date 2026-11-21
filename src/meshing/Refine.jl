@@ -311,17 +311,24 @@ function refine_uniform(mesh::Mesh;
     return _refine_uniform_traced(mesh;max_nodes,max_cells,require_positive_tets).mesh
 end
 
+# `trusted=true` is for a caller that vouches for `mesh` (it passed validation
+# when it was stored) and certifies every child cell itself: neither the
+# input nor the result is validated here. The nodes, the cells and their
+# order are the same either way.
 function _refine_uniform_traced(mesh::Mesh;
                         max_nodes=typemax(Int32),
                         max_cells=typemax(Int32),
-                        require_positive_tets::Bool=true)
+                        require_positive_tets::Bool=true,
+                        trusted::Bool=false)
     node_limit = _limit(max_nodes, "max_nodes")
     cell_limit = _limit(max_cells, "max_cells")
 
-    diagnostic = MeshTypes.validate(mesh;
-        require_positive_tets=require_positive_tets)
-    diagnostic.ok || throw(ArgumentError(
-        "refine_uniform: input mesh is invalid — " * join(diagnostic.messages, "; ")))
+    if !trusted
+        diagnostic = MeshTypes.validate(mesh;
+            require_positive_tets=require_positive_tets)
+        diagnostic.ok || throw(ArgumentError(
+            "refine_uniform: input mesh is invalid — " * join(diagnostic.messages, "; ")))
+    end
 
     input_segments = size(mesh.segs, 2)
     input_triangles = size(mesh.tris, 2)
@@ -398,11 +405,13 @@ function _refine_uniform_traced(mesh::Mesh;
     result = Mesh(coords; segs=segments, tris=triangles, tets=tetrahedra,
                   seg_tag=segment_tags, tri_tag=triangle_tags,
                   tet_tag=tetrahedron_tags)
-    output_diagnostic = MeshTypes.validate(result;
-        require_positive_tets=require_positive_tets)
-    output_diagnostic.ok || throw(ArgumentError(
-        "refine_uniform: refinement produced an invalid mesh — " *
-        join(output_diagnostic.messages, "; ")))
+    if !trusted
+        output_diagnostic = MeshTypes.validate(result;
+            require_positive_tets=require_positive_tets)
+        output_diagnostic.ok || throw(ArgumentError(
+            "refine_uniform: refinement produced an invalid mesh — " *
+            join(output_diagnostic.messages, "; ")))
+    end
     return (;mesh=result,primary_map=remap,midpoint_ids)
 end
 

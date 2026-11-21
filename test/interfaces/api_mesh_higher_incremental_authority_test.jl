@@ -483,4 +483,28 @@ end
         A.finalize()
     end
 end
+
+# The refined carrier of an authority is the uniform refinement of the old
+# carrier, traced for its node and cell order. Its caller certifies every
+# child against the refined mesh, so the trace runs `trusted`: without
+# validating its input or its result. The trace itself must not change.
+@testset "a trusted refinement trace is the validated trace" begin
+    R=Tessella.Refine
+    coords=[0.0 1.0 0.0 0.0 1.0; 0.0 0.0 1.0 0.0 1.0; 0.0 0.0 0.0 1.0 1.0]
+    mesh=Tessella.Mesh(coords;segs=Int32[1; 2;;],tris=Int32[1 2; 2 5; 3 3],
+        tets=Int32[1 2; 2 5; 3 3; 4 4],seg_tag=Int32[7],tri_tag=Int32[8,9],tet_tag=Int32[10,11])
+    checked=R._refine_uniform_traced(mesh;require_positive_tets=false)
+    trusted=R._refine_uniform_traced(mesh;require_positive_tets=false,trusted=true)
+    for name in (:coords,:segs,:tris,:tets,:seg_tag,:tri_tag,:tet_tag)
+        @test getfield(trusted.mesh,name)==getfield(checked.mesh,name)
+    end
+    @test trusted.primary_map==checked.primary_map
+    @test trusted.midpoint_ids==checked.midpoint_ids
+    @test size(trusted.mesh.tets,2)==16
+    # Only the validating trace refuses a negatively oriented tetrahedron when
+    # positive ones are required.
+    inverted=Tessella.Mesh(coords;tets=Int32[1; 3; 2; 4;;])
+    @test_throws ArgumentError R._refine_uniform_traced(inverted)
+    @test size(R._refine_uniform_traced(inverted;trusted=true).mesh.tets,2)==8
+end
 end

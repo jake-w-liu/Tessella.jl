@@ -1014,7 +1014,12 @@ function _model_mesh_rebound_carrier(previous::_ModelMeshAuthority,mesh::MixedMe
 end
 
 function _model_mesh_refined_carrier(plan,carrier::Mesh,tags;caller="mesh refinement")
-    trace=Refine._refine_uniform_traced(carrier;require_positive_tets=false)
+    # The carrier was validated when its authority was built, and every child
+    # below must be one actual cell of the refined mesh in an even
+    # permutation, which no invalid child can be. The trace is run for its
+    # node and cell order alone, so it validates neither its input nor its
+    # result (1.7 s of 2.2 s on 497,124 tetrahedra).
+    trace=Refine._refine_uniform_traced(carrier;require_positive_tets=false,trusted=true)
     length(tags)==nnodes(carrier) || throw(ArgumentError(
         "$caller: original carrier identities do not align with refinement input"))
     rows=Vector{Int32}(undef,nnodes(trace.mesh))
