@@ -299,6 +299,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_tiny_box_measures_test.jl",
         "interfaces/api_occ_affine_shapes_test.jl",
         "interfaces/api_occ_revolve_spline_test.jl",
+        "interfaces/api_occ_boolean_crossed_cylinders_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
