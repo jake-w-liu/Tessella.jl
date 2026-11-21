@@ -10718,7 +10718,7 @@ function _model_explicit_volume_geometry(
     function fetch_surface!(surface)
         get!(local_meshes,surface) do
             produced=_mesh_input isa _ModelMeshAuthority ?
-                _model_mesh_product(_mesh_input,2,surface;caller,producer_order=true) : nothing
+                _model_mesh_product(_mesh_input,2,surface;caller,producer_order=true,shared=true) : nothing
             produced===nothing ?
                 _model_volume_surface_mesh(m,surface,caller;size_field=size_field,
                     _mesh_input,_mesh1d_options,

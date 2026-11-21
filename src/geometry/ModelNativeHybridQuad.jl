@@ -215,7 +215,7 @@ function _model_native_hybrid_constructor_input(authority,boundaries,node_uids,
         owner=(2,Int32(abs(signed_surface)))
         haskey(authority.products,owner) || throw(ArgumentError(
             "$caller: hybrid region boundary lacks its actual Surface product $owner"))
-        product=_model_mesh_product(authority,2,Int(owner[2]);caller)
+        product=_model_mesh_product(authority,2,Int(owner[2]);caller,shared=true)
         constructor=get(authority.surface_constructor_inputs,owner,nothing)
         constructor!==nothing || throw(ArgumentError(
             "$caller: hybrid boundary lacks its owned Surface constructor vector"))

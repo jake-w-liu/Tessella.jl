@@ -19,7 +19,7 @@ end
 
 # The unique actual Point-cell witness of one declared vertex entity.
 function _model_native_hybrid_embedded_sheet_point(input,point,caller)
-    actual=_model_mesh_product(input,0,point;caller)
+    actual=_model_mesh_product(input,0,point;caller,shared=true)
     actual isa MixedMesh && actual.entity_data!==nothing && length(actual.blocks)==1 &&
         only(actual.blocks).msh==15 && size(only(actual.blocks).nodes)==(1,1) || throw(ArgumentError(
         "$caller: embedded Surface vertex lacks its actual Point cell"))
@@ -33,7 +33,7 @@ end
 
 # The complete actual Line2 cell chain of one declared Curve.
 function _model_native_hybrid_embedded_sheet_curve(input,curve,caller)
-    product=_model_mesh_product(input,1,curve;caller)
+    product=_model_mesh_product(input,1,curve;caller,shared=true)
     product isa MixedMesh && product.entity_data!==nothing || throw(ArgumentError(
         "$caller: embedded Surface boundary lacks its actual Curve discretization"))
     data=product.entity_data;cells=NamedTuple[];seen=Set{UInt64}()
@@ -114,7 +114,7 @@ function _model_native_hybrid_embedded_surface_input(m,region,input,caller;surfa
     # cell family upstream inserts into the volume triangulation.
     all(curve->!(curve in curves),nested_curves) || throw(ArgumentError(
         "$caller: embedded Surface names a boundary Curve as a nested constraint"))
-    product=_model_mesh_product(input,2,surface;caller)
+    product=_model_mesh_product(input,2,surface;caller,shared=true)
     product isa MixedMesh && product.entity_data!==nothing && length(product.blocks)==1 &&
         only(product.blocks).msh==2 && size(only(product.blocks).nodes,1)==3 &&
         !isempty(only(product.blocks).nodes) || throw(ArgumentError(

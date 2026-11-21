@@ -435,7 +435,7 @@ function _model_native_initial_embedded_input(m,volume,geometry,authority,caller
         _model_mesh_coordinate(geometry.surface,row) for row in 1:nnodes(geometry.surface)]
     tags=copy(labels);rows=Dict(tag=>Int32(row) for (row,tag) in enumerate(tags))
     for (dimension,tag) in embeds
-        product=_model_mesh_product(authority,dimension,tag;caller,producer_order=true)
+        product=_model_mesh_product(authority,dimension,tag;caller,producer_order=true,shared=true)
         product isa MixedMesh && product.entity_data!==nothing || throw(ArgumentError(
             "$caller: embedded entity ($dimension, $tag) has no actual generated product"))
         for row in 1:nnodes(product)
@@ -516,7 +516,7 @@ function _model_native_volume_input_constraints(m,volume,geometry,authority,call
         return target
     end
     for surface in surfaces
-        product=_model_mesh_product(authority,2,surface;caller)
+        product=_model_mesh_product(authority,2,surface;caller,shared=true)
         product isa MixedMesh && product.entity_data!==nothing || throw(ArgumentError(
             "$caller: actual Surface[$surface] lacks its generated cell product"))
         destination=surface in boundary_set ? outer : embedded
@@ -537,7 +537,7 @@ function _model_native_volume_input_constraints(m,volume,geometry,authority,call
         end
     end
     for curve in curves
-        product=_model_mesh_product(authority,1,curve;caller)
+        product=_model_mesh_product(authority,1,curve;caller,shared=true)
         product===nothing && continue
         for (block,labels) in zip(product.blocks,product.entity_data.external_element_tags)
             block.msh==1 || isempty(block.nodes) || throw(ArgumentError(
@@ -820,7 +820,7 @@ function _model_volume_wb_constraint_cells(volume,constraints,geometry,authority
         return target
     end
     for surface in sort!(collect(keys(slabels)))
-        product=_model_mesh_product(authority,2,surface;caller)
+        product=_model_mesh_product(authority,2,surface;caller,shared=true)
         product isa MixedMesh && product.entity_data!==nothing || throw(ArgumentError(
             "$caller: actual Surface[$surface] lacks its generated cell product"))
         folded=_volume_boundary_faces(product)
@@ -848,7 +848,7 @@ function _model_volume_wb_constraint_cells(volume,constraints,geometry,authority
         surfaces[surface]=cells;push!(surface_order,surface)
     end
     for curve in sort!(collect(keys(clabels)))
-        product=_model_mesh_product(authority,1,curve;caller)
+        product=_model_mesh_product(authority,1,curve;caller,shared=true)
         product===nothing && continue
         cells=NamedTuple[]
         for (block,labels) in zip(product.blocks,product.entity_data.external_element_tags)
@@ -918,7 +918,7 @@ function _model_volume_wb_param(m,volume,owner,row,mesh,authority,
     authority===nothing && return nothing
     if owner[1]==2
         surface=Int(owner[2])
-        product=_model_mesh_product(authority,2,surface;caller)
+        product=_model_mesh_product(authority,2,surface;caller,shared=true)
         product isa MixedMesh && product.entity_data!==nothing || return nothing
         params=product.entity_data.node_parametric
         params===nothing && return nothing
@@ -942,7 +942,7 @@ function _model_volume_wb_param(m,volume,owner,row,mesh,authority,
         return nothing
     end
     curve=Int(owner[2])
-    product=_model_mesh_product(authority,1,curve;caller)
+    product=_model_mesh_product(authority,1,curve;caller,shared=true)
     product isa MixedMesh && product.entity_data!==nothing || return nothing
     params=product.entity_data.node_parametric
     params===nothing && return nothing

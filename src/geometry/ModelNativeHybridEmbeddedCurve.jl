@@ -20,7 +20,7 @@ function _model_native_hybrid_embedded_curve_input(m,region,input,caller;curve=n
             throw(ArgumentError("$caller: selected embedded Curve lacks its actual Region declaration"))
     end
     haskey(m.curves,curve) || throw(ArgumentError("$caller: embedded Curve has no declared geometry"))
-    product=_model_mesh_product(input,1,curve;caller)
+    product=_model_mesh_product(input,1,curve;caller,shared=true)
     product isa MixedMesh && product.entity_data!==nothing || throw(ArgumentError(
         "$caller: embedded Curve lacks its actual lower discretization"))
     data=product.entity_data;cells=NamedTuple[];used=Set{UInt64}();seen=Set{UInt64}()
@@ -41,7 +41,7 @@ function _model_native_hybrid_embedded_curve_input(m,region,input,caller;curve=n
     isempty(cells) && throw(ArgumentError("$caller: embedded Curve has no actual segment cells"))
     endpoint_uids=UInt64[];endpoints=m.curves[curve]
     for point in endpoints
-        actual=_model_mesh_product(input,0,point;caller)
+        actual=_model_mesh_product(input,0,point;caller,shared=true)
         actual isa MixedMesh && actual.entity_data!==nothing && length(actual.blocks)==1 &&
             only(actual.blocks).msh==15 && size(only(actual.blocks).nodes)==(1,1) || throw(ArgumentError(
             "$caller: embedded Curve endpoint lacks its actual Point-cell witness"))

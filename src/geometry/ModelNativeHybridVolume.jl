@@ -148,7 +148,7 @@ function _model_native_hybrid_periodic_boundary_certificate(m,tag,constructor,pa
         target=get(input.surface_constructor_inputs,(2,Int32(slave)),nothing)
         source!==nothing && target!==nothing || throw(ArgumentError(
             "$caller: hybrid periodic boundary lacks owned Surface constructors"))
-        _model_surface_constructor_binding(_model_mesh_product(input,2,slave;caller),target,caller)
+        _model_surface_constructor_binding(_model_mesh_product(input,2,slave;caller,shared=true),target,caller)
         bindings=event[2];sd=source.entity_data;td=target.entity_data
         mapping=Dict{UInt64,UInt64}()
         seen=Set{UInt64}()
@@ -333,7 +333,7 @@ function _model_native_hybrid_global_triangles(m,input,caller;surface_witnesses=
         any(block->!isempty(block.nodes),product.blocks) || continue
         haskey(m.surfaces,Int(owner[2])) || throw(ArgumentError(
             "$caller: global hybrid sizing names an undeclared Surface owner"))
-        actual=_model_mesh_product(input,2,Int(owner[2]);caller)
+        actual=_model_mesh_product(input,2,Int(owner[2]);caller,shared=true)
         data=actual.entity_data
         data!==nothing && length(data.external_node_tags)==nnodes(actual) &&
             allunique(data.external_node_tags) && all(!iszero,data.external_node_tags) &&
