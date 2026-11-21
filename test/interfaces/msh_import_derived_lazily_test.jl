@@ -98,4 +98,23 @@ end
     end
 end
 
+@testset "Buffered ASCII integers equal print" begin
+    E = Tessella.Elements
+    values = Any[0, 9, 10, 99, 100, typemax(Int32), Int32(-7), -1, typemin(Int64), typemax(UInt64),
+                 UInt64(10)^19, 123456789012345678]
+    io = IOBuffer()
+    out = E._AsciiOut(io)
+    for v in values
+        E._aint!(out, v); E._aput!(out, ' ')
+    end
+    for _ in 1:20000      # forces several flushes
+        E._aint!(out, 4242); E._aput!(out, '
+')
+    end
+    E._aflush!(out)
+    expected = join(string.(values), " ") * " " * repeat("4242
+", 20000)
+    @test String(take!(io)) == expected
+end
+
 end # module

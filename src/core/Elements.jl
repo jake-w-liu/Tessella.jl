@@ -7350,6 +7350,51 @@ function _write_mixed_periodic_v4(io,m::MixedMesh,binary::Bool,wide::Bool)
     return nothing
 end
 
+# Element records are written through a byte buffer: `print(io,a," ",b,...)`
+# takes the stream lock and makes a call per token. The bytes are the same.
+mutable struct _AsciiOut{T<:IO}
+    io::T
+    buf::Vector{UInt8}
+    n::Int
+end
+
+_AsciiOut(io::IO)=_AsciiOut(io,Vector{UInt8}(undef,1<<16),0)
+
+function _aflush!(out::_AsciiOut)
+    if out.n>0
+        GC.@preserve out unsafe_write(out.io,pointer(out.buf),UInt(out.n))
+        out.n=0
+    end
+    return nothing
+end
+
+@inline function _aput!(out::_AsciiOut,c::Char)
+    out.n+1>length(out.buf) && _aflush!(out)
+    @inbounds out.buf[out.n+1]=UInt8(c); out.n+=1
+    return nothing
+end
+
+function _aint!(out::_AsciiOut,x::Integer)
+    out.n+24>length(out.buf) && _aflush!(out)
+    neg=x<0
+    u=neg ? UInt64(0)-reinterpret(UInt64,Int64(x)) : UInt64(x)
+    digits=1; t=u
+    while t>=UInt64(10)
+        t=div(t,UInt64(10)); digits+=1
+    end
+    buf=out.buf; n=out.n
+    neg && (n+=1; @inbounds buf[n]=UInt8('-'))
+    k=n+digits; t=u
+    @inbounds while true
+        q=div(t,UInt64(10))
+        buf[k]=UInt8('0')+UInt8(t-q*UInt64(10))
+        t=q; k-=1
+        t==0 && break
+    end
+    out.n=n+digits
+    return nothing
+end
+
 function _mixed_v2_order(m::MixedMesh)
     starts=Vector{Int}(undef,length(m.blocks)+1); starts[1]=1
     for (bi,block) in pairs(m.blocks)
@@ -7360,6 +7405,17 @@ function _mixed_v2_order(m::MixedMesh)
     end
     total=starts[end]-1
     refs=Vector{_MixedCellRef}(undef,total)
+    if !any(block->block isa SpecialElementBlock,m.blocks)
+        # No links: the order is the storage order.
+        for (bi,block) in pairs(m.blocks), cell in 1:_block_ncells(block)
+            refs[starts[bi]+cell-1]=_MixedCellRef(bi,cell)
+        end
+        output_tags=[zeros(Int32,_block_ncells(block)) for block in m.blocks]
+        @inbounds for (bi,block) in pairs(m.blocks), cell in 1:_block_ncells(block)
+            output_tags[bi][cell]=Int32(starts[bi]+cell-1)
+        end
+        return refs,output_tags
+    end
     indegree=zeros(Int,total)
     dependents=[Int[] for _ in 1:total]
     for (bi,block) in pairs(m.blocks), cell in 1:_block_ncells(block)
@@ -7434,9 +7490,10 @@ end
 function _v2_entity_ids(m::MixedMesh)
     keys=Set{Tuple{Int,Int32}}()
     @inbounds for b in m.blocks
-        dim=_block_dim(b)
+        dim=_block_dim(b); previous=Int32(-1)
         for tag in b.tags
-            push!(keys,(dim,tag))
+            tag==previous && continue
+            previous=tag; push!(keys,(dim,tag))
         end
     end
     counters=zeros(Int,4); ids=Dict{Tuple{Int,Int32},Int}()
@@ -7477,8 +7534,29 @@ function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved;
     println(io,"\$Elements"); println(io,nel)
     ids=_v2_entity_ids(m); order,output_tags=_mixed_v2_order(m)
     write_tags=_v2_write_tags(m,output_tags,preserve_numbering,"write_mixed_msh")
+    explicit=_v2_explicit_entities(m)
+    out=_AsciiOut(io); last_key=(-1,Int32(-1)); last_id=Int32(0)
     @inbounds for ref in order
         b=m.blocks[ref.block]; j=ref.cell; physical=b.tags[j]
+        if b isa ElementBlock
+            if explicit===nothing
+                key=(_block_dim(b),physical)
+                key==last_key || (last_id=Int32(ids[key]); last_key=key)
+                entity=last_id
+            else
+                entity=explicit[ref.block][j]
+            end
+            _aint!(out,write_tags[ref.block][j]); _aput!(out,' '); _aint!(out,b.msh)
+            _aput!(out,' '); _aput!(out,'2'); _aput!(out,' '); _aint!(out,physical)
+            _aput!(out,' '); _aint!(out,entity)
+            nodes=b.nodes
+            for i in 1:size(nodes,1)
+                _aput!(out,' '); _aint!(out,nodes[i,j])
+            end
+            _aput!(out,'\n')
+            continue
+        end
+        _aflush!(out)
         entity=_v2_cell_entity(m,ids,ref.block,j)
         print(io,write_tags[ref.block][j]," ",b.msh)
         if b isa SpecialElementBlock
@@ -7502,6 +7580,7 @@ function _write_mixed_v2(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved;
         end
         println(io)
     end
+    _aflush!(out)
     println(io,"\$EndElements")
     _emit_preserved!(io,preserved,4)
     return nothing
@@ -7551,17 +7630,24 @@ function _write_mixed_v2_binary(io,m::MixedMesh,names,gmsh_compatible::Bool,pres
         end
         write(io,Int32(first_block.msh)); write(io,Int32(last-position+1))
         write(io,Int32(ntags))
+        total=0
+        for index in position:last
+            ref=order[index]
+            total+=3+(ntags==3 ? 1 : 0)+_cell_arity(m.blocks[ref.block],ref.cell)
+        end
+        packed=Vector{Int32}(undef,total); at=0
         for index in position:last
             ref=order[index]; block=m.blocks[ref.block]; j=ref.cell
-            write(io,write_tags[ref.block][j]); write(io,block.tags[j])
-            write(io,_v2_cell_entity(m,ids,ref.block,j))
+            packed[at+1]=write_tags[ref.block][j]; packed[at+2]=block.tags[j]
+            packed[at+3]=_v2_cell_entity(m,ids,ref.block,j); at+=3
             if ntags==3
-                write(io,_v2_link_tag(write_tags,block.parent_refs[j]))
+                at+=1; packed[at]=_v2_link_tag(write_tags,block.parent_refs[j])
             end
             for i in 1:_cell_arity(block,j)
-                write(io,_cell_node(block,j,i))
+                at+=1; packed[at]=_cell_node(block,j,i)
             end
         end
+        write(io,packed)
         position=last+1
     end
     length(order)==nel || throw(ErrorException(
@@ -8285,19 +8371,23 @@ function _write_mixed_v4_metadata(
     maximum_element=nel==0 ? 0 : maximum(Iterators.flatten(data.external_element_tags))
     println(io,"\$Elements")
     println(io,length(element_runs)," ",nel," ",minimum_element," ",maximum_element)
+    out=_AsciiOut(io)
     @inbounds for run in element_runs
         block=m.blocks[run.block]
         entity=data.block_entities[run.block][first(run.cells)]
-        println(io,_block_dim(block)," ",entity," ",block.msh," ",length(run.cells))
+        _aint!(out,_block_dim(block)); _aput!(out,' '); _aint!(out,entity); _aput!(out,' ')
+        _aint!(out,block.msh); _aput!(out,' '); _aint!(out,length(run.cells)); _aput!(out,'\n')
+        element_tags=data.external_element_tags[run.block]
         for j in run.cells
-            print(io,data.external_element_tags[run.block][j])
+            _aint!(out,element_tags[j])
             for i in 1:_cell_arity(block,j)
                 internal=_cell_node(block,j,i)
-                print(io," ",data.external_node_tags[internal])
+                _aput!(out,' '); _aint!(out,data.external_node_tags[internal])
             end
-            println(io)
+            _aput!(out,'\n')
         end
     end
+    _aflush!(out)
     println(io,"\$EndElements")
     _emit_preserved!(io,preserved,4)
     return nothing
@@ -8343,16 +8433,19 @@ function _write_mixed_v4(io,m::MixedMesh,names,gmsh_compatible::Bool,preserved)
     println(io,"\$Elements")
     println(io,length(groups)," ",nel," ",nel==0 ? 0 : 1," ",nel)
     eid=0
+    out=_AsciiOut(io)
     @inbounds for group in groups
-        println(io,group.dim," ",group.entity," ",group.msh," ",length(group.cells))
+        _aint!(out,group.dim); _aput!(out,' '); _aint!(out,group.entity); _aput!(out,' ')
+        _aint!(out,group.msh); _aput!(out,' '); _aint!(out,length(group.cells)); _aput!(out,'\n')
         for ref in group.cells
-            b=m.blocks[ref.block]; eid+=1; print(io,eid)
+            b=m.blocks[ref.block]; eid+=1; _aint!(out,eid)
             for i in 1:_cell_arity(b,ref.cell)
-                print(io," ",_cell_node(b,ref.cell,i))
+                _aput!(out,' '); _aint!(out,_cell_node(b,ref.cell,i))
             end
-            println(io)
+            _aput!(out,'\n')
         end
     end
+    _aflush!(out)
     println(io,"\$EndElements")
     _emit_preserved!(io,preserved,4)
     return nothing

@@ -44,9 +44,9 @@ end
 # Whether a physical selection still covers every cell and node of `complete`
 # (every cell owner is selected, and each node is referenced by a cell or has a
 # selected owner), so the MSH 4.1 projection is the mesh itself.
-function _model_export_selects_all(complete,physical)
+function _model_export_selects_all(complete,physical,version,all_cells)
     data=complete.entity_data
-    for (bi,block) in enumerate(complete.blocks)
+    all_cells || for (bi,block) in enumerate(complete.blocks)
         dimension=msh_dimension(block.msh);previous=Int32(-1);selected=false
         for owner in data.block_entities[bi]
             owner==previous || (previous=owner;selected=(dimension,Int(owner)) in physical)
@@ -62,6 +62,9 @@ function _model_export_selects_all(complete,physical)
     previous=(-1,Int32(-1));selected=false
     for row in eachindex(referenced)
         referenced[row] && continue
+        # MSH 2.2 keeps only referenced nodes; MSH 4.1 also the selected owners.
+        version==2.2 && return false
+        all_cells && continue
         owner=data.node_entities[row]
         owner==previous || (previous=owner;selected=(owner[1],Int(owner[2])) in physical)
         selected || return false
@@ -85,10 +88,10 @@ function _model_export_mesh(model,source,class,version,save_all,caller)
     # Exporting every cell and node of an MSH 4.1 projection that has nothing
     # to renumber: the projection is the complete mesh itself, shared rather
     # than rebuilt (the writers only read it).
-    fast=version==4.1 && complete.partition_data===nothing &&
+    fast=complete.partition_data===nothing && !(version==2.2 && save_all) &&
         Float64(get(OPTIONS,"Mesh.ScalingFactor",1.0))==1.0 &&
         all(block->block isa ElementBlock && size(block.nodes,2)>0,complete.blocks) &&
-        (all_cells || _model_export_selects_all(complete,physical))
+        _model_export_selects_all(complete,physical,version,all_cells)
     if fast
         rows=1:nnodes(complete);blocks=complete.blocks;owners=data.block_entities
         uids=data.external_element_tags;metadata=data;partition=nothing
