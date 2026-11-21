@@ -128,12 +128,118 @@ end
 
 _dim01_record(m,entity)=get(m.discrete,entity,get(m.meshing.attached,entity,nothing))
 
-function _dim01_cell_order(cell)
-    family=msh_spec(cell.msh).family
-    rank=family===:pnt ? 0 : family===:lin ? 1 : family===:tri ? 2 :
-         family===:qua ? 3 : family===:tet ? 4 : family===:hex ? 5 :
-         family===:pri ? 6 : family===:pyr ? 7 : 8
-    return (cell.owner,rank)
+function _dim01_family_rank(msh)
+    family=msh_spec(msh).family
+    return family===:pnt ? 0 : family===:lin ? 1 : family===:tri ? 2 :
+           family===:qua ? 3 : family===:tet ? 4 : family===:hex ? 5 :
+           family===:pri ? 6 : family===:pyr ? 7 : 8
+end
+
+_dim01_cell_order(cell)=(cell.owner,_dim01_family_rank(cell.msh))
+
+# The cells of a finish as columns. Cell `i` has element type `msh[i]`, owner
+# `owner[i]`, label `tag[i]`, source label `source[i]` (when `sourced[i]`),
+# physical tag `physical[i]` and the node positions
+# `nodes[first[i]:first[i+1]-1]` in the assembly's node list.
+#
+# `_dim01_finish!` orders, renumbers and groups cells on these columns. The
+# cell objects of an assembly are spread into them, and written back to. A
+# caller that already holds whole blocks (a refinement's children, a
+# structured block) fills the columns with `_dim01_add_cell_block!` and
+# passes them as `cells`: no object and no node vector is made per cell.
+struct _Dim01CellColumns
+    msh::Vector{Int}
+    owner::Vector{Tuple{Int,Int32}}
+    tag::Vector{UInt64}
+    source::Vector{UInt64}
+    sourced::Vector{Bool}
+    physical::Vector{Int32}
+    first::Vector{Int}
+    nodes::Vector{Int32}
+end
+_Dim01CellColumns()=_Dim01CellColumns(Int[],Tuple{Int,Int32}[],UInt64[],UInt64[],Bool[],
+    Int32[],Int[1],Int32[])
+Base.length(columns::_Dim01CellColumns)=length(columns.msh)
+
+function _dim01_cell_columns(cells::Vector{_Dim01Cell})
+    count=length(cells);total=0
+    for cell in cells
+        total+=length(cell.nodes)
+    end
+    columns=_Dim01CellColumns(Vector{Int}(undef,count),Vector{Tuple{Int,Int32}}(undef,count),
+        Vector{UInt64}(undef,count),Vector{UInt64}(undef,count),Vector{Bool}(undef,count),
+        Vector{Int32}(undef,count),Vector{Int}(undef,count+1),Vector{Int32}(undef,total))
+    cursor=1
+    for (index,cell) in enumerate(cells)
+        columns.msh[index]=cell.msh;columns.owner[index]=cell.owner
+        columns.tag[index]=cell.tag;columns.physical[index]=cell.physical
+        source=cell.source_tag
+        columns.sourced[index]=source!==nothing
+        columns.source[index]=source===nothing ? UInt64(0) : source
+        columns.first[index]=cursor
+        copyto!(columns.nodes,cursor,cell.nodes,1,length(cell.nodes))
+        cursor+=length(cell.nodes)
+    end
+    columns.first[count+1]=cursor
+    return columns
+end
+
+# Append one block of cells of type `msh`: column `c` of `nodes` (positions in
+# the assembly's node list) is a cell of entity `owners[c]` with label
+# `tags[c]`, which is also its source label, and physical tag `physical[c]`.
+# The checks are those `_dim01_add_cell!` makes for each cell.
+function _dim01_add_cell_block!(columns::_Dim01CellColumns,assembly::_Dim01Assembly,msh::Integer,
+        nodes::AbstractMatrix{<:Integer},owners::AbstractVector{<:Integer},
+        tags::AbstractVector{<:Integer},physical::AbstractVector{<:Integer};
+        preserve_source_order::Bool=false)
+    count=size(nodes,2)
+    length(owners)==length(tags)==length(physical)==count || throw(ArgumentError(
+        "$(assembly.caller): a cell block's owners, labels and physical tags do not align"))
+    length(columns)+length(assembly.cells)+count<=assembly.max_cells || throw(ArgumentError(
+        "$(assembly.caller): mesh exceeds max_cells=$(assembly.max_cells)"))
+    spec=msh_spec(msh);dimension=Int(msh_dimension(msh));width=size(nodes,1)
+    width==spec.nnodes || throw(ArgumentError(
+        "$(assembly.caller): invalid source MSH $msh connectivity"))
+    preserve_source_order || spec.family===:pnt || spec.order in (1,2) ||
+        (spec.family===:lin && 3<=spec.order<=10) || throw(ArgumentError(
+        "$(assembly.caller): lower-dimensional generation supports orders one and two; " *
+        "source MSH $msh has order $(spec.order)"))
+    before=length(columns);cursor=length(columns.nodes)
+    for column in (columns.msh,columns.owner,columns.tag,columns.source,columns.sourced,columns.physical)
+        resize!(column,before+count)
+    end
+    resize!(columns.first,before+count+1);resize!(columns.nodes,cursor+width*count)
+    highest=UInt64(0)
+    for column in 1:count
+        index=before+column
+        tag=UInt64(tags[column])
+        columns.msh[index]=Int(msh);columns.owner[index]=(dimension,Int32(owners[column]))
+        columns.tag[index]=tag;columns.source[index]=tag;columns.sourced[index]=true
+        columns.physical[index]=Int32(physical[column])
+        for slot in 1:width
+            columns.nodes[cursor+slot]=Int32(nodes[slot,column])
+        end
+        cursor+=width
+        columns.first[index+1]=cursor+1
+        highest=max(highest,tag)
+    end
+    assembly.cell_counter_wrapped || (assembly.cell_max=max(assembly.cell_max,highest))
+    return columns
+end
+
+# The cells in publication order: by owner, then by element family, each in
+# the order given. `nothing` when they are in that order already.
+function _dim01_cell_publication_order(columns::_Dim01CellColumns)
+    count=length(columns)
+    keys=Vector{Tuple{Tuple{Int,Int32},Int}}(undef,count)
+    sorted=true;rank=0;ranked=0
+    for cell in 1:count
+        msh=columns.msh[cell]
+        msh==ranked || (rank=_dim01_family_rank(msh);ranked=msh)
+        keys[cell]=(columns.owner[cell],rank)
+        cell>1 && isless(keys[cell],keys[cell-1]) && (sorted=false)
+    end
+    return sorted ? nothing : sortperm(keys;alg=Base.Sort.MergeSort)
 end
 
 function _dim01_fully_discrete(m,entity)
@@ -1476,24 +1582,33 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
                         source_node_positions=Int32[],curve_parameter_order::Bool=false,
                         node_tag_order::Bool=false,record_view::Bool=false,curve_births=nothing,
                         native_orphan_births=nothing,periodic_parent_receipt=nothing,
-                        periodic_uid_operation::Symbol=:preserve)
+                        periodic_uid_operation::Symbol=:preserve,
+                        cells::Union{Nothing,_Dim01CellColumns}=nothing)
     periodic_uid_operation in (:preserve,:order,:refine,:defer) || throw(ArgumentError(
         "$(assembly.caller): invalid periodic UID publication operation"))
+    cells===nothing || isempty(assembly.cells) || throw(ArgumentError(
+        "$(assembly.caller): a finish takes its cells as objects or as columns, not both"))
+    columns=cells===nothing ? _dim01_cell_columns(assembly.cells) : cells
+    cell_count=length(columns)
     referenced=falses(length(assembly.nodes))
-    for cell in assembly.cells,node in cell.nodes
+    for node in columns.nodes
         referenced[node]=true
     end
     if p2_pass
         # pruneMeshVertexAssociations clears associations and then visits
         # volume, surface, curve and Point cells. The first entity at the
-        # lowest incident dimension owns the vertex, including old primaries.
+        # lowest incident dimension owns the vertex, including old primaries:
+        # among a vertex's cells, the lowest dimension and then the lowest
+        # entity tag. That is the cell a walk in (dimension descending, tag
+        # ascending) order would leave last, found without sorting the cells.
         incident=fill((4,Int32(0)),length(assembly.nodes))
-        cell_order=sortperm(assembly.cells;by=cell->(-cell.owner[1],cell.owner[2]),
-                            alg=Base.Sort.MergeSort)
-        for position in cell_order
-            cell=assembly.cells[position]
-            for node in cell.nodes
-                incident[node][1]>cell.owner[1] && (incident[node]=cell.owner)
+        for cell in 1:cell_count
+            owner=columns.owner[cell]
+            for slot in columns.first[cell]:columns.first[cell+1]-1
+                node=columns.nodes[slot]
+                current=incident[node]
+                (owner[1]<current[1] || (owner[1]==current[1] && owner[2]<current[2])) &&
+                    (incident[node]=owner)
             end
         end
         for position in eachindex(assembly.nodes)
@@ -1515,7 +1630,7 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
     end
     length(kept)<=node_limit || throw(ArgumentError(
         "$(assembly.caller): mesh exceeds max_nodes=$node_limit"))
-    length(assembly.cells)<=cell_limit || throw(ArgumentError(
+    cell_count<=cell_limit || throw(ArgumentError(
         "$(assembly.caller): mesh exceeds max_cells=$cell_limit"))
     if curve_parameter_order
         # Subdivide(GEdge) compares MVertex::getParameter(0). A plain
@@ -1545,9 +1660,11 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
     physical_support=falses(length(assembly.nodes))
     physical_memo=_dim01_physical_memo()
     if save_physical
-        for cell in assembly.cells
-            _dim01_physical!(physical_memo,m,cell.owner)!=0 || continue
-            physical_support[cell.nodes].=true
+        for cell in 1:cell_count
+            _dim01_physical!(physical_memo,m,columns.owner[cell])!=0 || continue
+            for slot in columns.first[cell]:columns.first[cell+1]-1
+                physical_support[columns.nodes[slot]]=true
+            end
         end
     end
     node_tags=UInt64[assembly.nodes[i].tag for i in kept]
@@ -1561,8 +1678,9 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
         end
     end
     node_tag_map=Dict(assembly.nodes[i].tag=>node_tags[slot] for (slot,i) in enumerate(kept))
-    issorted(assembly.cells;by=_dim01_cell_order) ||
-        sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)
+    # `published[position]` is the cell at that place of the publication order.
+    permutation=_dim01_cell_publication_order(columns)
+    published=permutation===nothing ? collect(1:cell_count) : permutation
     # Display flags belong to the surviving MElement, not to a reused numeric
     # tag. Factory order conversions and remeshing allocate a new identity.
     visibility_tag_map=Dict{UInt64,UInt64}()
@@ -1572,16 +1690,18 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
             ghost_owners=_imported_ghost_uid_owners(m)
             ghost_ranks=_imported_ghost_uid_ranks(m)
             occurrences=Tuple{Tuple{Int,Int32},Int,Int,Int}[]
-            unchanged=Bool[cell.source_tag!==nothing && cell.tag==cell.source_tag for cell in assembly.cells]
-            for (position,cell) in enumerate(assembly.cells)
-                receipt=get(m.meshing.imported_entities,(cell.owner[1],Int(cell.owner[2])),nothing)
+            unchanged=Bool[columns.sourced[cell] && columns.tag[cell]==columns.source[cell]
+                for cell in published]
+            for (position,cell) in enumerate(published)
+                owner=columns.owner[cell];msh=columns.msh[cell];tag=columns.tag[cell]
+                receipt=get(m.meshing.imported_entities,(owner[1],Int(owner[2])),nothing)
                 if receipt===nothing || !startswith(receipt.kind,"Ghost ")
-                    push!(occurrences,(cell.owner,_native_mesh_element_bucket(cell.msh),position,position))
+                    push!(occurrences,(owner,_native_mesh_element_bucket(msh),position,position))
                 end
-                for owner in get(ghost_owners,cell.tag,Tuple{Int,Int32}[])
-                    owner[1]==cell.owner[1] || continue
-                    rank=ghost_ranks[(owner[1],Int(owner[2]))][cell.tag]
-                    push!(occurrences,(owner,_native_mesh_element_bucket(cell.msh),rank,position))
+                for ghost in get(ghost_owners,tag,Tuple{Int,Int32}[])
+                    ghost[1]==owner[1] || continue
+                    rank=ghost_ranks[(ghost[1],Int(ghost[2]))][tag]
+                    push!(occurrences,(ghost,_native_mesh_element_bucket(msh),rank,position))
                 end
             end
             sort!(occurrences;alg=Base.Sort.MergeSort)
@@ -1589,29 +1709,45 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
                 !save_physical && !selected && continue
                 save_physical && (_dim01_physical!(physical_memo,m,owner)!=0)!=selected && continue
                 next+=UInt64(1)
-                cell=assembly.cells[position]
-                unchanged[position] && (visibility_tag_map[cell.source_tag]=next)
-                cell.tag=next
+                cell=published[position]
+                unchanged[position] && (visibility_tag_map[columns.source[cell]]=next)
+                columns.tag[cell]=next
             end
         else
-            for selected in (true,false),cell in assembly.cells
+            for selected in (true,false),cell in published
                 !save_physical && !selected && continue
-                save_physical && (_dim01_physical!(physical_memo,m,cell.owner)!=0)!=selected && continue
+                save_physical && (_dim01_physical!(physical_memo,m,columns.owner[cell])!=0)!=selected && continue
                 next+=UInt64(1)
-                cell.source_tag!==nothing && cell.tag==cell.source_tag &&
-                    (visibility_tag_map[cell.source_tag]=next)
-                cell.tag=next
+                columns.sourced[cell] && columns.tag[cell]==columns.source[cell] &&
+                    (visibility_tag_map[columns.source[cell]]=next)
+                columns.tag[cell]=next
             end
         end
     end
     order=Int[];groups=Dict{Int,Vector{Int}}()
     element_tag_map=Dict{UInt64,UInt64}()
-    for (slot,cell) in enumerate(assembly.cells)
-        cell.source_tag!==nothing && (element_tag_map[cell.source_tag]=cell.tag)
-        !renumber && cell.source_tag!==nothing && cell.tag==cell.source_tag &&
-            (visibility_tag_map[cell.source_tag]=cell.tag)
-        haskey(groups,cell.msh) || push!(order,cell.msh)
-        push!(get!(()->Int[],groups,cell.msh),slot)
+    grouped=0;group=Int[]
+    for cell in published
+        if columns.sourced[cell]
+            element_tag_map[columns.source[cell]]=columns.tag[cell]
+            !renumber && columns.tag[cell]==columns.source[cell] &&
+                (visibility_tag_map[columns.source[cell]]=columns.tag[cell])
+        end
+        msh=columns.msh[cell]
+        if msh!=grouped
+            haskey(groups,msh) || push!(order,msh)
+            group=get!(()->Int[],groups,msh);grouped=msh
+        end
+        push!(group,cell)
+    end
+    if cells===nothing
+        # The assembly's own cells follow: publication order and final labels.
+        permutation===nothing || copyto!(assembly.cells,assembly.cells[permutation])
+        if renumber
+            for (position,cell) in enumerate(published)
+                assembly.cells[position].tag=columns.tag[cell]
+            end
+        end
     end
     Model._model_imported_ghost_remap!(m,visibility_tag_map;drop_removed=true)
     coords=Matrix{Float64}(undef,3,length(kept))
@@ -1636,14 +1772,14 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
         physical=Vector{Int32}(undef,length(positions))
         classified=Vector{Int32}(undef,length(positions))
         external=Vector{UInt64}(undef,length(positions))
-        for (column,position) in enumerate(positions)
-            cell=assembly.cells[position]
-            for (slot,node) in enumerate(cell.nodes)
-                nodes[slot,column]=mapping[node]
+        for (column,cell) in enumerate(positions)
+            start=columns.first[cell]-1
+            for slot in 1:columns.first[cell+1]-1-start
+                nodes[slot,column]=mapping[columns.nodes[start+slot]]
             end
-            physical[column]=cell.physical
-            classified[column]=cell.owner[2]
-            external[column]=cell.tag
+            physical[column]=columns.physical[cell]
+            classified[column]=columns.owner[cell][2]
+            external[column]=columns.tag[cell]
         end
         push!(blocks,ElementBlock(msh,nodes,physical))
         push!(block_owners,classified);push!(external_cells,external)

@@ -331,4 +331,87 @@ end
         A.finalize()
     end
 end
+
+staged_records(plan)=plan.model.meshing.attached
+
+# `_dim01_finish!` orders, renumbers and groups cells on columns. A caller
+# that holds whole blocks passes them with `_dim01_add_cell_block!` instead
+# of one object and one node vector per cell; the finished mesh and every
+# label map must be those of the object route. The blocks are given with the
+# triangles first, so neither route receives its cells in publication order.
+function finished(mesh,model,blockwise,renumber,p2_pass)
+    data=mesh.entity_data
+    staged=M._model_mesh_transaction_copy(model)
+    assembly=A._Dim01Assembly(A._Dim01Node[],A._Dim01Cell[],Dict{UInt64,Int32}(),
+        A.NODE_TAG_MAX[],A.ELEMENT_TAG_MAX[],Int(typemax(Int32)),Int(typemax(Int32)),"test")
+    for row in axes(mesh.coords,2)
+        A._dim01_add_node!(assembly,data.external_node_tags[row],
+            ntuple(axis->mesh.coords[axis,row],3),data.node_entities[row],data.node_parametric[row])
+    end
+    order=sortperm([block.msh for block in mesh.blocks];rev=true)
+    columns=blockwise ? A._Dim01CellColumns() : nothing
+    for index in order
+        block=mesh.blocks[index]
+        owners=data.block_entities[index];labels=data.external_element_tags[index]
+        if blockwise
+            A._dim01_add_cell_block!(columns,assembly,block.msh,block.nodes,owners,labels,block.tags)
+        else
+            dimension=Int(Tessella.Elements.msh_dimension(block.msh))
+            for column in axes(block.nodes,2)
+                A._dim01_add_cell!(assembly,block.msh,(dimension,owners[column]),
+                    block.nodes[:,column],labels[column];physical=block.tags[column])
+            end
+        end
+    end
+    plan=A._dim01_finish!(assembly,staged,Tessella.Model.model_entities(staged),
+        Set{Tuple{Int,Int32}}(),falses(length(assembly.nodes)),renumber,p2_pass;cells=columns)
+    return plan,assembly
+end
+
+@testset "a finish from cell blocks is the finish from cell objects" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.model.add_physical_group(2,[2,3];tag=5)
+        A.option("Mesh.MeshSizeMin",0.4);A.option("Mesh.MeshSizeMax",0.4)
+        A.mesh.generate(2)
+        model=A.CURRENT[];mesh=model.meshing.mesh_authority.mesh
+        @test length(mesh.blocks)>=2
+        for renumber in (true,false),p2_pass in (false,true)
+            objects,assembly=finished(mesh,model,false,renumber,p2_pass)
+            blocks,empty_assembly=finished(mesh,model,true,renumber,p2_pass)
+            @test isempty(empty_assembly.cells)
+            @test same_content(objects.mesh,blocks.mesh)
+            @test objects.node_tag_map==blocks.node_tag_map
+            @test objects.element_tag_map==blocks.element_tag_map
+            @test objects.visibility_tag_map==blocks.visibility_tag_map
+            @test (objects.max_node_tag,objects.max_element_tag)==(blocks.max_node_tag,blocks.max_element_tag)
+            @test same_content(staged_records(objects),staged_records(blocks))
+            # The object route leaves its cells in publication order with
+            # their published labels.
+            @test issorted(assembly.cells;by=A._dim01_cell_order)
+            @test sort!([cell.tag for cell in assembly.cells])==
+                sort!(reduce(vcat,objects.mesh.entity_data.external_element_tags))
+        end
+        # A block is checked as each of its cells would be, and a finish
+        # takes objects or columns, not both.
+        columns=A._dim01_add_cell_block!(A._Dim01CellColumns(),
+            A._Dim01Assembly(A._Dim01Node[],A._Dim01Cell[],Dict{UInt64,Int32}(),UInt64(0),UInt64(0),
+                Int(typemax(Int32)),Int(typemax(Int32)),"test"),
+            15,reshape(Int32[1],1,1),Int32[1],UInt64[1],Int32[0])
+        @test length(columns)==1
+        @test_throws ArgumentError A._dim01_add_cell_block!(A._Dim01CellColumns(),
+            A._Dim01Assembly(A._Dim01Node[],A._Dim01Cell[],Dict{UInt64,Int32}(),UInt64(0),UInt64(0),
+                Int(typemax(Int32)),Int(typemax(Int32)),"test"),
+            2,reshape(Int32[1,2],2,1),Int32[1],UInt64[1],Int32[0])
+        _,assembly=finished(mesh,model,false,true,false)
+        @test !isempty(assembly.cells)
+        @test_throws ArgumentError A._dim01_finish!(assembly,M._model_mesh_transaction_copy(model),
+            Tessella.Model.model_entities(model),Set{Tuple{Int,Int32}}(),
+            falses(length(assembly.nodes)),true,false;cells=columns)
+    finally
+        A.finalize()
+    end
+end
 end
