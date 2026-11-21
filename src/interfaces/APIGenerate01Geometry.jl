@@ -151,8 +151,8 @@ function _dim01_geometry_entities(mesh,m)
         endpoints=get(m.curves,Int(record.tag),nothing)
         endpoints===nothing && continue
         first_point,last_point=endpoints
-        signed=Int32[first_point,-last_point]
-        record.boundaries==signed || continue
+        signed=record.boundaries
+        length(signed)==2 && signed[1]==first_point && signed[2]==-last_point || continue
         public=Int32[first_point,last_point]
         replacement===nothing && (replacement=copy(entities))
         replacement[key]=Elements._native_mixed_entity(record.dim,record.tag,record.bbox;
@@ -167,6 +167,40 @@ function _dim01_geometry_carrier(plan,birth)
     entities=_dim01_geometry_entities(mesh,plan.model)
     isempty(birth.nodes) && entities===mesh.entity_data.entities && return mesh
     data=mesh.entity_data
+    elementary=mesh.elementary_entities
+    if elementary!==nothing && mesh.partition_data===nothing &&
+            isempty(mesh.periodic_links) && isempty(mesh.ancillary_sections) &&
+            isempty(mesh.data_sections) && all(block->block isa ElementBlock,mesh.blocks)
+        # The carrier is the validated mesh with the public Curve descriptors
+        # and the birth position and parameter of some nodes. The general
+        # route below copies every array three times and checks the result
+        # twice; here each is copied once and the result is checked once. The
+        # only values that are new are the births: when one of them is not
+        # finite the general route runs and reports it.
+        owned_coords=copy(mesh.coords)
+        owned_parameters=Elements._detached_mixed_parameters(data.node_parametric)
+        finite=true
+        if !isempty(birth.nodes)
+            owned_rows=Dict(tag=>row for (row,tag) in enumerate(data.external_node_tags))
+            for (tag,node) in birth.nodes
+                row=get(owned_rows,get(plan.node_tag_map,tag,UInt64(0)),0)
+                row>0 && data.node_entities[row]==node.owner || continue
+                parameter=Model._model_mesh_projected_parameter(node.owner,node.parameter)
+                owned_coords[:,row].=node.point
+                owned_parameters[row]=parameter
+                finite&=all(isfinite,node.point) &&
+                    (parameter===nothing || all(isfinite,parameter))
+            end
+        end
+        finite && return Elements._detached_mixed_mesh(owned_coords,
+            Elements.MixedElementBlock[ElementBlock(Elements._TRUSTED_MIXED_STORAGE,block.msh,
+                copy(block.nodes),copy(block.tags)) for block in mesh.blocks],
+            mesh.physical_names,entities,copy(data.node_entities),owned_parameters,
+            copy(data.external_node_tags),
+            Vector{Int32}[copy(owners) for owners in data.block_entities],
+            Vector{UInt64}[copy(tags) for tags in data.external_element_tags],
+            Vector{Int32}[copy(owners) for owners in elementary],true)
+    end
     coords=copy(mesh.coords)
     parameters=deepcopy(data.node_parametric)
     rows=Dict(tag=>row for (row,tag) in enumerate(data.external_node_tags))
