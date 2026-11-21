@@ -370,14 +370,19 @@ end
     _curve_type(m,tag)===:boundary_layer &&
         # `TRAN_QUA` can't interpolate a discrete generatrix upstream; the
         # emitted top row IS the chapeau's boundary — evaluate the producer.
-        return _model_curve_part_point(m,tag,parameter,caller)
+        return _ruled_point3(_model_curve_part_point(m,tag,parameter,caller))
     adapter=_ruled_cached(()->_model_high_order_curve_geometry(m,tag,caller),
                           :curve,tag)
     if adapter!==nothing && adapter.kind in (:arc,:spline)
-        return _model_high_order_curve_point(adapter,parameter,caller)
+        return _ruled_point3(_model_high_order_curve_point(adapter,parameter,caller))
     end
-    return _model_curve_point(m,tag,parameter,caller)
+    return _ruled_point3(_model_curve_point(m,tag,parameter,caller))
 end
+
+# A point of whatever container an evaluator returns, as the concrete tuple
+# the blends and sweeps take (same values).
+@inline _ruled_point3(x)=(Float64(x[1])::Float64,Float64(x[2])::Float64,
+                          Float64(x[3])::Float64)
 
 # The arc frame (`EndCurve`) of a signed generatrix — negative tags rebuild the
 # frame on the reversed control list (`List_Invert`; ellipse arcs keep their
@@ -497,28 +502,78 @@ end
 function _ruled_exact_extrusion(m::GeoModel,tag::Int,gens::Vector{Int},
                                 caller::AbstractString)
     3<=length(gens)<=4 || return nothing
-    link=get(m.meshing.extrude_sources,(2,tag),nothing)
     spec=get(m.meshing.extrude_specs,(2,tag),nothing)
-    (link===nothing || spec===nothing || link[1]!=1) && return nothing
-    spec.type in (:translate,:rotate,:translate_rotate) || return nothing
-    _occ_surface_entity(m,tag) && return nothing
-    source=Int(link[2])
+    spec===nothing && return nothing
+    link=get(m.meshing.extrude_sources,(2,tag),nothing)
+    (link===nothing || link[1]!=1) && return nothing
+    return _ruled_exact_extrusion(m,spec,link[2],tag,gens,caller)
+end
+
+# Past the lookups, specialized on the concrete sweep record.
+function _ruled_exact_extrusion(m::GeoModel,spec,source::Int,tag::Int,
+                                gens::Vector{Int},caller::AbstractString)
+    slot=_ruled_exact_slot(m,spec,source,tag,gens,caller)
+    return slot==0 ? nothing : (spec=spec,source=source,slot=slot)
+end
+
+# The source's slot among the generatrices, or 0 when the formula does not
+# apply.
+function _ruled_exact_slot(m::GeoModel,spec,source::Int,tag::Int,
+                           gens::Vector{Int},caller::AbstractString)
+    spec.type in (:translate,:rotate,:translate_rotate) || return 0
+    _occ_surface_entity(m,tag) && return 0
     slot=findfirst(==(source),gens)
-    slot===nothing && return nothing
-    corner(i)=begin
+    slot===nothing && return 0
+    _ruled_exact_corners_match(m,spec,source,slot,gens,caller) || return 0
+    return slot
+end
+
+# The formula puts each corner of the generatrix loop where it is.
+function _ruled_exact_corners_match(m::GeoModel,spec,source::Int,slot::Int,
+                                    gens::Vector{Int},caller::AbstractString)
+    for i in eachindex(gens)
+        u,v=i==1 ? (0.0,0.0) : i==2 ? (1.0,0.0) : i==3 ? (1.0,1.0) : (0.0,1.0)
+        p=_ruled_exact_extrusion_point(m,spec,source,slot,u,v,caller)
         signed=gens[i]
         endpoints=m.curves[abs(signed)]
-        m.points[signed>0 ? endpoints[1] : endpoints[2]]
+        q=m.points[signed>0 ? endpoints[1] : endpoints[2]]
+        tolerance=1e-9*max(1.0,abs(q[1]),abs(q[2]),abs(q[3]))
+        max(abs(p[1]-q[1]),abs(p[2]-q[2]),abs(p[3]-q[3]))<=tolerance || return false
     end
-    uvs=length(gens)==4 ? ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)) :
-        ((0.0,0.0),(1.0,0.0),(1.0,1.0))
-    for (i,(u,v)) in enumerate(uvs)
-        p=_ruled_exact_extrusion_point(m,spec,source,slot,u,v,caller)
-        q=corner(i)
-        tolerance=1e-9*max(1.0,maximum(abs,q))
-        maximum(abs(p[a]-q[a]) for a in 1:3)<=tolerance || return nothing
-    end
-    return (spec=spec,source=source,slot=slot)
+    return true
+end
+
+# `point(u,v)` through the sweep, or `nothing` when the surface is not a
+# rigid sweep: what `_ruled_surface_point` asks at every evaluation, so it
+# allocates nothing.
+function _ruled_exact_surface_point(m::GeoModel,tag::Int,gens::Vector{Int},
+                                    u::Float64,v::Float64,caller::AbstractString)
+    3<=length(gens)<=4 || return nothing
+    spec=get(m.meshing.extrude_specs,(2,tag),nothing)
+    spec===nothing && return nothing
+    link=get(m.meshing.extrude_sources,(2,tag),nothing)
+    (link===nothing || link[1]!=1) && return nothing
+    # The three rigid sweep records, dispatched statically: a dynamic call
+    # would box its arguments and result at every evaluation.
+    T3=NTuple{3,Float64}
+    spec isa NamedTuple{(:type,:T),Tuple{Symbol,T3}} &&
+        return _ruled_exact_surface_point(m,spec,link[2],tag,gens,u,v,caller)
+    spec isa NamedTuple{(:type,:rot,:axis,:origin,:angle),
+                        Tuple{Symbol,_AffineTransform,T3,T3,Float64}} &&
+        return _ruled_exact_surface_point(m,spec,link[2],tag,gens,u,v,caller)
+    spec isa NamedTuple{(:type,:rot,:T,:axis,:origin,:angle,:spline_points),
+                        Tuple{Symbol,_AffineTransform,T3,T3,T3,Float64,Int}} &&
+        return _ruled_exact_surface_point(m,spec,link[2],tag,gens,u,v,caller)
+    return _ruled_exact_surface_point(m,spec,link[2],tag,gens,u,v,caller)::
+        Union{Nothing,NTuple{3,Float64}}
+end
+
+function _ruled_exact_surface_point(m::GeoModel,spec,source::Int,tag::Int,
+                                    gens::Vector{Int},u::Float64,v::Float64,
+                                    caller::AbstractString)
+    slot=_ruled_exact_slot(m,spec,source,tag,gens,caller)
+    slot==0 && return nothing
+    return _ruled_exact_extrusion_point(m,spec,source,slot,u,v,caller)
 end
 
 function _ruled_exact_extrusion_point(m::GeoModel,spec,source::Int,slot::Int,
@@ -526,7 +581,7 @@ function _ruled_exact_extrusion_point(m::GeoModel,spec,source::Int,slot::Int,
                                       caller::AbstractString)
     t,s=slot==1 ? (u,v) : slot==2 ? (v,1.0-u) : slot==3 ? (1.0-u,1.0-v) :
         (1.0-v,u)
-    return _extrude_at(spec,_ruled_curve_point(m,source,t,caller),s,caller)
+    return _ruled_point3(_extrude_at(spec,_ruled_curve_point(m,source,t,caller),s,caller))
 end
 
 function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
@@ -539,13 +594,12 @@ function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
         endpoints=m.curves[abs(signed)]
         m.points[signed>0 ? endpoints[1] : endpoints[2]]
     end
-    exact=_ruled_cached(()->_ruled_exact_extrusion(m,tag,gens,caller),:exact,tag)
-    exact===nothing ||
-        return _ruled_exact_extrusion_point(m,exact.spec,exact.source,exact.slot,u,v,caller)
+    exact=_ruled_exact_surface_point(m,tag,gens,u,v,caller)
+    exact===nothing || return exact
     center=_ruled_cached(()->_ruled_sphere_center(m,tag,gens,caller),:sphere,tag)
     if length(gens)>=4
         S=(corner(1),corner(2),corner(3),corner(4))
-        return _ruled_qua_point(m,gens,S,u,v,center,caller)
+        return _ruled_point3(_ruled_qua_point(m,gens,S,u,v,center,caller))
     end
     S=(corner(1),corner(2),corner(3))
     point=if old_ruled
@@ -563,7 +617,7 @@ function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
             _ruled_curve_point(m,gens[3],1.0-v,caller),S)
     end
     center!==nothing && (point=_ruled_sphere_project(S[1],center,point))
-    return point
+    return _ruled_point3(point)
 end
 
 const _RU_SURF_FD_EPS=1.0e-8
