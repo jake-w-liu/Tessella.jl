@@ -289,6 +289,7 @@ include("functional/fixtures.jl")
         "geometry/geo_occ_surface_boolean_tag_test.jl",
         "interfaces/api_occ_mirror_orientation_test.jl",
         "geometry/geo_occ_thru_sections_shell_test.jl",
+        "geometry/native_surface_source_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

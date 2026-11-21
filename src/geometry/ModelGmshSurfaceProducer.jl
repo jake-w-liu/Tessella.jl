@@ -212,7 +212,7 @@ function _gmsh_native_surface_curve!(source,m,input,curve,frame,internal,caller;
         push!(source.occurrence,mesh.entity_data.external_node_tags[row])
     end
     for block in mesh.blocks,column in axes(block.nodes,2)
-        a,b=mapping[block.nodes[:,column]]
+        a=mapping[block.nodes[1,column]];b=mapping[block.nodes[2,column]]
         a!=b || throw(ArgumentError("$caller: actual Curve[$curve] has a repeated Line identity"))
         push!(source.segments,(a,b,curve))
         push!(internal ? source.internals : source.boundaries,(a,b))
@@ -282,6 +282,11 @@ function _gmsh_native_surface_forced_subdivide!(source::_ModelSurfaceSource,m,
         forced,frame,next_tag,caller;surface_tag,ctx_lc,
         _periodic_positions=nothing)
     (forced===nothing || isempty(forced)) && return nothing
+    # Almost every call has nothing to insert: the forced parameters are the
+    # Curve's own nodes. Building a chain per segment and rewriting the three
+    # segment lists to their own contents cost about twenty heap objects per
+    # boundary segment, so look first, without allocating.
+    _gmsh_native_surface_forced_needed(source,m,forced,caller) || return nothing
     function endpoint_parameter(position,curve,t0,t1,at_start)
         owner=source.owners[position]
         if owner[1]==1 && Int(owner[2])==curve
@@ -344,6 +349,43 @@ function _gmsh_native_surface_forced_subdivide!(source::_ModelSurfaceSource,m,
     return nothing
 end
 
+# The parameter of source row `position` on `curve`, as the subdivision
+# below reads it; `nothing` when the row is neither a node of the Curve nor
+# one of its end Points.
+function _gmsh_native_surface_forced_endpoint(source::_ModelSurfaceSource,m,
+        position::Int,curve::Int,t0::Float64,t1::Float64,at_start::Bool)
+    owner=source.owners[position]
+    if owner[1]==1 && Int(owner[2])==curve
+        parameter=source.parameters[position]
+        parameter!==nothing && !isempty(parameter) && return parameter[1]
+    end
+    a,b=m.curves[curve]
+    position==get(source.point_positions,a,-1) &&
+        return (a==b && !at_start) ? t1 : t0
+    position==get(source.point_positions,b,-1) && return t1
+    return nothing
+end
+
+# Whether `_gmsh_native_surface_forced_subdivide!` would insert a vertex into
+# any segment.
+function _gmsh_native_surface_forced_needed(source::_ModelSurfaceSource,m,
+                                            forced,caller)
+    for (a,b,owner) in source.segments
+        parameters=get(forced,owner,nothing)
+        (parameters===nothing || owner in m.meshing.degenerated) && continue
+        t0,t1=_model_curve_param_bounds(m,owner,caller)::Tuple{Float64,Float64}
+        pa=_gmsh_native_surface_forced_endpoint(source,m,a,owner,t0,t1,true)
+        pb=_gmsh_native_surface_forced_endpoint(source,m,b,owner,t0,t1,false)
+        (pa===nothing || pb===nothing) && continue
+        tolerance=128eps(Float64)*max(1.0,abs(t1-t0))
+        lo,hi=minmax(pa,pb)
+        for u in parameters
+            lo+tolerance<u<hi-tolerance && return true
+        end
+    end
+    return false
+end
+
 function _gmsh_native_surface_source(m::GeoModel,tag::Int,input,frame,caller;
                                      ctx_lc=0.0,forced=nothing,
                                      next_tag=nothing,
@@ -379,14 +421,36 @@ function _gmsh_native_surface_source(m::GeoModel,tag::Int,input,frame,caller;
     return source
 end
 
+# Whether any source vertex lies exactly on a segment it does not end: the
+# test `_gmsh_native_surface_split_constraints!` applies per segment.
+function _gmsh_native_surface_split_needed(source::_ModelSurfaceSource,scratch)
+    for (a,b,_) in source.segments
+        ax,ay=source.x[a],source.y[a]
+        bx,by=source.x[b],source.y[b]
+        (bx-ax!=0.0 || by-ay!=0.0) || continue
+        lo_x,hi_x=minmax(ax,bx);lo_y,hi_y=minmax(ay,by)
+        for v in eachindex(source.x)
+            (v==a || v==b) && continue
+            vx,vy=source.x[v],source.y[v]
+            (lo_x<=vx<=hi_x && lo_y<=vy<=hi_y) || continue
+            Mesh2D._gmsh_orient2_value((ax,ay),(bx,by),(vx,vy),scratch)==0.0 &&
+                return true
+        end
+    end
+    return false
+end
+
 # A source vertex can sit exactly on a supplied segment — an embedded Point
 # on an embedded Curve chain is the common producer. Like
 # `Mesh2D._insert_segment!`, the constraint then becomes the ordered chain of
 # recovered sub-edges; every fragment keeps the segment's owner and its
 # boundary/internal classification.
 function _gmsh_native_surface_split_constraints!(source::_ModelSurfaceSource)
-    chains=Dict{Tuple{Int,Int},Vector{Int}}()
     scratch=Mesh2D._GmshOrientScratch()
+    # No source vertex on any segment is the ordinary case, and then every
+    # chain below is the segment itself: nothing to rewrite.
+    _gmsh_native_surface_split_needed(source,scratch) || return nothing
+    chains=Dict{Tuple{Int,Int},Vector{Int}}()
     for (a,b,_) in source.segments
         haskey(chains,(a,b)) && continue
         ax,ay=source.x[a],source.y[a]
@@ -554,14 +618,21 @@ function _gmsh_native_surface_export(T,inside,numbers,source::_ModelSurfaceSourc
     used=falses(T.nreal)
     cells=NTuple{3,Int32}[]
     order=Int[triangle for triangle in eachindex(T.alive) if inside[triangle]]
-    if trace!==nothing
+    if trace!==nothing && !isempty(order)
+        # The comparison hashed two cell keys per call; read every cell's
+        # radius and label triple once. Label triples are distinct, so the
+        # order is total and the result does not depend on the sort used.
+        radius=Vector{Float64}(undef,length(T.alive))
+        priority=Vector{NTuple{3,eltype(numbers)}}(undef,length(T.alive))
+        for triangle in order
+            radius[triangle]=trace.radii[Mesh2D._gmsh_triangle_key(T,triangle)]
+            priority[triangle]=Mesh2D._gmsh_triangle_priority_numbers(numbers,T,triangle)
+        end
         sort!(order;lt=(a,b)->begin
-            first=trace.radii[Mesh2D._gmsh_triangle_key(T,a)]
-            second=trace.radii[Mesh2D._gmsh_triangle_key(T,b)]
+            first=radius[a];second=radius[b]
             first>second && return true
             first<second && return false
-            return Mesh2D._gmsh_triangle_priority_numbers(numbers,T,a)<
-                   Mesh2D._gmsh_triangle_priority_numbers(numbers,T,b)
+            return priority[a]<priority[b]
         end)
     end
     for triangle in order
