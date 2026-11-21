@@ -106,9 +106,10 @@ function _dim01_add_node!(assembly::_Dim01Assembly,tag::UInt64,point,owner,
     return position
 end
 
+# `owned`: `nodes` was made for this cell and is kept as it is, not copied.
 function _dim01_add_cell!(assembly::_Dim01Assembly,msh,owner,nodes,tag;
                           source_tag=tag,physical=Int32(0),
-                          preserve_source_order::Bool=false)
+                          preserve_source_order::Bool=false,owned::Bool=false)
     length(assembly.cells)<assembly.max_cells || throw(ArgumentError(
         "$(assembly.caller): mesh exceeds max_cells=$(assembly.max_cells)"))
     spec=msh_spec(msh)
@@ -118,8 +119,9 @@ function _dim01_add_cell!(assembly::_Dim01Assembly,msh,owner,nodes,tag;
         (spec.family===:lin && 3<=spec.order<=10) || throw(ArgumentError(
         "$(assembly.caller): lower-dimensional generation supports orders one and two; " *
         "source MSH $msh has order $(spec.order)"))
-    push!(assembly.cells,_Dim01Cell(Int(msh),owner,Vector{Int32}(nodes),
-                                   UInt64(tag),source_tag===nothing ? nothing : UInt64(source_tag),physical))
+    push!(assembly.cells,_Dim01Cell(Int(msh),owner,
+        owned && nodes isa Vector{Int32} ? nodes : Vector{Int32}(nodes),
+        UInt64(tag),source_tag===nothing ? nothing : UInt64(source_tag),physical))
     assembly.cell_counter_wrapped || (assembly.cell_max=max(assembly.cell_max,UInt64(tag)))
     return nothing
 end
@@ -144,6 +146,18 @@ end
 function _dim01_physical(m,entity)
     return Model._model_projection_legacy_tag(
         Model._model_projection_physical_tags(m,entity[1],entity[2]))
+end
+
+# The same answer for a run of cells with one owner. `_dim01_physical` scans
+# every physical group and allocates its result; cells arrive grouped by
+# owner, so a loop over them asks once per run instead of once per cell.
+const _Dim01PhysicalMemo=Base.RefValue{Tuple{Tuple{Int,Int32},Int32}}
+_dim01_physical_memo()=Ref(((-1,Int32(0)),Int32(0)))
+function _dim01_physical!(memo::_Dim01PhysicalMemo,m,owner::Tuple{Int,Int32})
+    memo[][1]==owner && return memo[][2]
+    value=Int32(_dim01_physical(m,(owner[1],Int(owner[2]))))
+    memo[]=(owner,value)
+    return value
 end
 
 # `raw=false` leaves the set of raw cells empty: only a cache without public
@@ -1515,7 +1529,10 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
     elseif p2_pass || node_tag_order
         sort!(kept;by=i->(assembly.nodes[i].owner,assembly.nodes[i].tag),alg=Base.Sort.MergeSort)
     else
-        sort!(kept;by=i->assembly.nodes[i].owner,alg=Base.Sort.MergeSort)
+        # A stable sort of sorted rows changes nothing; generation appends
+        # entities in this order already.
+        issorted(kept;by=i->assembly.nodes[i].owner) ||
+            sort!(kept;by=i->assembly.nodes[i].owner,alg=Base.Sort.MergeSort)
     end
     mapping=zeros(Int32,length(assembly.nodes))
     mapping[kept]=Int32.(1:length(kept))
@@ -1526,9 +1543,10 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
         assembly.node_max=max(assembly.node_max,UInt64(length(kept))+UInt64(1))
     end
     physical_support=falses(length(assembly.nodes))
+    physical_memo=_dim01_physical_memo()
     if save_physical
         for cell in assembly.cells
-            _dim01_physical(m,(cell.owner[1],Int(cell.owner[2])))!=0 || continue
+            _dim01_physical!(physical_memo,m,cell.owner)!=0 || continue
             physical_support[cell.nodes].=true
         end
     end
@@ -1543,7 +1561,8 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
         end
     end
     node_tag_map=Dict(assembly.nodes[i].tag=>node_tags[slot] for (slot,i) in enumerate(kept))
-    sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)
+    issorted(assembly.cells;by=_dim01_cell_order) ||
+        sort!(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)
     # Display flags belong to the surviving MElement, not to a reused numeric
     # tag. Factory order conversions and remeshing allocate a new identity.
     visibility_tag_map=Dict{UInt64,UInt64}()
@@ -1567,9 +1586,8 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
             end
             sort!(occurrences;alg=Base.Sort.MergeSort)
             for selected in (true,false),(owner,_,_,position) in occurrences
-                saved=_dim01_physical(m,(owner[1],Int(owner[2])))!=0
-                save_physical && saved!=selected && continue
                 !save_physical && !selected && continue
+                save_physical && (_dim01_physical!(physical_memo,m,owner)!=0)!=selected && continue
                 next+=UInt64(1)
                 cell=assembly.cells[position]
                 unchanged[position] && (visibility_tag_map[cell.source_tag]=next)
@@ -1577,9 +1595,8 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
             end
         else
             for selected in (true,false),cell in assembly.cells
-                saved=_dim01_physical(m,(cell.owner[1],Int(cell.owner[2])))!=0
-                save_physical && saved!=selected && continue
                 !save_physical && !selected && continue
+                save_physical && (_dim01_physical!(physical_memo,m,cell.owner)!=0)!=selected && continue
                 next+=UInt64(1)
                 cell.source_tag!==nothing && cell.tag==cell.source_tag &&
                     (visibility_tag_map[cell.source_tag]=next)
@@ -1621,7 +1638,9 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
         external=Vector{UInt64}(undef,length(positions))
         for (column,position) in enumerate(positions)
             cell=assembly.cells[position]
-            nodes[:,column]=mapping[cell.nodes]
+            for (slot,node) in enumerate(cell.nodes)
+                nodes[slot,column]=mapping[node]
+            end
             physical[column]=cell.physical
             classified[column]=cell.owner[2]
             external[column]=cell.tag

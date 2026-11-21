@@ -511,6 +511,55 @@ end
     return (a,b,c,d)
 end
 
+# The two halves of the binding check for the usual case, in which the input
+# lists the actual product's nodes and cells in the same order: row against
+# row and column against column, with no table from label to position. Each
+# returns `true` only when the general check below would pass. `false` decides
+# nothing: the general check then runs and reports what is wrong.
+function _model_surface_nodes_aligned(actual::MixedMesh,constructor::MixedMesh)
+    data=actual.entity_data;receipt=constructor.entity_data
+    labels=data.external_node_tags
+    count=length(labels)
+    count==nnodes(actual)==nnodes(constructor) && labels==receipt.external_node_tags || return false
+    (issorted(labels;lt=<=) || allunique(labels)) || return false
+    for row in 1:count
+        all(axis->isequal(constructor.coords[axis,row],actual.coords[axis,row]),1:3) &&
+            receipt.node_entities[row]==data.node_entities[row] &&
+            isequal(receipt.node_parametric[row],data.node_parametric[row]) || return false
+    end
+    return true
+end
+
+function _model_surface_cells_aligned(actual::MixedMesh,constructor::MixedMesh)
+    data=actual.entity_data;receipt=constructor.entity_data
+    count=length(actual.blocks)
+    count==length(data.external_element_tags)==length(data.block_entities)==
+        length(constructor.blocks)==length(receipt.external_element_tags)==
+        length(receipt.block_entities) || return false
+    previous=UInt64(0);started=false
+    for index in 1:count
+        block=actual.blocks[index];other=constructor.blocks[index]
+        labels=data.external_element_tags[index];owners=data.block_entities[index]
+        other_labels=receipt.external_element_tags[index];other_owners=receipt.block_entities[index]
+        block isa ElementBlock && other isa ElementBlock || return false
+        block.msh in (2,3) && block.msh==other.msh || return false
+        cells=size(block.nodes,2)
+        cells==size(other.nodes,2)==length(labels)==length(other_labels)==
+            length(owners)==length(other_owners) || return false
+        for column in 1:cells
+            label=labels[column]
+            # Increasing labels cannot repeat, in either mesh.
+            label==other_labels[column] && (!started || label>previous) || return false
+            started=true;previous=label
+            owners[column]==other_owners[column] && block.tags[column]==other.tags[column] &&
+                _model_surface_cell_support(data.external_node_tags,block.nodes,column)==
+                _model_surface_cell_support(receipt.external_node_tags,other.nodes,column) ||
+                return false
+        end
+    end
+    return true
+end
+
 function _model_surface_constructor_binding(actual::MixedMesh,constructor::MixedMesh,
                                              caller::AbstractString)
     actual=_model_mesh_first_order_skeleton(actual,caller)
@@ -520,6 +569,8 @@ function _model_surface_constructor_binding(actual::MixedMesh,constructor::Mixed
     length(data.node_entities)==length(data.node_parametric)==nnodes(actual) &&
         length(receipt.node_entities)==length(receipt.node_parametric)==nnodes(constructor) ||
         throw(ArgumentError("$caller: Surface constructor node metadata does not align"))
+    _model_surface_nodes_aligned(actual,constructor) &&
+        _model_surface_cells_aligned(actual,constructor) && return nothing
     actual_rows=Dict(uid=>row for (row,uid) in enumerate(data.external_node_tags))
     if !(length(actual_rows)==nnodes(actual)==nnodes(constructor) &&
         allunique(receipt.external_node_tags) &&
@@ -581,10 +632,16 @@ function _model_surface_constructor_input(production,actual::MixedMesh,
     length(production.node_tags)==nnodes(constructor) &&
         allunique(production.node_tags) || throw(ArgumentError(
         "$caller: Surface constructor rows do not bind unique actual UIDs"))
-    actual_rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
-    all(uid->haskey(actual_rows,uid),production.node_tags) || throw(ArgumentError(
-        "$caller: Surface constructor row UID is absent from its actual product"))
-    mapping=Int32[actual_rows[uid] for uid in production.node_tags]
+    # The producer's rows usually are the product's rows, in order: then the
+    # row of each (unique) label is its own position.
+    mapping=if production.node_tags==data.external_node_tags
+        collect(Int32(1):Int32(length(production.node_tags)))
+    else
+        actual_rows=Dict(uid=>Int32(row) for (row,uid) in enumerate(data.external_node_tags))
+        all(uid->haskey(actual_rows,uid),production.node_tags) || throw(ArgumentError(
+            "$caller: Surface constructor row UID is absent from its actual product"))
+        Int32[actual_rows[uid] for uid in production.node_tags]
+    end
     for row in eachindex(mapping)
         bound=mapping[row]
         all(axis->isequal(constructor.coords[axis,row],actual.coords[axis,bound]),1:3) &&
@@ -592,17 +649,32 @@ function _model_surface_constructor_input(production,actual::MixedMesh,
             isequal(production.node_parameters[row],data.node_parametric[bound]) ||
             throw(ArgumentError("$caller: Surface constructor row loses its actual node binding"))
     end
-    physical_tags=Dict(uid=>block.tags[column] for (block,uids) in
-        zip(actual.blocks,data.external_element_tags) for (column,uid) in enumerate(uids))
+    # Physical tag by cell label. A constructor block that carries the labels
+    # of the product block at its position takes that block's tags as they
+    # are; the table from label to tag is built only for a block that does
+    # not. (Labels repeated in the product fail the binding check below under
+    # either reading.)
+    physical_tags=nothing
     blocks=ElementBlock[];labels=Vector{UInt64}[];cursor=1
     for (msh,nodes) in _surface_dim2_blocks(constructor)
         count=size(nodes,2)
         cursor+count-1<=length(production.element_tags) || throw(ArgumentError(
             "$caller: Surface constructor cells lack actual birth labels"))
-        cell_labels=copy(production.element_tags[cursor:cursor+count-1])
-        all(uid->haskey(physical_tags,uid),cell_labels) || throw(ArgumentError(
-            "$caller: Surface constructor cell UID is absent from its actual product"))
-        push!(blocks,ElementBlock(msh,mapping[nodes],Int32[physical_tags[uid] for uid in cell_labels]))
+        cell_labels=production.element_tags[cursor:cursor+count-1]
+        position=length(blocks)+1
+        tags=if physical_tags===nothing && position<=length(actual.blocks) &&
+                position<=length(data.external_element_tags) &&
+                length(actual.blocks[position].tags)==count &&
+                data.external_element_tags[position]==cell_labels
+            Int32[tag for tag in actual.blocks[position].tags]
+        else
+            physical_tags===nothing && (physical_tags=Dict(uid=>block.tags[column] for (block,uids) in
+                zip(actual.blocks,data.external_element_tags) for (column,uid) in enumerate(uids)))
+            all(uid->haskey(physical_tags,uid),cell_labels) || throw(ArgumentError(
+                "$caller: Surface constructor cell UID is absent from its actual product"))
+            Int32[physical_tags[uid] for uid in cell_labels]
+        end
+        push!(blocks,ElementBlock(msh,mapping[nodes],tags))
         push!(labels,cell_labels)
         cursor+=count
     end

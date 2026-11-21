@@ -700,13 +700,15 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
         physical=_cache_native_blocks(mesh)[bi][3]
         for column in axes(cells,2)
             source_column=native!==nothing && bi==native.block ? native.columns[column] : column
-            connectivity=native!==nothing && bi==native.block ? native.nodes[:,column] : cells[:,column]
+            # One vector per cell: the mapped connectivity, which the cell keeps.
+            connectivity=native!==nothing && bi==native.block ? Base.view(native.nodes,:,column) :
+                Base.view(cells,:,column)
             legacy_physical=data===nothing ? _dim01_physical(m,(dim,Int(owners[source_column]))) :
                             physical[source_column]
             _dim01_add_cell!(assembly,msh,(dim,owners[source_column]),mapping[connectivity],
                 !isempty(cell_births) ? cell_births[birth_offset+source_column] :
                 allocate_cells ? _dim01_next_tag!(assembly,false) : UInt64(0);
-                source_tag=nothing,physical=legacy_physical)
+                source_tag=nothing,physical=legacy_physical,owned=true)
             traces===nothing || (traces[bi][source_column]=last(assembly.cells))
         end
         birth_offset+=size(cells,2)
@@ -4519,8 +4521,9 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     # current CAD entity belongs to a real group. Entity ownership controls
     # the actual projection, including groups edited since the cache was born.
     if cached!==nothing && (!(cached isa MixedMesh) || cached.entity_data===nothing)
+        physical_memo=_dim01_physical_memo()
         for cell in assembly.cells
-            cell.physical=_dim01_physical(m,(cell.owner[1],Int(cell.owner[2])))
+            cell.physical=_dim01_physical!(physical_memo,m,cell.owner)
         end
     end
     done=old===nothing ? Set{Tuple{Int,Int32}}() : copy(old.done)
@@ -4899,8 +4902,9 @@ function _higher_authority_from_parts(m,merged,parts,remaps,node_owner,caller;
     assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
         UInt64(node_max),UInt64(element_max),Int(typemax(Int32)),Int(typemax(Int32)),String(caller))
     mapping=_dim01_ingest!(assembly,m,cached,class)
+    physical_memo=_dim01_physical_memo()
     for cell in assembly.cells
-        cell.physical=_dim01_physical(m,(cell.owner[1],Int(cell.owner[2])))
+        cell.physical=_dim01_physical!(physical_memo,m,cell.owner)
     end
     _higher_native_parameters!(assembly,m)
     ranks=_higher_node_ranks(assembly,cached,mapping,nothing)
