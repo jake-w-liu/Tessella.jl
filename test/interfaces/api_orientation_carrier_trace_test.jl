@@ -33,8 +33,11 @@ end
     @test oriented.coords==carrier.coords
     @test carrier.tris==triangles
     @test orient(actual,carrier,tags,Dict(1=>Int32[1,2,3]))===carrier
+    # A carrier cell without a producer binding is marked `nothing` (as
+    # `Model._model_mesh_live_cell_tags` builds the lists); one that shares
+    # the reversed parent's corners cannot be oriented.
     @test_throws ArgumentError orient(actual,carrier,
-        [UInt64[0],UInt64[0,802],UInt64[]],changed)
+        [UInt64[0],Union{Nothing,UInt64}[nothing,802],UInt64[]],changed)
     @test carrier.tris==triangles
 end
 
@@ -66,7 +69,10 @@ end
     cells=Int32[1 4;2 5;3 6]
     actual=actual_mesh(xyz,2,cells,[1101,1102])
     carrier=Tessella.Mesh(xyz;tris=cells)
-    oriented=orient(actual,carrier,[UInt64[],UInt64[1101,0],UInt64[]],Dict(1=>Int32[1,3,2]))
+    # The unbound alias is `nothing`, not element tag 0 (which names no actual
+    # element and is rejected as a lost parent identity).
+    oriented=orient(actual,carrier,
+        [UInt64[],Union{Nothing,UInt64}[1101,nothing],UInt64[]],Dict(1=>Int32[1,3,2]))
     @test oriented.tris==Int32[1 4;3 5;2 6]
     @test oriented.coords==carrier.coords
     @test carrier.tris==cells
