@@ -414,9 +414,23 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
             owners[a]==owners[b] && numbers[a]==numbers[b] ||
          collapsed_groups!==nothing && get(collapsed_groups,a,0)>0 &&
             get(collapsed_groups,a,0)==get(collapsed_groups,b,0))
+    # The metric length of an edge depends only on its two end rows, whose
+    # coordinates never change, so it is evaluated once per ordered pair. The
+    # sweeps below ask for the same edges again on every round (each ear of
+    # every star, each diagonal of every flip): on a PostView tensor
+    # background that was 64% of the run, 29,000 heap objects per triangle.
+    edge_lengths=Dict{NTuple{2,Int32},Float64}()
     function score(edge)
-        value=metric_edge_length(field,coordinates[edge[1]],
-            coordinates[edge[2]];entity=(2,tag))
+        key=(Int32(edge[1]),Int32(edge[2]))
+        known=get(edge_lengths,key,nothing)
+        value=if known===nothing
+            fresh=Float64(metric_edge_length(field,coordinates[edge[1]],
+                coordinates[edge[2]];entity=(2,tag)))
+            edge_lengths[key]=fresh
+            fresh
+        else
+            known
+        end
         if local_sizes!==nothing && !(minmax(edge...) in protected)
             a,b=edge;pa,pb=coordinates[a],coordinates[b]
             distance=hypot((pb[axis]-pa[axis] for axis in 1:3)...)
@@ -1563,9 +1577,15 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         end
         return star
     end
+    # Change clock of the sweeps: `changed[row]` is the tick of the last cell
+    # added to or dropped from that row's star.
+    clock=Ref(0)
+    changed=zeros(Int,length(coordinates))
     function drop_cell(column)
         alive[column] || return
         alive[column]=false
+        clock[]+=1
+        for vertex in cells[column];changed[vertex]=clock[];end
         for old_edge in _metric_surface_edges(cells[column])
             key=minmax(old_edge...)
             filter!(!=(column),incidence[key])
@@ -1578,6 +1598,8 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
     end
     function add_cell(child)
         push!(cells,child);push!(alive,true)
+        clock[]+=1
+        for vertex in child;changed[vertex]=clock[];end
         cell_max+=UInt64(1);push!(labels,cell_max)
         for child_edge in _metric_surface_edges(child)
             push!(get!(()->Int[],incidence,minmax(child_edge...)),length(cells))
@@ -1843,6 +1865,7 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         live_count-=2
         return true
     end
+    star_tried=fill(-1,length(coordinates))
     for _ in 1:64
         moved=false
         for edge in sort!(collect(keys(incidence)));metric_flip(edge) && (moved=true);end
@@ -1869,7 +1892,26 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
         sort!(verts,by=vertex->get(shortest,vertex,Inf))
         for vertex in verts
             node_alive[vertex] || continue
-            remove_star(vertex) && (moved=true)
+            # A removal that failed fails again until a cell changes in the
+            # star of the vertex or of one of its link vertices: everything
+            # `remove_star` reads (the star, the chords between link rows,
+            # the cells across the link) lives in those cells. Every round
+            # used to clip every star again, most of them unchanged.
+            if !quotient && star_tried[vertex]>=0
+                stale=false
+                for column in get(vertcells,vertex,Int[])
+                    (alive[column] && vertex in cells[column]) || continue
+                    for row in cells[column]
+                        changed[row]>star_tried[vertex] && (stale=true)
+                    end
+                end
+                stale || continue
+            end
+            if remove_star(vertex)
+                moved=true
+            else
+                star_tried[vertex]=clock[]
+            end
         end
         moved || break
     end
