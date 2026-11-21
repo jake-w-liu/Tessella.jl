@@ -9113,11 +9113,15 @@ function _get_periodic_nodes(dim,slave_entity,include_high_order_nodes=false)
         if cached isa MixedMesh && !isempty(cached.periodic_links) && dim!=2
             # Relations read from a `$Periodic` section: Gmsh returns every
             # node pair of the section together with its affine transform.
+            # A relation the model itself declares is answered from the
+            # generated mesh further down, where `includeHighOrderNodes`
+            # separates the primary pairs from the high-order ones.
             caller="API.mesh.get_periodic_nodes"
             dimension=_mesh_query_integer(dim,caller,"dim")
             slave=_mesh_query_integer(slave_entity,caller,"slave_entity")
             for link in cached.periodic_links
                 link.dim==dimension && link.slave_entity==slave || continue
+                haskey(current.periodic,(dimension,slave)) && break
                 public=_mesh_public_tags(cached)
                 return (master_entity=Int32(link.master_entity),
                     slave_nodes=_cache_node_tags(public,link.slave_nodes),
