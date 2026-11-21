@@ -74,8 +74,23 @@ end
 # are closed forms (the cone's are also Gmsh 4.15.2's to every digit; the
 # torus's agree with Gmsh to its 1e-6, and Gmsh cannot mesh that cut:
 # "The 1D mesh seems not to be forming a closed loop").
+section_point_bytes(curve,t)=@allocated M._model_occ_curve_d2(curve,t)
+
 if Base.JLOptions().compile_enabled==1
 @testset "OCC Booleans with conic and spiric sections" begin
+    # A section edge is evaluated for every point of its 1-D mesh: one
+    # dispatch on the carrier's and the trace's record types, and nothing on
+    # the heap but the returned tuple (it was two dynamic calls with boxed
+    # results, a third of the cone cut's whole generate(3)).
+    let cone=(occ=:cone,center=(0.8,0.55,-0.25),axis=(0.0,0.0,1.0),
+              X=(1.0,0.0,0.0),Y=(0.0,1.0,0.0),r1=0.6,r2=0.24,height=1.2),
+        wall=(occ=:plane,center=(1.0,0.0,0.0),axis=(1.0,0.0,0.0),
+              X=(0.0,1.0,0.0),Y=(0.0,0.0,1.0))
+        edge=M._brep_sec_cone_conic(wall,cone,true,"test")[1].curve.curve
+        lo,hi=M._model_occ_curve_bounds(edge)
+        section_point_bytes(edge,(lo+hi)/2)
+        @test section_point_bytes(edge,(lo+hi)/2)<=256
+    end
     A.initialize()
     try
         A.option("General.Terminal",0)

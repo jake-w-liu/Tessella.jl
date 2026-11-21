@@ -380,11 +380,17 @@ struct _ModelOCCSectionCurve
     curve::NURBS.NURBSCurve        # seed polyline through refined samples
 end
 
-function _model_occ_curve_d2(geometry::_ModelOCCSectionCurve,parameter)
-    uv,dt,ddt=_occ_pcurve_d2(geometry.pc,Float64(parameter))
+_model_occ_curve_d2(geometry::_ModelOCCSectionCurve,parameter)=
+    _model_occ_section_d2(geometry.face,geometry.pc,Float64(parameter))
+
+# The carrier and its trace are untyped fields of the curve; evaluating
+# through them directly meant two dynamic calls with boxed results for every
+# point of the curve's 1-D mesh. One dispatch on their concrete record types
+# here, and the evaluation below is static. Same arithmetic, same values.
+function _model_occ_section_d2(face,pc,parameter::Float64)
+    uv,dt,ddt=_occ_pcurve_d2(pc,parameter)
     # generic surface D2 — tensor patches and analytic records alike
-    point,Su,Sv,Suu,Svv,Suv=_occ_surface_d2(
-        geometry.face,uv[1],uv[2])
+    point,Su,Sv,Suu,Svv,Suv=_occ_surface_d2(face,uv[1],uv[2])
     first=ntuple(axis->Su[axis]*dt[1]+Sv[axis]*dt[2],3)
     second=ntuple(axis->Suu[axis]*dt[1]*dt[1]+
         2.0*Suv[axis]*dt[1]*dt[2]+Svv[axis]*dt[2]*dt[2]+
