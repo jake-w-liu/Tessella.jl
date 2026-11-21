@@ -41,6 +41,34 @@ function _model_export_periodic(source,node_map,caller)
     return links
 end
 
+# Whether a physical selection still covers every cell and node of `complete`
+# (every cell owner is selected, and each node is referenced by a cell or has a
+# selected owner), so the MSH 4.1 projection is the mesh itself.
+function _model_export_selects_all(complete,physical)
+    data=complete.entity_data
+    for (bi,block) in enumerate(complete.blocks)
+        dimension=msh_dimension(block.msh);previous=Int32(-1);selected=false
+        for owner in data.block_entities[bi]
+            owner==previous || (previous=owner;selected=(dimension,Int(owner)) in physical)
+            selected || return false
+        end
+    end
+    referenced=falses(nnodes(complete))
+    for block in complete.blocks
+        for index in block.nodes
+            referenced[index]=true
+        end
+    end
+    previous=(-1,Int32(-1));selected=false
+    for row in eachindex(referenced)
+        referenced[row] && continue
+        owner=data.node_entities[row]
+        owner==previous || (previous=owner;selected=(owner[1],Int(owner[2])) in physical)
+        selected || return false
+    end
+    return true
+end
+
 function _model_export_mesh(model,source,class,version,save_all,caller)
     source,class=_dim01_actual_cache(source,class;physical_names=model.physical_names)
     if source isa MixedMesh && !isempty(model.meshing.periodic_uid_history)
@@ -54,6 +82,17 @@ function _model_export_mesh(model,source,class,version,save_all,caller)
         merge(data.entities,complete.partition_data.entities)
     physical=Set(key for (key,entity) in declarations if !isempty(entity.physical_tags))
     all_cells=save_all || isempty(physical)
+    # Exporting every cell and node of an MSH 4.1 projection that has nothing
+    # to renumber: the projection is the complete mesh itself, shared rather
+    # than rebuilt (the writers only read it).
+    fast=version==4.1 && complete.partition_data===nothing &&
+        Float64(get(OPTIONS,"Mesh.ScalingFactor",1.0))==1.0 &&
+        all(block->block isa ElementBlock && size(block.nodes,2)>0,complete.blocks) &&
+        (all_cells || _model_export_selects_all(complete,physical))
+    if fast
+        rows=1:nnodes(complete);blocks=complete.blocks;owners=data.block_entities
+        uids=data.external_element_tags;metadata=data;partition=nothing
+    else
     selections=[findall(column->all_cells ||
         (msh_dimension(block.msh),Int(data.block_entities[bi][column])) in physical,
         axes(block.nodes,2)) for (bi,block) in enumerate(complete.blocks)]
@@ -94,6 +133,7 @@ function _model_export_mesh(model,source,class,version,save_all,caller)
         partition=Elements.MixedPartitionData(partition.num_partitions;entities=partition.entities,
             ghost_entities=partition.ghost_entities,ghost_elements=ghosts)
     end
+    end
     source_tags=_model_export_source_tags(source,class,caller)
     node_map=Int32[];cell_map=Int32[]
     # The UID maps only translate retained periodic links and data sections;
@@ -117,6 +157,10 @@ function _model_export_mesh(model,source,class,version,save_all,caller)
     # `Mesh.ScalingFactor` — upstream passes it to every mesh writer, which
     # scales the serialized vertex coordinates only (CreateFile.cpp). Doing
     # it here at the shared projection reaches all formats uniformly.
+    if fast
+        return MixedMesh(Elements._TRUSTED_MIXED_STORAGE,complete.coords,blocks,
+            complete.physical_names,metadata,owners,links,ancillary,sections,partition)
+    end
     sf=Float64(get(OPTIONS,"Mesh.ScalingFactor",1.0))
     coords=complete.coords[:,rows]
     sf!=1.0 && (coords=coords.*sf)

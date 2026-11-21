@@ -2444,6 +2444,46 @@ orientation. Cells whose family/order has no determinant space report
 explicitly rather than passing silently; dim-1 and dim-0 cells keep the
 structural checks only.
 """
+# One block of fixed-connectivity cells: a repeated node inside a cell and
+# (when `seen` is given) a cell repeating an earlier one of the same type, in
+# cell order. The keys are `NTuple{N,Int32}`, so no cell allocates.
+function _validate_fixed_block!(messages::Vector{String},
+        seen::Union{Nothing,Set{NTuple{N,Int32}}},b::ElementBlock,bi::Int,
+        ::Val{N}) where N
+    nodes=b.nodes; scratch=Vector{Int32}(undef,N)
+    @inbounds for j in 1:size(nodes,2)
+        for i in 1:N
+            scratch[i]=nodes[i,j]
+        end
+        if N<=16
+            for i in 2:N
+                value=scratch[i]; k=i-1
+                while k>=1 && scratch[k]>value
+                    scratch[k+1]=scratch[k]; k-=1
+                end
+                scratch[k+1]=value
+            end
+        else
+            sort!(scratch)
+        end
+        repeated=false
+        for i in 2:N
+            if scratch[i]==scratch[i-1]
+                repeated=true; break
+            end
+        end
+        repeated && push!(messages,
+            "block $bi type $(b.msh) cell $j repeats a node index within a constituent simplex")
+        if seen!==nothing
+            key=ntuple(i->scratch[i],Val(N))
+            before=length(seen); push!(seen,key)
+            length(seen)==before && push!(messages,
+                "duplicate type $(b.msh) cell at block $bi cell $j")
+        end
+    end
+    return nothing
+end
+
 function validate(m::MixedMesh; reject_duplicate_cells=true,
                   reject_duplicate_point_cells=true,
                   certify_jacobians=false)
@@ -2472,12 +2512,32 @@ function validate(m::MixedMesh; reject_duplicate_cells=true,
     if reject_duplicate_cells
         cell_capacity=0
         for block in m.blocks
+            block isa ElementBlock && continue
             !reject_duplicate_point_cells && block.msh==15 && continue
             cell_capacity=Base.checked_add(cell_capacity,_block_ncells(block))
         end
         sizehint!(seen,cell_capacity)
     end
+    fixed_seen=Dict{Int,Any}()
+    fixed_count=Dict{Int,Int}()
+    for b in m.blocks
+        b isa ElementBlock && (fixed_count[b.msh]=get(fixed_count,b.msh,0)+size(b.nodes,2))
+    end
     for (bi,b) in pairs(m.blocks)
+        if b isa ElementBlock
+            width=size(b.nodes,1)
+            check=reject_duplicate_cells && (reject_duplicate_point_cells || b.msh!=15)
+            seen_fixed=nothing
+            if check
+                seen_fixed=get!(fixed_seen,b.msh) do
+                    set=Set{NTuple{width,Int32}}()
+                    sizehint!(set,fixed_count[b.msh])
+                    set
+                end
+            end
+            _validate_fixed_block!(messages,seen_fixed,b,bi,Val(width))
+            continue
+        end
         @inbounds for j in 1:_block_ncells(b)
             k=_cell_arity(b,j)
             duplicate_part=false
@@ -7943,6 +8003,64 @@ function _mixed_metadata_element_runs(m::MixedMesh,data::MixedEntityData)
     return runs
 end
 
+# `values[lo:hi]` as binary `size_t` fields in one write; the bytes equal one
+# `_write_size_t` call per value.
+function _write_size_t_range(io,values::Vector{UInt64},lo::Int,hi::Int,
+                             wide::Bool,context::AbstractString)
+    n=hi-lo+1
+    n<=0 && return nothing
+    if wide
+        GC.@preserve values unsafe_write(io,pointer(values,lo),UInt(8n))
+    else
+        packed=Vector{UInt32}(undef,n)
+        @inbounds for k in 1:n
+            value=values[lo+k-1]
+            value<=typemax(UInt32) || throw(ArgumentError(
+                "write_mixed_msh: $context $value exceeds the 4-byte size_t range"))
+            packed[k]=UInt32(value)
+        end
+        write(io,packed)
+    end
+    return nothing
+end
+
+# One run of fixed-connectivity cells of a binary MSH 4.1 element block:
+# `tag node...` per cell, packed and written at once.
+function _write_binary_element_run!(io,block::ElementBlock,tags::Vector{UInt64},
+                                    node_tags::Vector{UInt64},cells::UnitRange{Int},
+                                    wide::Bool)
+    arity=size(block.nodes,1); width=1+arity; count=length(cells)
+    nodes=block.nodes
+    if wide
+        packed=Vector{UInt64}(undef,count*width)
+        @inbounds for (k,j) in enumerate(cells)
+            base=(k-1)*width
+            packed[base+1]=tags[j]
+            for i in 1:arity
+                packed[base+1+i]=node_tags[nodes[i,j]]
+            end
+        end
+        write(io,packed)
+    else
+        packed=Vector{UInt32}(undef,count*width)
+        @inbounds for (k,j) in enumerate(cells)
+            base=(k-1)*width
+            value=tags[j]
+            value<=typemax(UInt32) || throw(ArgumentError(
+                "write_mixed_msh: element tag $value exceeds the 4-byte size_t range"))
+            packed[base+1]=UInt32(value)
+            for i in 1:arity
+                value=node_tags[nodes[i,j]]
+                value<=typemax(UInt32) || throw(ArgumentError(
+                    "write_mixed_msh: node tag $value exceeds the 4-byte size_t range"))
+                packed[base+1+i]=UInt32(value)
+            end
+        end
+        write(io,packed)
+    end
+    return nothing
+end
+
 function _write_mixed_v4_binary_metadata(
     io,m::MixedMesh,names,data::MixedEntityData,gmsh_compatible::Bool,preserved,
     wide::Bool)
@@ -7982,17 +8100,21 @@ function _write_mixed_v4_binary_metadata(
         parametric=data.node_parametric[first_node]!==nothing
         write(io,Int32(dim)); write(io,entity); write(io,Int32(parametric ? 1 : 0))
         _write_size_t(io,length(run),wide,"node block size")
-        for i in run
-            _write_size_t(io,data.external_node_tags[i],wide,"node tag")
-        end
-        for i in run
-            write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
-            parameters=data.node_parametric[i]
-            if parameters!==nothing
-                for value in parameters
-                    write(io,value)
+        _write_size_t_range(io,data.external_node_tags,first(run),last(run),wide,"node tag")
+        if parametric
+            for i in run
+                write(io,m.coords[1,i]); write(io,m.coords[2,i]); write(io,m.coords[3,i])
+                parameters=data.node_parametric[i]
+                if parameters!==nothing
+                    for value in parameters
+                        write(io,value)
+                    end
                 end
             end
+        else
+            # Columns of one run are adjacent: x, y, z per node, native order.
+            GC.@preserve m unsafe_write(io,pointer(m.coords,3*(first(run)-1)+1),
+                                        UInt(24*length(run)))
         end
     end
     write(io,UInt8('\n')); println(io,"\$EndNodes")
@@ -8014,6 +8136,11 @@ function _write_mixed_v4_binary_metadata(
         entity=data.block_entities[run.block][first(run.cells)]
         write(io,Int32(_block_dim(block))); write(io,entity); write(io,Int32(block.msh))
         _write_size_t(io,length(run.cells),wide,"element block size")
+        if block isa ElementBlock
+            _write_binary_element_run!(io,block,data.external_element_tags[run.block],
+                                       data.external_node_tags,run.cells,wide)
+            continue
+        end
         for j in run.cells
             _write_size_t(io,data.external_element_tags[run.block][j],wide,
                           "element tag")

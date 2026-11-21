@@ -79,4 +79,23 @@ const MSH = """
     end
 end
 
+@testset "Writing packs binary runs and validates fixed blocks without a key per cell" begin
+    E = Tessella.Elements
+    coords = [0.0 1 0 0 1; 0 0 1 0 1; 0 0 0 1 0]
+    nodes = Int32[1 1 2; 2 2 3; 3 3 4; 4 4 5]
+    # The second tetrahedron repeats the first.
+    mesh = E.MixedMesh(coords, [E.ElementBlock(4, nodes, Int32[1, 1, 1])])
+    messages = E.validate(mesh).messages
+    @test any(occursin("duplicate type 4 cell at block 1 cell 2", m) for m in messages)
+    bad = E.MixedMesh(coords, [E.ElementBlock(4, Int32[1 2; 1 3; 2 4; 3 5], Int32[0, 0])])
+    @test any(occursin("repeats a node index", m) for m in E.validate(bad).messages)
+    mktempdir() do dir
+        a = joinpath(dir, "a.msh"); b = joinpath(dir, "b.msh")
+        ok = E.MixedMesh(coords, [E.ElementBlock(4, Int32[1 1; 2 2; 3 3; 4 5], Int32[1, 2])])
+        E.write_mixed_msh(a, ok; version = 4.1, binary = true)
+        E.write_mixed_msh(b, E.read_mixed_msh(a); version = 4.1, binary = true)
+        @test read(a) == read(b)
+    end
+end
+
 end # module
