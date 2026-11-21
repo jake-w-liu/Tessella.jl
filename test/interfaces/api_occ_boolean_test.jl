@@ -581,7 +581,8 @@ end
     out,map=occ.fragment([(3,1)],[(2,7),(2,8)])
     @test out==[(3,1),(3,2),(3,3),(2,7),(2,8),(2,7),(2,8),(2,7),(2,8)]
     @test map==[[(3,1),(3,2),(3,3)],[(2,7)],[(2,8)]]
-    @test [occ.get_mass(3,t) for t in (1,2,3)]≈[0.3,0.3,0.4]
+    # Gmsh 4.15.2: the slabs come bottom, middle, top
+    @test [occ.get_mass(3,t) for t in (1,2,3)]≈[0.3,0.4,0.3]
 end
 
 @testset "occ.fragment — interior and outside sheets" begin
@@ -614,10 +615,10 @@ end
     # its operand tag); the outside frame is the sheet's sole fresh
     # image and reclaims tag 7
     @test out==[(3,1),(2,7)]
-    @test map==[[(3,1)],[(2,7),(2,2)]]
+    @test map==[[(3,1)],[(2,7),(2,6)]]   # Surface 6 is the box's zmax face
     @test occ.get_mass(3,1)≈1.0
     @test occ.get_mass(2,7)≈3.0          # frame = 4 − 1
-    @test occ.get_mass(2,2)≈1.0          # box top, still bound
+    @test occ.get_mass(2,6)≈1.0          # box top, still bound
 end
 
 @testset "occ.cut — surface minus volume keeps the frame" begin

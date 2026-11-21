@@ -43,8 +43,10 @@ end
     @test length(m.surfaces)==6
     @test length(m.surface_loops)==1
     @test m.volumes==Dict(1=>[1])
-    # The shell carries the six faces FORWARD.
-    @test sort(m.surface_loops[1])==collect(1:6)
+    # OpenCASCADE's box: every face's natural normal is the positive axis,
+    # so the shell uses the three minimum faces reversed (Gmsh 4.15.2 lists
+    # the boundary of the volume as [-1, 2, -3, 4, -5, 6]).
+    @test m.surface_loops[1]==[-1,2,-3,4,-5,6]
     # Every surface is a single outer wire of four edges.
     for tag in keys(m.surfaces)
         loops=m.surfaces[tag]
@@ -55,15 +57,11 @@ end
     xmin,ymin,zmin,xmax,ymax,zmax=A.model.get_bounding_box(3,v)
     @test collect((xmin,ymin,zmin))≈collect((0.0,0.0,0.0))
     @test collect((xmax,ymax,zmax))≈collect((1.0,2.0,3.0))
-    # Face normals point outward on the six axis directions.
-    normals=NTuple{3,Float64}[]
-    for tag in 1:6
-        g=m.surface_geometry[tag]
-        push!(normals,g.axis)
-    end
-    @test sort!(normals)==sort!(collect((
-        (0.0,0.0,-1.0),(0.0,0.0,1.0),(0.0,-1.0,0.0),
-        (0.0,1.0,0.0),(-1.0,0.0,0.0),(1.0,0.0,0.0))))
+    # The records hold the natural normals, xmin, xmax, ymin, ymax, zmin,
+    # zmax in that order; with the shell's signs they point outward.
+    @test [m.surface_geometry[tag].axis for tag in 1:6]==[
+        (1.0,0.0,0.0),(1.0,0.0,0.0),(0.0,1.0,0.0),
+        (0.0,1.0,0.0),(0.0,0.0,1.0),(0.0,0.0,1.0)]
     # Edges are shared between adjacent faces: each of the 12 edges appears
     # in exactly two distinct face wires.
     edge_faces=Dict{Int,Vector{Int}}()

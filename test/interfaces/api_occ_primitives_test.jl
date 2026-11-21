@@ -222,7 +222,8 @@ end
     va=occ.add_cone(0.0,0.0,0.0, 0.0,0.0,3.0, 2.0,0.0)
     occ.synchronize()
     m=_current_model()
-    @test m.surface_loops[2]==[4,-6]
+    # Gmsh 4.15.2: the apex cone is the lateral 4 and the base 5
+    @test m.surface_loops[2]==[4,-5]
     degs=[t for (t,k) in m.curve_types if k==:degenerate]
     @test length(degs)==1
     apex=M.model_value(m,1,only(degs),[0.0])

@@ -146,15 +146,16 @@ end
     occ.synchronize()
     @test collect(A.model.get_bounding_box(3,v))≈
         [2.0,3.0,5.0,4.0,5.0,8.0] atol=1e-12
-    # A shear is still a parallelepiped — the plane records absorb it.
+    # A shear is no similarity: the faces become degree-1 patches, as in
+    # Gmsh 4.15.2, whose box of them carries OpenCASCADE's 1e-7 gap.
     occ2=_occ_setup()
     b=occ2.add_box(0.0,0.0,0.0, 1.0,1.0,1.0)
     occ2.synchronize()
     occ2.affine_transform([(3,b)],Float64[1,0.5,0,0, 0,1,0,0, 0,0,1,0])
     occ2.synchronize()
     bb=A.model.get_bounding_box(3,b)
-    @test collect(bb)≈[0.0,0.0,0.0,1.5,1.0,1.0] atol=1e-12
-    n=A.model.get_normal(6,[0.5,0.5])
+    @test collect(bb)≈[-1e-7,-1e-7,-1e-7,1.5000001,1.0000001,1.0000001] atol=1e-12
+    n=A.model.get_normal(2,[0.5,0.5])   # Surface 2 is the xmax face
     @test n[1]>0.8 && n[2]<-0.4   # tilted +x face normal
 end
 

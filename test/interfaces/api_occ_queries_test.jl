@@ -37,9 +37,11 @@ end
     occ.synchronize()
     # Solid, face, wire and vertex boxes recurse through the kernel graph.
     @test collect(occ.get_bounding_box(3,v))≈[0,0,0,2,1,3]
-    @test collect(occ.get_bounding_box(2,1))≈[0,0,0,2,1,0]
-    @test collect(occ.get_bounding_box(-1,1))≈[0,0,0,2,1,0]
-    @test collect(occ.get_bounding_box(0,1))≈[0,0,0,0,0,0]
+    # Surface 1 is the xmin face and Point 1 the corner (xmin, ymin, zmax)
+    # in OpenCASCADE's box layout.
+    @test collect(occ.get_bounding_box(2,1))≈[0,0,0,0,1,3]
+    @test collect(occ.get_bounding_box(-1,1))≈[0,0,0,0,1,3]
+    @test collect(occ.get_bounding_box(0,1))≈[0,0,3,0,0,3]
     # The upstream dispatch accepts every bound dimension.
     @test collect(occ.get_bounding_box(-2,1))≈[0,0,0,2,1,3]
     # Exact curved-record boxes without synchronization.
