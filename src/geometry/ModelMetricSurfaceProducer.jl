@@ -318,6 +318,39 @@ function _model_curve_tightened_grading(inner,cert_fields,scale::Float64)
     return _MetricScaledAniso(_MetricCertificateMin(cert_fields),scale)
 end
 
+# Whether `triangle_area(a,b,c)` is finite, and whether it is positive, without
+# its value. A split point is admitted when each child cell has a positive
+# area; the search for one on a razor cell tries candidates one ulp apart,
+# whose children are too thin for `triangle_area` to certify in Float64, so
+# it computed every such area in Rational{BigInt} arithmetic only to compare
+# it with zero: a third of a run on a rectangle. The area is zero exactly
+# when the three rows are collinear, which three exact `orient2` tests on the
+# coordinate planes decide (filtered, like every predicate).
+function _metric_area_sign(a,b,c)
+    all(isfinite,a) && all(isfinite,b) && all(isfinite,c) || return false,false
+    ux=b[1]-a[1];uy=b[2]-a[2];uz=b[3]-a[3]
+    vx=c[1]-a[1];vy=c[2]-a[2];vz=c[3]-a[3]
+    cx=uy*vz-uz*vy;cy=uz*vx-ux*vz;cz=ux*vy-uy*vx
+    norm=hypot(cx,cy,cz)
+    fast=0.5*norm
+    # The certificate of `triangle_area`: the floating norm exceeds its
+    # rounding bound, so the area it returns is `fast`, finite and positive.
+    permanent=(abs(uy*vz)+abs(uz*vy))+(abs(uz*vx)+abs(ux*vz))+
+              (abs(ux*vy)+abs(uy*vx))
+    isfinite(fast) && fast>0 && isfinite(permanent) &&
+        (permanent==0 || norm>16eps(Float64)*permanent) && return true,true
+    if isfinite(fast) && fast<1e300 && isfinite(permanent)
+        collinear=orient2((a[1],a[2]),(b[1],b[2]),(c[1],c[2]))==0 &&
+                  orient2((a[2],a[3]),(b[2],b[3]),(c[2],c[3]))==0 &&
+                  orient2((a[3],a[1]),(b[3],b[1]),(c[3],c[1]))==0
+        # Collinear rows have area zero; any others a positive area no
+        # larger than the finite floating estimate allows.
+        return true,!collinear
+    end
+    area=triangle_area(a,b,c)
+    return isfinite(area),area>0
+end
+
 # Regrade stale boundary Curves under the producer's certificate field — and
 # under a progressively tightened metric while an under-resolution remnant
 # persists — before the lower products are consumed. `input!==nothing`
@@ -817,12 +850,12 @@ function _metric_surface_refine_core(tag,field,target,node_limit,
                 isfinite(winding) && isfinite(first_child) && isfinite(second_child) &&
                     winding!=0 && sign(first_child)==sign(winding) &&
                     sign(second_child)==sign(winding) || return false
-                child_areas=(triangle_area(coordinates[first],point,coordinates[other]),
-                             triangle_area(point,coordinates[last],coordinates[other]))
-                isfinite(child_areas[1]) &&
-                    (child_areas[1]>0 || pole_pair(first,other)) &&
-                    isfinite(child_areas[2]) &&
-                    (child_areas[2]>0 || pole_pair(last,other)) || return false
+                finite1,positive1=_metric_area_sign(coordinates[first],point,
+                                                    coordinates[other])
+                finite2,positive2=_metric_area_sign(point,coordinates[last],
+                                                    coordinates[other])
+                finite1 && (positive1 || pole_pair(first,other)) &&
+                    finite2 && (positive2 || pole_pair(last,other)) || return false
             end
             return true
         end
