@@ -220,6 +220,7 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     # Line evaluation the surface's retained-boundary check reads, not the
     # native placement kernel's Float64 interpolation.
     cert_gamma=u->_model_curve_point(m,curve,u,caller)
+    size_context=_model_curve_size_context(m,curve)
     runopts=options
     scale=1.0
     local params,count,rows
@@ -236,7 +237,7 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
                     speed=_model_native_line_sampling_speed(first,last,t,gamma,caller)
                     endpoint=at_begin ? _model_vertex_bgm(m,a,point,current_runopts,caller;_native_producer) :
                              at_end ? _model_vertex_bgm(m,b,point,current_runopts,caller;_native_producer) : GMSH_MAX_SIZE
-                    h=min(endpoint,_model_curve_bgm(m,curve,t,point,0.0,1.0,current_runopts,caller;_native_producer))
+                    h=min(endpoint,_model_curve_bgm(size_context,m,curve,t,point,0.0,1.0,current_runopts,caller;_native_producer))
                     lc=speed/h
                     isfinite(lc) && lc>0 || throw(ArgumentError(
                         "$caller: native Line density is nonpositive or not representable"))
@@ -258,7 +259,7 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
         coordinates=NTuple{3,Float64}[gamma(t) for t in params]
         field=_ModelCurveEntityField(m,runopts,String(caller))
         size_function=let current_runopts=runopts
-            t->_model_curve_bgm(m,curve,t,gamma(t),0.0,1.0,current_runopts,caller;_native_producer)
+            t->_model_curve_bgm(size_context,m,curve,t,gamma(t),0.0,1.0,current_runopts,caller;_native_producer)
         end
         count=length(params)-2
         rows=_birth_rows ? collect(eachindex(params)) : nothing
@@ -331,6 +332,7 @@ function _model_occ_line_grade_params(m::GeoModel,curve::Int,occ,
     odd_nodes=m.meshing.recombine_algo!=0 && (m.meshing.recombine_all ||
         any(face->haskey(m.meshing.recombine,(2,face)),_model_curve_faces(m,curve)))
     cert_gamma=u->_model_curve_point(m,curve,u,caller)
+    size_context=_model_curve_size_context(m,curve)
     runopts=options
     scale=1.0
     local params,count,rows
@@ -341,7 +343,7 @@ function _model_occ_line_grade_params(m::GeoModel,curve::Int,occ,
                 point=gamma(t)
                 endpoint=at_begin ? _model_vertex_bgm(m,a,point,current_runopts,caller;_native_producer) :
                          at_end ? _model_vertex_bgm(m,b,point,current_runopts,caller;_native_producer) : GMSH_MAX_SIZE
-                h=min(endpoint,_model_curve_bgm(m,curve,t,point,t0,t1,current_runopts,caller;_native_producer))
+                h=min(endpoint,_model_curve_bgm(size_context,m,curve,t,point,t0,t1,current_runopts,caller;_native_producer))
                 lc=speed/h
                 isfinite(lc) && lc>0 || throw(ArgumentError(
                     "$caller: OpenCASCADE Line density is nonpositive or not representable"))
@@ -360,7 +362,7 @@ function _model_occ_line_grade_params(m::GeoModel,curve::Int,occ,
             coordinates=NTuple{3,Float64}[gamma(t) for t in params]
             field=_ModelCurveEntityField(m,runopts,String(caller))
             size_function=let current_runopts=runopts
-                t->_model_curve_bgm(m,curve,t,gamma(t),t0,t1,current_runopts,caller;_native_producer)
+                t->_model_curve_bgm(size_context,m,curve,t,gamma(t),t0,t1,current_runopts,caller;_native_producer)
             end
             count=length(params)-2
             rows=_birth_rows ? collect(eachindex(params)) : nothing

@@ -85,6 +85,9 @@ function _model_curve_metric_faces(m::GeoModel,curve::Integer)
     for ((dim,tag),items) in m.embeds
         dim==2 && (1,Int(curve)) in items && push!(embedded_faces,tag)
     end
+    isempty(embedded_faces) && return faces
+    # `_model_curve_faces` hands out the index's own list.
+    faces=copy(faces)
     for face in sort!(unique!(embedded_faces))
         face in faces || push!(faces,face)
     end
@@ -489,13 +492,49 @@ function _model_curve_bgm(m::GeoModel,curve::Integer,u::Float64,xyz,t0::Float64,
                           t1::Float64,options::_ModelMesh1DOptions,
                           caller::AbstractString;_native_producer::Bool=false,
                           _native_geometry=nothing)
-    l1=options.from_points ?
-        _model_curve_l1(m,curve,u,t0,t1,options.ctx_lc;_native_producer) : GMSH_MAX_SIZE
-    l2=_model_curve_l2(m,curve,u,options.from_curvature;
-        _native_producer=_native_producer,_native_geometry=_native_geometry)
+    return _model_curve_bgm(_model_curve_size_context(m,curve),m,curve,u,xyz,
+        t0,t1,options,caller;_native_producer,_native_geometry)
+end
+
+# What `BGM_MeshSize` reads from the model's stores for one Curve and never
+# from the sample: the prescribed sizes of its two vertices and whether it
+# carries sizes at parametric points. The integration evaluates the size at
+# 129 or more samples per Curve; resolving these once per Curve instead of
+# once per sample leaves only arithmetic in the integrand. The arithmetic is
+# that of `_model_curve_l1` and `_model_curve_l5`, in the same order.
+struct _ModelCurveSizeContext
+    lc1::Float64
+    lc2::Float64
+    parametric_sizes::Bool
+end
+
+function _model_curve_size_context(m::GeoModel,curve::Integer)
+    a,b=m.curves[curve]
+    entries=get(m.meshing.size_at_params,(1,curve),nothing)
+    return _ModelCurveSizeContext(_model_vertex_lc(m,a),_model_vertex_lc(m,b),
+        entries!==nothing && !isempty(entries))
+end
+
+function _model_curve_bgm(context::_ModelCurveSizeContext,m::GeoModel,
+                          curve::Integer,u::Float64,xyz,t0::Float64,
+                          t1::Float64,options::_ModelMesh1DOptions,
+                          caller::AbstractString;_native_producer::Bool=false,
+                          _native_geometry=nothing)
+    l1=if !options.from_points
+        GMSH_MAX_SIZE
+    elseif context.lc1>=GMSH_MAX_SIZE && context.lc2>=GMSH_MAX_SIZE
+        _native_producer ? options.ctx_lc*0.1 : options.ctx_lc/10
+    else
+        alpha=t1==t0 ? 0.0 : (u-t0)/(t1-t0)
+        (1-alpha)*context.lc1 + alpha*context.lc2
+    end
+    l2=options.from_curvature>0 ?
+        _model_curve_l2(m,curve,u,options.from_curvature;
+            _native_producer=_native_producer,_native_geometry=_native_geometry) :
+        GMSH_MAX_SIZE
     l3=options.inner_field===nothing ? GMSH_MAX_SIZE :
         field_value(options.inner_field,xyz[1],xyz[2],xyz[3],(1,curve))
-    l5=_model_curve_l5(m,curve,u,caller)
+    l5=context.parametric_sizes ? _model_curve_l5(m,curve,u,caller) : GMSH_MAX_SIZE
     lc=min(l1,l2,l3,GMSH_MAX_SIZE,l5)
     if options.callback!==nothing
         lc=_apply_size_callback(options.callback,1,curve,xyz[1],xyz[2],
@@ -979,6 +1018,7 @@ function _model_curve_grade_params_general(m::GeoModel,curve::Integer,t0::Float6
             m.points[a],m.points[b],points) : nothing
     # `Integration` precision upstream is `lcIntegrationPrecision * lc`.
     precision=options.integration_precision*options.ctx_lc
+    size_context=_model_curve_size_context(m,curve)
     runopts=options
     scale=1.0
     local parameters
@@ -994,8 +1034,12 @@ function _model_curve_grade_params_general(m::GeoModel,curve::Integer,t0::Float6
                 t0,t1,closed,endpoints,runopts,caller,vb0,vb1,precision,minimum,force_odd,
                 odd_nodes,count_primitive,_point_store,_skip_filter;_native_producer))::Vector{Float64}
         else
-            run_size_function=u->_model_curve_bgm(m,curve,u,γ(u),vb0,vb1,runopts,
-                caller)
+            # `runopts` is reassigned below: capture this attempt's value, not
+            # the variable, or every sample dispatches through a box.
+            run_size_function=let current_runopts=runopts,lower=vb0,upper=vb1
+                u->_model_curve_bgm(size_context,m,curve,u,γ(u),lower,upper,
+                    current_runopts,caller)
+            end
             _,result=mesh_curve(
                 γ,_ModelScalarCurveEntityField(runfield);t0=t0,t1=t1,closed=closed,
                 entity=(1,curve),endpoint_entities=endpoints,
@@ -1677,6 +1721,52 @@ end
 # ordinary grading). Returns the stored parameter vector, `:keep` when the
 # existing discretization is preserved, or `:pending` when a source/master
 # has not been meshed yet (upstream leaves the curve PENDING and retries).
+# `meshGEdge`'s `F_One` prepass: the integral of |γ′| over the Curve.
+function _model_curve_prepass_length(m::GeoModel,curve::Integer,t0::Float64,
+        t1::Float64,options::_ModelMesh1DOptions,caller::AbstractString)
+    γ=u->_model_curve_point(m,curve,u,caller)
+    return curve_length(γ;t0=t0,t1=t1,
+        integration_precision=options.integration_precision*options.ctx_lc)
+end
+
+# On a straight Line the prepass is read only for its zero test, and it is
+# the costliest step of meshing one: at least 129 samples, each a central
+# difference of two exactly evaluated points. That integrand is the
+# difference of an affine map at `t ± h` with `h = cbrt(eps)·span`, so it
+# equals `2h·chord` up to one rounding error of the coordinates. When the
+# chord is at least a millionth of the coordinate magnitude every sample
+# keeps five significant digits, every speed is positive and the integral
+# cannot be zero — the answer the zero test needs. Shorter, non-finite or
+# extreme Lines keep the integral.
+function _model_line_surely_has_length(m::GeoModel,curve::Integer,a::Int,b::Int,
+                                       t0::Float64,t1::Float64)
+    occ=get(m.curve_geometry,curve,nothing)
+    if occ===nothing
+        (t0==0.0 && t1==1.0) || return false
+        first,last=m.points[a],m.points[b]
+        chord=_model_point_distance(first,last)
+        scale=max(abs(first[1]),abs(first[2]),abs(first[3]),
+                  abs(last[1]),abs(last[2]),abs(last[3]))
+        return isfinite(chord) && scale<1e100 && chord>1e-100 && chord>=1e-6*scale
+    end
+    (hasproperty(occ,:occ) && occ.occ===:line && hasproperty(occ,:origin) &&
+     hasproperty(occ,:dir)) || return false
+    return _model_occ_line_surely_has_length(occ.origin,occ.dir,
+        Float64(occ.t0),Float64(occ.t1),t0,t1)
+end
+
+function _model_occ_line_surely_has_length(origin::NTuple{3,Float64},
+        dir::NTuple{3,Float64},lower::Float64,upper::Float64,t0::Float64,
+        t1::Float64)
+    (t0==lower && t1==upper && t1>t0) || return false
+    reach=max(abs(t0),abs(t1))
+    chord=hypot(dir[1],dir[2],dir[3])*(t1-t0)
+    scale=max(abs(origin[1])+abs(dir[1])*reach,abs(origin[2])+abs(dir[2])*reach,
+              abs(origin[3])+abs(dir[3])*reach)
+    return isfinite(chord) && scale<1e100 && chord>1e-100 && chord>=1e-6*scale
+end
+_model_occ_line_surely_has_length(origin,dir,lower,upper,t0,t1)=false
+
 function _model_mesh_curve!(m::GeoModel,curve::Integer,
                             options::_ModelMesh1DOptions,
                             caller::AbstractString;_native_producer::Bool=false,
@@ -1749,6 +1839,7 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
     end
     t0,t1=_model_curve_param_bounds(m,curve,caller)
     spec=get(m.meshing.transfinite_curves,curve,nothing)
+    deferred=false
     length=if spec!==nothing && kind===:line
         # The F_One prepass integrates a constant derivative on a Line. Only
         # its zero-length gate is consumed by this transfinite branch; the
@@ -1758,11 +1849,13 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         isfinite(chord) || throw(ArgumentError(
             "$caller: Curve[$curve] has non-finite geometric length"))
         chord
+    elseif kind===:line && _model_line_surely_has_length(m,curve,a,b,t0,t1)
+        # Only the zero test below reads the prepass on such a Line; a
+        # boundary-layer end, the one consumer of its value, integrates.
+        deferred=true
+        Inf
     else
-        γ=u->_model_curve_point(m,curve,u,caller)
-        curve_length(γ;t0=t0,t1=t1,
-                     integration_precision=options.integration_precision *
-                         options.ctx_lc)
+        _model_curve_prepass_length(m,curve,t0,t1,options,caller)
     end
     if length==0.0
         if options.tolerance_edge_length==0.0
@@ -1786,6 +1879,7 @@ function _model_mesh_curve!(m::GeoModel,curve::Integer,
         kind===:line || throw(ArgumentError(
             "$caller: Boundary layer end point should lie on a straight " *
             "line (curve $curve)"))
+        deferred && (length=_model_curve_prepass_length(m,curve,t0,t1,options,caller))
         return (Base.inferencebarrier(_model_curve_bl_grade_params)(
             m,curve,bl_ends[1],bl_ends[2],t0,t1,length,options,caller;
             transfinite=spec,_native_producer=_native_producer))::Union{Vector{Float64},_ModelNativeCurveGrade}

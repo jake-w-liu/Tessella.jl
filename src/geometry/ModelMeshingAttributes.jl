@@ -2773,7 +2773,7 @@ end
 
 # Faces a curve bounds through surface curve loops — Gmsh's `GEdge::faces()`,
 # which drives the recombined-boundary odd-count rule above.
-function _model_curve_faces(m::GeoModel,curve::Int)
+function _model_curve_faces_scan(m::GeoModel,curve::Int)
     faces=Int[]
     for (surface,loops) in m.surfaces
         any(loop->haskey(m.loops,loop) &&
@@ -2782,6 +2782,59 @@ function _model_curve_faces(m::GeoModel,curve::Int)
         push!(faces,surface)
     end
     return faces
+end
+
+# Grading one Curve asks for its faces several times (the anisotropic
+# dispatch, the certificate fields, the two-generatrix floor, recombination
+# parity, and once per integration sample under `MeshSizeFromCurvature`).
+# Answering each query with a scan of every Surface made the 1-D pass
+# quadratic in the size of the model, so the answers for all Curves are built
+# in one pass over the Surfaces and kept beside the model. The index is
+# rebuilt when either store is replaced or edited: a `Dict` counts its own
+# insertions, replacements and deletions in `age`. Loop and Surface lists are
+# never edited in place — they are replaced through `setindex!`.
+struct _ModelCurveFaceIndex
+    surfaces::Dict{Int,Vector{Int}}
+    loops::Dict{Int,Vector{Int}}
+    surfaces_age::UInt
+    loops_age::UInt
+    faces::Dict{Int,Vector{Int}}
+end
+
+const _MODEL_CURVE_FACE_INDEX=WeakKeyDict{GeoModel,_ModelCurveFaceIndex}()
+const _MODEL_DICT_COUNTS_EDITS=hasfield(Dict{Int,Vector{Int}},:age)
+const _MODEL_NO_CURVE_FACES=Int[]
+
+function _model_curve_face_index(m::GeoModel)
+    surfaces=m.surfaces;loops=m.loops
+    surfaces_age=getfield(surfaces,:age)::UInt
+    loops_age=getfield(loops,:age)::UInt
+    index=get(_MODEL_CURVE_FACE_INDEX,m,nothing)
+    index!==nothing && index.surfaces===surfaces && index.loops===loops &&
+        index.surfaces_age==surfaces_age && index.loops_age==loops_age &&
+        return index
+    faces=Dict{Int,Vector{Int}}()
+    # The scan's order: Surfaces as the store iterates them, each once.
+    for (surface,surface_loops) in surfaces
+        for loop in surface_loops
+            members=get(loops,loop,nothing)
+            members===nothing && continue
+            for signed in members
+                list=get!(()->Int[],faces,abs(signed))
+                (isempty(list) || @inbounds(list[end])!=surface) &&
+                    push!(list,surface)
+            end
+        end
+    end
+    index=_ModelCurveFaceIndex(surfaces,loops,surfaces_age,loops_age,faces)
+    _MODEL_CURVE_FACE_INDEX[m]=index
+    return index
+end
+
+# The returned list is shared with the index: read it, do not edit it.
+function _model_curve_faces(m::GeoModel,curve::Int)
+    _MODEL_DICT_COUNTS_EDITS || return _model_curve_faces_scan(m,curve)
+    return get(_model_curve_face_index(m).faces,curve,_MODEL_NO_CURVE_FACES)
 end
 
 function _transfinite_parameters(m::GeoModel,num_nodes::Int,kind::Symbol,

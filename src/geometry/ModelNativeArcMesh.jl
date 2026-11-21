@@ -128,11 +128,15 @@ function _model_native_curve_grade_with_geometry(m::GeoModel,curve::Int,
     force_odd=m.meshing.recombine_algo!=0 && m.meshing.recombine_all
     odd_nodes=m.meshing.recombine_algo!=0 && (m.meshing.recombine_all ||
         any(face->haskey(m.meshing.recombine,(2,face)),_model_curve_faces(m,curve)))
+    size_context=_model_curve_size_context(m,curve)
     runopts=options
     scale=1.0
     local params,count,rows
     done=false
     for _attempt in 1:8
+        # A closure over `runopts` itself, which the certificate loop
+        # reassigns, would capture a box and dispatch at every sample.
+        current_runopts=runopts
         evaluate=function(t,at_begin,at_end)
             point=gamma(t)
             derivative=_model_high_order_curve_derivative(adapter,t,caller)
@@ -140,11 +144,11 @@ function _model_native_curve_grade_with_geometry(m::GeoModel,curve::Int,
                        derivative[3]*derivative[3])
             if aniso
                 metric=if at_begin
-                    _model_vertex_bgm_metric(m,a,point,runopts,caller;_native_producer=true)
+                    _model_vertex_bgm_metric(m,a,point,current_runopts,caller;_native_producer=true)
                 elseif at_end
-                    _model_vertex_bgm_metric(m,b,point,runopts,caller;_native_producer=true)
+                    _model_vertex_bgm_metric(m,b,point,current_runopts,caller;_native_producer=true)
                 else
-                    _model_curve_bgm_metric(m,curve,t,point,lower,upper,runopts,caller;
+                    _model_curve_bgm_metric(m,curve,t,point,lower,upper,current_runopts,caller;
                         _native_producer=true,_native_geometry=adapter)
                 end
                 lc=_metric_displacement(metric,derivative[1],derivative[2],derivative[3],caller)
@@ -152,9 +156,9 @@ function _model_native_curve_grade_with_geometry(m::GeoModel,curve::Int,
                     "$caller: native Curve metric density is nonpositive or not representable"))
                 return _IntegrationPoint(t,lc,0.0,speed,1.0)
             end
-            endpoint=at_begin ? _model_vertex_bgm(m,a,point,runopts,caller;_native_producer=true) :
-                     at_end ? _model_vertex_bgm(m,b,point,runopts,caller;_native_producer=true) : GMSH_MAX_SIZE
-            h=min(endpoint,_model_curve_bgm(m,curve,t,point,lower,upper,runopts,caller;
+            endpoint=at_begin ? _model_vertex_bgm(m,a,point,current_runopts,caller;_native_producer=true) :
+                     at_end ? _model_vertex_bgm(m,b,point,current_runopts,caller;_native_producer=true) : GMSH_MAX_SIZE
+            h=min(endpoint,_model_curve_bgm(size_context,m,curve,t,point,lower,upper,current_runopts,caller;
                 _native_producer=true,_native_geometry=adapter))
             lc=speed/h
             isfinite(lc) && lc>=0 || throw(ArgumentError(
@@ -173,8 +177,8 @@ function _model_native_curve_grade_with_geometry(m::GeoModel,curve::Int,
         end
         params=_gmsh_curve_parameters(points,nedge+1,caller)
         coordinates=NTuple{3,Float64}[gamma(t) for t in params]
-        field=_ModelCurveEntityField(m,runopts,String(caller))
-        size_function=t->_model_curve_bgm(m,curve,t,gamma(t),lower,upper,runopts,caller;
+        field=_ModelCurveEntityField(m,current_runopts,String(caller))
+        size_function=t->_model_curve_bgm(size_context,m,curve,t,gamma(t),lower,upper,current_runopts,caller;
             _native_producer=true,_native_geometry=adapter)
         count=length(params)-2
         rows=_birth_rows ? collect(eachindex(params)) : nothing
@@ -190,9 +194,9 @@ function _model_native_curve_grade_with_geometry(m::GeoModel,curve::Int,
                 dim,tag=entity===nothing ? (1,curve) :
                     (Int(entity[1]),Int(entity[2]))
                 dim==0 ? _model_vertex_bgm_metric(
-                             m,tag,xyz,runopts,caller;_native_producer=true) :
+                             m,tag,xyz,current_runopts,caller;_native_producer=true) :
                          _model_curve_bgm_metric(
-                             m,tag,u,xyz,lower,upper,runopts,caller;
+                             m,tag,u,xyz,lower,upper,current_runopts,caller;
                              _native_producer=true,_native_geometry=adapter)
             end
             _undershoot_metric_edges!(gamma,metric_of,params,coordinates,upper,
