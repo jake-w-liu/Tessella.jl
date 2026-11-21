@@ -7,6 +7,7 @@ using Test, Tessella
 # `pos.find`), not onto a fresh remesh of it. Gmsh 4.15.2: 122 nodes,
 # 156 prisms, 78 triangles, 72 quadrangles, 60 lines, 14 points.
 @testset "full-turn sweep of an unstructured face welds its seam" begin
+  for stepwise in (true, false)
     path = joinpath(mktempdir(), "revolve.geo")
     write(path, """
         Point(1)={1,0,0,0.4}; Point(2)={2,0,0,0.4}; Point(3)={2,0,1,0.4}; Point(4)={1,0,1,0.4};
@@ -21,10 +22,10 @@ using Test, Tessella
     try
         A.option("General.Terminal", 0)
         A.open(path)
-        # Dimension by dimension: the volume pass reads the retained face
-        # meshes. (A direct `generate(3)` also needs the higher-dimension
-        # certificate to read the same retained product.)
-        for dim in 1:3
+        # Dimension by dimension the volume pass reads the retained face
+        # meshes; a single generate(3) reads the same product through its
+        # mesh input, in the producer and in the sweep certificate.
+        for dim in (stepwise ? (1:3) : (3:3))
             A.mesh.generate(dim)
         end
         @test length(A.mesh.get_nodes()[1]) == 122
@@ -34,6 +35,7 @@ using Test, Tessella
     finally
         A.finalize()
     end
+  end
 end
 
 end # module

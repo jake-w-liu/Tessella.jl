@@ -899,12 +899,12 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
     seam=if copied
         nothing
     elseif dimension==3
-        Model._extrude_quadtri_seam_index(m,tag,caller)
+        Model._extrude_quadtri_seam_index(m,tag,caller;_mesh_input=input)
     elseif dimension==2
         begin
             found=nothing
             for region in Model._extrude_quadtri_regions(m,tag,caller)
-                found=Model._extrude_quadtri_seam_index(m,region,caller)
+                found=Model._extrude_quadtri_seam_index(m,region,caller;_mesh_input=input)
                 found===nothing || break
             end
             found
