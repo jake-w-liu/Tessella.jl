@@ -307,6 +307,7 @@ include("functional/fixtures.jl")
         "interfaces/api_refine_clear_regenerate_test.jl",
         "interfaces/api_view_pos_line_ends_test.jl",
         "interfaces/api_periodic_high_order_nodes_test.jl",
+        "interfaces/api_occ_context_length_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

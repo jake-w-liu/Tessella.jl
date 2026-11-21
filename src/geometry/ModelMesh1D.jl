@@ -144,8 +144,8 @@ end
 # `SetBoundingBox` = `GModel::bounds()` then `FinishUpBoundingBox`. The vertex
 # cloud covers model points, generated curve nodes (stored `curve_params` —
 # upstream bounds() includes generated mesh vertices), discrete record nodes
-# and the stored OCC primitive extents; empty models use upstream's [-1,1]^3
-# placeholder box.
+# the stored primitive extents and the own bounds of OpenCASCADE edges and
+# faces; empty models use upstream's [-1,1]^3 placeholder box.
 function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
     lo=fill(Inf,3); hi=fill(-Inf,3)
     function grow!(p)
@@ -195,13 +195,14 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
     end
     # Finite-primitive extents — the same vertex-cloud role OCC geometric
     # bounds play upstream (a free cylinder/sphere/cone must not shrink lc).
+    # `center` is the centre of the base disc, the axis runs `height` from it.
     for cyl in values(m.cylinders)
         c=cyl.center; ax=cyl.axis; r=cyl.radius
         n=hypot(ax[1],ax[2],ax[3])
         n>0 || continue
-        u=(ax[1]/n,ax[2]/n,ax[3]/n); h=cyl.height/2
-        for s in (-1,1)
-            grow!(ntuple(i->c[i]+s*(h*abs(u[i])+r*sqrt(max(0.0,1-u[i]^2))),3))
+        u=(ax[1]/n,ax[2]/n,ax[3]/n)
+        for along in (0.0,cyl.height), s in (-1,1)
+            grow!(ntuple(i->c[i]+along*u[i]+s*r*sqrt(max(0.0,1-u[i]^2)),3))
         end
     end
     for sph in values(m.spheres)
@@ -217,14 +218,126 @@ function _model_mesh_bbox(m::GeoModel, caller::AbstractString)
     for cone in values(m.cones)
         c=cone.center; ax=cone.axis; n=hypot(ax[1],ax[2],ax[3])
         n>0 || continue
-        u=(ax[1]/n,ax[2]/n,ax[3]/n); h=cone.height/2
-        for s in (-1,1)
-            r=s<0 ? cone.r1 : cone.r2
-            grow!(ntuple(i->c[i]+s*(h*abs(u[i])+r*sqrt(max(0.0,1-u[i]^2))),3))
+        u=(ax[1]/n,ax[2]/n,ax[3]/n)
+        for (along,r) in ((0.0,cone.r1),(cone.height,cone.r2)), s in (-1,1)
+            grow!(ntuple(i->c[i]+along*u[i]+s*r*sqrt(max(0.0,1-u[i]^2)),3))
         end
+    end
+    # An OpenCASCADE entity bounds itself: `GModel::bounds` unions
+    # `GEntity::bounds()` for those, so a curved edge or face counts where no
+    # vertex reaches its extent (a torus has one vertex, a cut cylinder none on
+    # most of its rim). `BRepBndLib` enlarges each box by the shape tolerance.
+    for ((dimension,tag),id) in m.occ_kernel.bindings
+        box=dimension==1 ? _model_occ_curve_mesh_bounds(m,tag,caller) :
+            dimension==2 ? _model_occ_surface_mesh_bounds(m,id,tag,caller) : nothing
+        box===nothing && continue
+        grow!((box[1],box[2],box[3]))
+        grow!((box[4],box[5],box[6]))
     end
     isfinite(lo[1]) || return (-1.0,1.0,-1.0,1.0,-1.0,1.0)
     return (lo[1],hi[1],lo[2],hi[2],lo[3],hi[3])
+end
+
+@inline _model_occ_bounds_gap(box)=(box[1]-1e-7,box[2]-1e-7,box[3]-1e-7,
+                                    box[4]+1e-7,box[5]+1e-7,box[6]+1e-7)
+
+# The box `BRepBndLib` gives an OpenCASCADE edge, tolerance gap included;
+# `nothing` for a Curve the model no longer has. A Line is the box of its end
+# Points. The control hulls the model reports for spline, iso and hyperbola
+# curves carry the gap already; the exact boxes of the analytic curves and
+# the sampled box of a section curve do not.
+function _model_occ_curve_mesh_bounds(m::GeoModel,tag::Int,caller::AbstractString)
+    ends=get(m.curves,tag,nothing)
+    ends===nothing && return nothing
+    occ=_occ_geometry(m,tag)
+    if occ===nothing || occ.occ===:line
+        a=get(m.points,ends[1],nothing); b=get(m.points,ends[2],nothing)
+        (a===nothing || b===nothing) && return nothing
+        return _model_occ_bounds_gap((min(a[1],b[1]),min(a[2],b[2]),min(a[3],b[3]),
+                                      max(a[1],b[1]),max(a[2],b[2]),max(a[3],b[3])))
+    end
+    box=(Base.inferencebarrier(_model_curve_bounding_box)(m,tag,caller))::NTuple{6,Float64}
+    kind=occ.occ
+    exact=kind===:circle || kind===:ellipse || kind===:degenerate ||
+          (kind===:copied_curve && occ.curve isa _ModelOCCSectionCurve)
+    return exact ? _model_occ_bounds_gap(box) : box
+end
+
+# The same for a face. Plane, cylinder and cone faces are bounded through their
+# edges (`CanUseEdges`), which the Curve pass already covers; a sphere is the
+# exact box, a tensor patch its control hull (reported with the gap), and a
+# torus the polygonal box of `BndLib::Add(gp_Torus)`.
+function _model_occ_surface_mesh_bounds(m::GeoModel,id,tag::Int,caller::AbstractString)
+    haskey(m.surfaces,tag) || return nothing
+    geometry=get(m.surface_geometry,tag,nothing)
+    geometry===nothing && return nothing
+    return (Base.inferencebarrier(_model_occ_surface_mesh_bounds_selected)(
+        m,id,tag,geometry,caller))::Union{Nothing,NTuple{6,Float64}}
+end
+
+function _model_occ_surface_mesh_bounds_selected(m::GeoModel,id,tag::Int,geometry,
+                                                 caller::AbstractString)
+    hasproperty(geometry,:occ) || return nothing
+    if _model_nurbs_surface(geometry)
+        return _model_entity_bounding_box(m,2,tag,caller)
+    elseif geometry.occ===:torus && geometry.r1>=geometry.r2
+        kernel=m.occ_kernel
+        record=kernel.shapes[id].geometry.geometry
+        window=hasproperty(record,:occ) && record.occ===:torus && haskey(record,:pcurves) ?
+            _occ_torus_sector_window(kernel,id,record) : nothing
+        return _model_occ_bounds_gap(_occ_torus_polygon_bounds(
+            window===nothing ? geometry : _occ_torus_window_record(record,window)))
+    elseif geometry.occ===:sphere || geometry.occ===:torus ||
+            hasproperty(geometry,:natural_bounds)
+        return _model_occ_bounds_gap(_model_entity_bounding_box(m,2,tag,caller))
+    end
+    return nothing
+end
+
+# `BndLib::Add(gp_Torus)` over the whole tube: eight parallels (the tube
+# circle sampled every 45 degrees, the diagonal ones at 0.71 of the minor
+# radius), each bounded as an arc by `_occ_arc_polygon_bounds`.
+function _occ_torus_polygon_bounds(g)
+    Y=_occ_frame_y(g)
+    diagonal=0.71*g.r2
+    bounds=_MODEL_EMPTY_BOUNDS
+    for (radius,offset) in ((g.r1+g.r2,0.0),(g.r1+diagonal,diagonal),(g.r1,g.r2),
+                            (g.r1-diagonal,diagonal),(g.r1-g.r2,0.0),
+                            (g.r1-diagonal,-diagonal),(g.r1,-g.r2),
+                            (g.r1+diagonal,-diagonal))
+        origin=ntuple(i->g.center[i]+offset*g.axis[i],3)
+        bounds=_occ_arc_polygon_bounds(bounds,origin,g.X,Y,radius,0.0,Float64(g.angle))
+    end
+    return bounds
+end
+
+# OpenCASCADE's `Compute` (BndLib.cxx) for a circle arc: both ends, the same
+# ends on the circumscribed octagon (radius over cos(pi/8); over the half-angle
+# cosine for an arc shorter than pi/8), and every octagon corner in between.
+function _occ_arc_polygon_bounds(bounds,origin,X,Y,radius::Float64,p1::Float64,p2::Float64)
+    first,last=minmax(p1,p2)
+    delta=abs(last-first)
+    if delta>2π
+        first=0.0;last=2π
+    else
+        while first<0.0;first+=2π;end
+        while first>2π;first-=2π;end
+        last=first+delta
+    end
+    point(r,c,s)=ntuple(i->origin[i]+r*c*X[i]+r*s*Y[i],3)
+    s1,c1=sincos(first);s2,c2=sincos(last)
+    outer=delta>π/8 ? radius/0.92387953251128674 : radius/cos(delta/2)
+    for p in (point(radius,c1,s1),point(radius,c2,s2),point(outer,c1,s1),point(outer,c2,s2))
+        bounds=_model_bounds_include(bounds,p)
+    end
+    quarter=0.70710678118654746
+    corners=((1.0,0.0),(quarter,quarter),(0.0,1.0),(-quarter,quarter),
+             (-1.0,0.0),(-quarter,-quarter),(0.0,-1.0),(quarter,-quarter))
+    for k in trunc(Int,first/(π/4))+1:min(trunc(Int,last/(π/4)),15)
+        c,s=corners[mod(k,8)+1]
+        bounds=_model_bounds_include(bounds,point(outer,c,s))
+    end
+    return bounds
 end
 
 function _model_mesh_lc(m::GeoModel, geometry_tolerance::Float64,
