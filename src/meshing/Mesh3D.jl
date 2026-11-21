@@ -21,7 +21,8 @@ neighbours/tet, one opposite each vertex) plus a free list.
 module Mesh3D
 
 using ..Predicates: orient3, orient3_sos, insphere_sos, incircle3_sos, orient2
-using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, boundary_faces, tet_signed_volume, _pinch_link_chi
+using ..MeshTypes: Mesh, tet_dihedral_extrema, validate, is_closed_manifold, boundary_edges, boundary_faces, tet_signed_volume, _pinch_link_chi,
+                   _tet_tables, _tet_tables_faces!
 using ..Elements: MixedMesh, ElementBlock,
                   _VOLUME_CELL_EDGES, _VOLUME_CELL_FACES
 using ..Mesh2D: constrained_delaunay, to_mesh
@@ -6670,7 +6671,17 @@ end
 # Every face of every tetrahedron as a sorted vertex triple, in sorted order:
 # a face shared by two tetrahedra appears twice in a row. Sorting a flat array
 # is several times cheaper than counting through a hash table.
+#
+# While a Volume is being meshed the table of a complex is built once and
+# handed to every caller that asks for it (see `_TetTables`), so the result
+# is shared: read it, do not sort, filter or otherwise edit it.
 function _sorted_tet_faces(tets::AbstractMatrix{<:Integer})
+    tables = tets isa Matrix{Int32} ? _tet_tables() : nothing
+    tables === nothing && return _build_sorted_tet_faces(tets)
+    return _tet_tables_faces!(_build_sorted_tet_faces, tables, tets)
+end
+
+function _build_sorted_tet_faces(tets::AbstractMatrix{<:Integer})
     nt = size(tets, 2)
     faces = Vector{NTuple{3,Int32}}(undef, 4 * nt)
     lowest = typemax(Int); highest = typemin(Int)

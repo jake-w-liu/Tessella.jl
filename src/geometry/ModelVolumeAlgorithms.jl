@@ -199,6 +199,8 @@ function _model_volume_embedded_sizes(m::GeoModel,tag::Int,mesh::Mesh,
         node=_model_projection_embedded_point_node(m,mesh,entity,1e-12,caller)
         result[node]=min(get(result,node,Inf),_model_vertex_lc(m,entity))
     end
+    # The table of every tetrahedron edge is read by embedded Curves only.
+    isempty(curves) && return result
     edges=_tet_edge_set(mesh)
     for curve in curves
         entries=_model_projection_tet_curve_nodes(m,mesh,curve,edges,caller)

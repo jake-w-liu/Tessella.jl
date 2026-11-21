@@ -39,6 +39,7 @@ include("functional/fixtures.jl")
         "meshing/periodic_test.jl",
         "meshing/boundary_recovery_test.jl",
         "core/tet_topology_certificate_test.jl",
+        "meshing/tet_tables_memo_test.jl",
         "interfaces/api_occ_sphere_recovery_test.jl",
         "geometry/occ_pcurve_spline_local_test.jl",
         "geometry/model_line_point_exact_test.jl",

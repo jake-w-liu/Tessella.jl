@@ -43,7 +43,15 @@ struct Unsupported <: Exception
     reason::String
 end
 Base.showerror(io::IO,error::Unsupported)=print(io,"Native Tetgen arena prototype: ",error.reason)
-facekey(face)=Tuple(sort!(Int32[face...]))
+# The three vertices of a face in ascending order. Every flip, walk and cavity
+# asks for it; sorting a temporary vector here made about ten heap objects per
+# tetrahedron and returned a tuple whose length the compiler could not know.
+@inline function facekey(face)
+    length(face)==3 || throw(ArgumentError("a face has three vertices"))
+    a=Int32(face[1]);b=Int32(face[2]);c=Int32(face[3])
+    a>b && ((a,b)=(b,a));b>c && ((b,c)=(c,b));a>b && ((a,b)=(b,a))
+    return (a,b,c)
+end
 edgekey(a,b)=minmax(Int32(a),Int32(b))
 @inline vertex(a,h,table)=a.cells[h.cell].vertices[table[Int(h.version)+1]]
 @inline org(a,h)=vertex(a,h,ORG)

@@ -14,6 +14,13 @@ mutable struct Kernel
     count::Int
     random_state::UInt32
     touched::Vector{Int32}
+    # The working lists of one insertion. Each is emptied and refilled by the
+    # next insertion instead of being allocated for it.
+    investigated::Set{Int32}
+    queue::Vector{Int32}
+    cavity_cells::Vector{Int32}
+    cavity_boundary::Vector{Tuple{NTuple{3,Int32},Int32,Int32}}
+    cavity_stack::Vector{NTuple{3,Int32}}
 end
 @inline face(k,t,s)=ntuple(i->k.cells[t].vertices[FACE[s][i]],3)
 @inline function key(f)
@@ -89,7 +96,8 @@ function Kernel(original;seed=1,factor=1e-12)
     points=NTuple{3,Float64}[Tuple(p) for p in original];count=length(points)
     4<=count<=typemax(Int32)-8 || throw(ArgumentError("native initial tetrahedralization: invalid point count"))
     all(p->all(isfinite,p),points) || throw(ArgumentError("native initial tetrahedralization: nonfinite input"))
-    k=Kernel(points,Cell[],count,UInt32(seed),Int32[]);sizehint!(k.cells,10count)
+    k=Kernel(points,Cell[],count,UInt32(seed),Int32[],Set{Int32}(),Int32[],Int32[],
+        Tuple{NTuple{3,Int32},Int32,Int32}[],NTuple{3,Int32}[]);sizehint!(k.cells,10count)
     magnitude=ntuple(i->maximum(p->abs(p[i]),points),3)
     distance=sqrt(magnitude[1]^2+magnitude[2]^2+magnitude[3]^2)
     for i in eachindex(points)
@@ -113,7 +121,8 @@ function Kernel(original;seed=1,factor=1e-12)
     return k
 end
 function walk(k,t,node)
-    investigated=Set{Int32}([t]);queue=Int32[];position=1
+    investigated=empty!(k.investigated);push!(investigated,t)
+    queue=empty!(k.queue);position=1
     for _ in 1:100length(k.cells)
         t==0 && return Int32(0)
         minimum=0.;neighbor=0;count=0
@@ -145,9 +154,10 @@ end
     end
     return nothing
 end
+# The returned lists are the kernel's own and hold until the next call.
 function cavity(k,start,node)
-    cells=Int32[];boundary=Tuple{NTuple{3,Int32},Int32,Int32}[]
-    stack=NTuple{3,Int32}[(0,start,1)]
+    cells=empty!(k.cavity_cells);boundary=empty!(k.cavity_boundary)
+    stack=empty!(k.cavity_stack);push!(stack,(0,start,1))
     for t in k.touched
         k.cells[t].marked=false
     end
@@ -173,8 +183,13 @@ function cavity(k,start,node)
     return cells,boundary
 end
 function repair!(k,cells,boundary,node)
+    # Nearly every cavity is star-shaped: look before listing.
+    sound=true
+    for i in eachindex(boundary)
+        orientation(k,boundary[i][1],k.points[node])<=0 && (sound=false;break)
+    end
+    sound && return true
     negatives=[i for i in eachindex(boundary) if orientation(k,boundary[i][1],k.points[node])<=0]
-    isempty(negatives) && return true
     containing=findfirst(t->all(s->orientation(k,face(k,t,s),k.points[node])>=0,1:4),cells)
     containing===nothing && return false
     root=cells[containing]

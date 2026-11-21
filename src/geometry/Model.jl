@@ -21,6 +21,7 @@ import ..TransfiniteTriangle
 import ..OrderedMatching
 import ..WeightedMatching
 
+using ..MeshTypes: _tet_tables_begin!, _tet_tables_end!
 using ..MeshTypes: Mesh, validate, nnodes, nsegs, ntris, ntets, boundary_faces,
                    triangle_area, tet_signed_volume, tet_volume
 using ..Elements: ElementBlock, MixedElementBlock, MixedEntity,
@@ -10973,6 +10974,9 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
     empty!(protected_faces); empty!(protected_edges)
     births=_return_volume_production ?
         _ModelNativeVolumeBirths(_mesh_node_high_water,_mesh_element_high_water) : nothing
+    # One Region asks for the face table and the topology certificate of each
+    # of its few successive complexes many times; keep them while it is meshed.
+    tables_began=_tet_tables_begin!()
     try
         mesh=_mesh_model_volume(m,tag;size_field=size_field,
                                   _extrude_scope=_extrude_scope,
@@ -10986,6 +10990,7 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
             (mesh isa Union{_ModelTransfiniteVolumeProduction,_ModelNativeHybridVolumeProduction} ? mesh :
              _model_volume_geometry_production(mesh,births,"mesh_model_volume")) : mesh
     finally
+        _tet_tables_end!(tables_began)
         empty!(protected_faces); empty!(protected_edges)
     end
 end
@@ -11504,10 +11509,13 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         mapping=_model_periodic_surface_nodes(m,mesh,constraint)
         _model_mapping_matches(m,mesh,constraint,mapping,caller;exact=false)
     end
-    tet_edges=_tet_edge_set(mesh)
+    # Both tables below describe every edge and every boundary face of the
+    # finished Region and are read only for a Surface that carries nested
+    # points or curves: built on first use, not for every Region.
+    tet_edges=nothing
     point_nodes=Dict{Int,Int32}()
     curve_entries=Dict{Int,Vector{Tuple{Float64,Int}}}()
-    final_boundary_faces=Set(first(boundary_faces(mesh.tets)))
+    final_boundary_faces=nothing
     sheet_targets=Dict{Int,Vector{NTuple{3,NTuple{3,Float64}}}}()
     for (sheet,a,b,c) in sheets
         push!(get!(sheet_targets,sheet,NTuple{3,NTuple{3,Float64}}[]),
@@ -11517,6 +11525,9 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         nested_points=surface_embedded_points[surface_tag]
         nested_curves=surface_embedded_curves[surface_tag]
         isempty(nested_points) && isempty(nested_curves) && continue
+        tet_edges===nothing && (tet_edges=_tet_edge_set(mesh))
+        final_boundary_faces===nothing &&
+            (final_boundary_faces=Set(first(boundary_faces(mesh.tets))))
         faces=if surface_tag in boundary_surface_set
             _model_projection_boundary_surface_faces!(
                 Set{NTuple{3,Int32}}(),final_boundary_faces,

@@ -639,9 +639,97 @@ function _tet_topology(tets::AbstractMatrix{<:Integer};
     # A valid complex is certified by the global tables below; anything they
     # do not accept goes through the vertex-by-vertex audit, which decides
     # and names the defect.
-    tets isa Matrix{Int32} && _tet_topology_accepts(tets, pinch_link_chi) &&
-        return (true, "ok")
+    if tets isa Matrix{Int32}
+        tables = isempty(pinch_link_chi) ? _tet_tables() : nothing
+        if tables === nothing
+            _tet_topology_accepts(tets, pinch_link_chi) && return (true, "ok")
+        else
+            # The certificate reads the connectivity only, so a complex that
+            # passed it is not certified again while its columns are the same.
+            stamp = (size(tets, 2), _tet_content_key(tets))
+            stamp in tables.certified && return (true, "ok")
+            if _tet_topology_accepts(tets, pinch_link_chi)
+                length(tables.certified) >= 4 && popfirst!(tables.certified)
+                push!(tables.certified, stamp)
+                return (true, "ok")
+            end
+        end
+    end
     return _tet_topology_audit(tets; pinch_link_chi=pinch_link_chi)
+end
+
+# ── Tables of one tetrahedron complex, built once ────────────────────────────
+# Meshing a Volume asks the same questions of the same complex again and again:
+# the initial fill, the boundary write-back, the constraint certificate, the
+# insertion's entry and exit checks, the optimizer and the final validation
+# each wanted the sorted table of all faces (twelve tables for one Region) and
+# five of them ran the whole topology certificate. Nothing links those callers
+# but the complex itself, so the tables are kept by what they describe: a
+# fingerprint of every entry of the connectivity. A caller that changed the
+# complex, in place or not, has another fingerprint and gets its own tables.
+# The memo lives in the task for the duration of one Volume and is gone with it.
+mutable struct _TetFaceTable
+    columns::Int
+    key::NTuple{2,UInt64}
+    faces::Vector{NTuple{3,Int32}}
+end
+
+mutable struct _TetTables
+    first::_TetFaceTable
+    second::_TetFaceTable
+    replace_first::Bool
+    certified::Vector{Tuple{Int,NTuple{2,UInt64}}}
+end
+
+const _TET_TABLES_KEY = :tessella_tet_tables
+
+_TetTables() = _TetTables(_TetFaceTable(-1, (UInt64(0), UInt64(0)), NTuple{3,Int32}[]),
+                          _TetFaceTable(-1, (UInt64(0), UInt64(0)), NTuple{3,Int32}[]),
+                          true, Tuple{Int,NTuple{2,UInt64}}[])
+
+# Begin keeping tables in this task; `true` when this call began it and must end it.
+function _tet_tables_begin!()
+    storage = task_local_storage()
+    haskey(storage, _TET_TABLES_KEY) && return false
+    storage[_TET_TABLES_KEY] = _TetTables()
+    return true
+end
+
+function _tet_tables_end!(began::Bool)
+    began && delete!(task_local_storage(), _TET_TABLES_KEY)
+    return nothing
+end
+
+function _tet_tables()
+    tables = get(task_local_storage(), _TET_TABLES_KEY, nothing)
+    return tables isa _TetTables ? tables : nothing
+end
+
+# Two independent 64-bit fingerprints of every entry, in order. Unlike `hash`
+# of an array, which samples a large one, no entry is skipped.
+function _tet_content_key(tets::Matrix{Int32})
+    first = 0xcbf29ce484222325; second = 0x9e3779b97f4a7c15
+    @inbounds for index in eachindex(tets)
+        word = UInt64(reinterpret(UInt32, tets[index]))
+        first = (first ⊻ word) * 0x00000100000001b3
+        second = (second + word) * 0xff51afd7ed558ccd
+        second ⊻= second >> 31
+    end
+    return (first, second)
+end
+
+# The kept face table of `tets`, built by `build` when no kept table is of
+# this complex. The table is shared with every later caller: read it only.
+function _tet_tables_faces!(build, tables::_TetTables, tets::Matrix{Int32})
+    columns = size(tets, 2); key = _tet_content_key(tets)
+    for table in (tables.first, tables.second)
+        table.columns == columns && table.key == key && return table.faces
+    end
+    faces = build(tets)::Vector{NTuple{3,Int32}}
+    table = tables.replace_first ? tables.first : tables.second
+    tables.replace_first = !tables.replace_first
+    table.columns = columns; table.key = key; table.faces = faces
+    return faces
 end
 
 # Sort `key[lo:hi]` ascending and carry `who` along.
