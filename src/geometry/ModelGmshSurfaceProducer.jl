@@ -566,7 +566,8 @@ function _gmsh_native_surface_export(T,inside,numbers,source::_ModelSurfaceSourc
     end
     for triangle in order
         nodes=Mesh2D._gmsh_surface_triangle_nodes(T,triangle,trace)
-        used[collect(nodes)].=true;push!(cells,nodes)
+        used[nodes[1]]=true;used[nodes[2]]=true;used[nodes[3]]=true
+        push!(cells,nodes)
     end
     rows=Int32.(findall(used));mapping=zeros(Int32,T.nreal)
     mapping[rows]=Int32.(1:length(rows))

@@ -120,10 +120,34 @@ function _model_algorithm_callback(callback,dimension,tag,x,y,z,value,caller)
     return _apply_size_callback(callback,dimension,tag,x,y,z,value,caller)
 end
 
+# CTX::lc, Min/Max and the factor that `BGM_MeshSize` applies to a raw size.
+function _model_algorithm_bounded_size(background::_ModelAlgorithmBackgroundSize,
+                                       raw::Float64)
+    options=background.options
+    value=raw<options.ctx_lc ? raw : options.ctx_lc
+    value=max(value,options.lc_min)
+    value=min(value,options.lc_max)
+    if value<=0
+        _model_mesh_error(options,
+            "Wrong mesh element size lc = $value on entity ($(background.dimension),$(background.tag))")
+        value=options.ctx_lc
+    end
+    return value*options.lc_factor
+end
+
 function (background::_ModelAlgorithmBackgroundSize)(x,y,z)
     m=background.model
     options=background.options
     dimension=background.dimension;tag=background.tag
+    # Without a field, a callback or curvature sizing the raw size is the
+    # constant maximum. The general path below reads the field and the
+    # callback through untyped slots, so its running value is boxed at every
+    # step: four heap objects per evaluated point for a constant.
+    if options.inner_field===nothing && background.field===nothing &&
+            options.callback===nothing &&
+            !(dimension==2 && options.from_curvature>0)
+        return _model_algorithm_bounded_size(background,GMSH_MAX_SIZE)
+    end
     entity=(dimension,tag)
     # Raw background comes before the callback; CTX::lc, Min/Max and factors
     # are applied after it by BGM_MeshSize. A callback may enlarge the raw

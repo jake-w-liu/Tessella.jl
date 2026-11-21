@@ -89,11 +89,20 @@ end
     center,_=_gmsh_circumcenter_metric(pa,pb,pc,metric)
     return center
 end
+# The three node rows in ascending order: the key of `_gmsh_triangle_key`
+# for a cell that is not stored yet, without sorting a temporary vector.
+@inline function _gmsh_sorted_key(a::Int32,b::Int32,c::Int32)
+    a>b && ((a,b)=(b,a))
+    b>c && ((b,c)=(c,b))
+    a>b && ((a,b)=(b,a))
+    return (a,b,c)
+end
+@inline _gmsh_sorted_key(a,b,c)=_gmsh_sorted_key(Int32(a),Int32(b),Int32(c))
 function _gmsh_surface_trace_children!(trace,T,cavity,boundary,vid,gsizes,lc1,bg)
     trace===nothing && return nothing
     length(cavity)>1 && length(boundary)==length(cavity)+2 || return nothing
     for (a,b,_) in boundary
-        nodes=(b,a,vid);key=Tuple(sort!(collect(nodes)))
+        nodes=(b,a,vid);key=_gmsh_sorted_key(b,a,vid)
         trace.triangles[key]=nodes
         trace.elements[key]=_gmsh_surface_trace_next_element!(trace)
         lc=(gsizes.vsize[b]+gsizes.vsize[a]+lc1)*(1.0/3.0)

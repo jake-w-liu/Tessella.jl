@@ -177,7 +177,10 @@ function _gmsh_poly_walk(p,f,x,y)
     throw(ArgumentError("native initial mesh: face walk did not terminate"))
 end
 
-function _gmsh_poly_split!(p,f,x,y,label)
+# `stack` and `touched` are scratch the caller keeps across splits: the work
+# stack, and per half-edge the vertex whose insertion last popped it.
+function _gmsh_poly_split!(p,f,x,y,label,stack::Vector{Int32}=Int32[],
+                           touched::Vector{Int32}=Int32[])
     v=_gmsh_poly_vertex!(p,x,y,label)
     h0=p.face_edge[f];h1=p.next[h0];h2=p.next[h1]
     v0=p.origin[h0];v1=p.origin[h1];v2=p.origin[h2]
@@ -191,16 +194,25 @@ function _gmsh_poly_split!(p,f,x,y,label)
     _gmsh_poly_create_face!(p,f,v0,v1,v,h0,s1,r0)
     _gmsh_poly_create_face!(p,f1,v1,v2,v,h1,s2,r1)
     _gmsh_poly_create_face!(p,f2,v2,v0,v,h2,s0,r2)
-    stack=Int32[h0,h1,h2];touched=Set{Int32}()
+    # The half-edges already popped for this vertex are stamped with the
+    # vertex itself (one fresh number per split), in place of a hash set and a
+    # stack allocated for every inserted vertex.
+    stamped=length(touched)
+    resize!(touched,length(p.origin))
+    for h in stamped+1:length(touched)
+        touched[h]=0
+    end
+    empty!(stack);push!(stack,h0,h1,h2)
+    seen(h)=h!=0 && touched[h]==v
     while !isempty(stack)
-        h=pop!(stack);push!(touched,h)
+        h=pop!(stack);touched[h]=v
         _gmsh_poly_delaunay(p,h) || continue
         _gmsh_poly_swap!(p,h)
         for k in (h,p.opposite[h])
             k==0 && continue
             b=p.next[k];c=p.next[b]
-            !(b in touched) && !(p.opposite[b] in touched) && push!(stack,b)
-            !(c in touched) && !(p.opposite[c] in touched) && push!(stack,c)
+            !seen(b) && !seen(p.opposite[b]) && push!(stack,b)
+            !seen(c) && !seen(p.opposite[c]) && push!(stack,c)
         end
     end
     return v
@@ -313,10 +325,22 @@ function _gmsh_poly_initial(xs,ys,segments,insertion_order;vertex_labels=1:lengt
     all(isfinite,(xmin,xmax,ymin,ymax)) && xmin<xmax && ymin<ymax ||
         throw(ArgumentError("native initial mesh: invalid enclosing rectangle"))
     p=_gmsh_poly_rectangle(xmin,xmax,ymin,ymax);rows=zeros(Int32,n);f=Int32(1)
+    # Every inserted vertex adds one vertex, six half-edges and two faces to
+    # the four-vertex rectangle: reserve them once instead of regrowing
+    # twelve arrays as the vertices arrive.
+    for array in (p.x,p.y,p.vertex_edge,p.vertex_label)
+        sizehint!(array,n+4)
+    end
+    stack=Int32[];touched=Int32[]
+    for array in (p.origin,p.face,p.previous,p.next,p.opposite,p.edge_data,touched)
+        sizehint!(array,6n+12)
+    end
+    sizehint!(p.face_edge,2n+4);sizehint!(p.face_data,2n+4)
     for row in insertion_order
         f=_gmsh_poly_walk(p,f,xs[row],ys[row])
         f!=0 || throw(ArgumentError("native initial mesh: source vertex lies outside its rectangle"))
-        rows[row]=_gmsh_poly_split!(p,f,xs[row],ys[row],vertex_labels[row])
+        rows[row]=_gmsh_poly_split!(p,f,xs[row],ys[row],vertex_labels[row],
+            stack,touched)
     end
     for (a,b,owner) in segments
         1<=a<=n && 1<=b<=n && a!=b && owner>0 || throw(ArgumentError("native initial mesh: invalid source edge"))

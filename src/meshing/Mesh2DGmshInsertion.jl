@@ -27,8 +27,10 @@ end
 # CDT constructor retains its own cavity traversal.
 function _gmsh_delaunay_cavity(T::Triangulation,t0,vid,trace=nothing)
     root=Int32(t0)
+    # The cavity is its own visited list: every visited cell is a member, and
+    # a cavity has a handful of cells, so a hash set per insertion cost more
+    # than the search it saved.
     cavity=Int32[root]
-    visited=Set{Int32}((root,))
     boundary=Tuple{Int32,Int32,Int32}[]
     stack=Tuple{Int32,Int8}[(root,Int8(1))]
     while !isempty(stack)
@@ -43,9 +45,8 @@ function _gmsh_delaunay_cavity(T::Triangulation,t0,vid,trace=nothing)
         a,b=_edge(T,triangle,slot)
         if neighbour==0 || _constrained_edge(T,_skey(a,b))
             push!(boundary,(a,b,neighbour))
-        elseif !(neighbour in visited)
+        elseif !(neighbour in cavity)
             if _gmsh_in_circumcircle(T,neighbour,vid,trace)
-                push!(visited,neighbour)
                 push!(cavity,neighbour)
                 push!(stack,(neighbour,Int8(1)))
             else
