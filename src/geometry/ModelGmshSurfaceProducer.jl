@@ -873,7 +873,9 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
         lift=_GmshNativeSurfaceLift(frame)
         trace_metric=let raw=options.inner_field===nothing ? size_field :
                             options.inner_field
-            if raw isa AbstractAnisoField
+            # This arm only serves algorithms 5 and 6, which read a tensor
+            # field through its scalar operator upstream (BGM_MeshSize).
+            if raw isa AbstractAnisoField && !(algorithm in _SCALAR_BACKGROUND_ALGORITHMS)
                 lc_min=isnan(options.lc_min) ? 0.0 : options.lc_min
                 lc_max=isnan(options.lc_max) ? GMSH_MAX_SIZE : options.lc_max
                 lo=min(lc_min,lc_max)

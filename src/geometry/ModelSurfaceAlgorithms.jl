@@ -102,6 +102,10 @@ function _normal_surface_mesh_algorithm(m::GeoModel,t::Int,caller;metric::Bool=f
     return algorithm
 end
 
+# 2-D algorithms whose upstream insertion reads the background field as a
+# scalar (BGM_MeshSize) even when the field is anisotropic.
+const _SCALAR_BACKGROUND_ALGORITHMS=(1,5,6)
+
 # Tensor background arm for the ordinary Delaunay/Frontal refinement: when
 # the resolved size selection is an `AbstractAnisoField` the insertion kernel
 # receives a metric-only carrier, so every cavity in-circle test,
@@ -113,9 +117,14 @@ end
 # through `_gmsh_metric_floor`; `vbgm` itself stays scalarized to the
 # strongest direction for the vertex-size records. A scalar or absent
 # selection returns `nothing`, leaving the Euclidean arm unchanged.
-function _surface_metric_trace_carrier(m,options,size_field,frame,T,t,caller)
+function _surface_metric_trace_carrier(m,options,size_field,frame,T,t,caller;
+                                       algorithm::Int=0)
     raw=options.inner_field===nothing ? size_field : options.inner_field
     raw isa AbstractAnisoField || return nothing
+    # Gmsh's MeshAdapt, Delaunay and Frontal-Delaunay read a tensor field
+    # through BGM_MeshSize, i.e. its scalar operator; only BAMG and MMG use
+    # BGM_MeshMetric. Those algorithms get no tensor carrier.
+    algorithm in _SCALAR_BACKGROUND_ALGORITHMS && return nothing
     lc_min=isnan(options.lc_min) ? 0.0 : options.lc_min
     lc_max=isnan(options.lc_max) ? GMSH_MAX_SIZE : options.lc_max
     lo=min(lc_min,lc_max)

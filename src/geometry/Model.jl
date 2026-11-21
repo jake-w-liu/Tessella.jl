@@ -7931,7 +7931,7 @@ function _mesh_model_surface_unstructured_once(m::GeoModel,t::Int,forced,min_ang
             _ModelAlgorithmBackgroundSize(m,2,t,options,size_field,caller))
         # A tensor size selection arms Delaunay/Frontal with the per-cell
         # field metric; a scalar or absent field leaves the trace nothing.
-        trace=_surface_metric_trace_carrier(m,options,size_field,frame,T,t,caller)
+        trace=_surface_metric_trace_carrier(m,options,size_field,frame,T,t,caller;algorithm)
         _surface_algorithm_refine!(m,T,xs,ys,segs,markers,embedded,index,
                                    bgm_size,algorithm,t,caller;
                                    _gmsh_surface_trace=trace)
