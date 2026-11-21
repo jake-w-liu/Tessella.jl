@@ -9,6 +9,13 @@ mutable struct _ModelNURBSProjectionCache
     swapped::Bool
     global_rational::Bool
     coefficients::Vector{Vector{Float64}}
+    # Work space of one evaluation: the value and derivative rows in the
+    # longer-degree parameter, the homogeneous derivatives `(a,b)` and the
+    # Cartesian ones. An evaluation used to build each of them as new lists
+    # and dictionaries, 5.5 kB at a time.
+    rows::Vector{Float64}
+    homogeneous::Vector{Float64}
+    cartesian::Vector{NTuple{3,Float64}}
 end
 
 function _ModelNURBSProjectionCache(patch::_ModelNURBSSurface)
@@ -16,7 +23,8 @@ function _ModelNURBSProjectionCache(patch::_ModelNURBSSurface)
     first_weight=weights[1,1]
     rational=any(weight->weight!=first_weight,weights)
     return _ModelNURBSProjectionCache(patch,(0,0),(0.0,0.0),(0.0,0.0),
-        false,rational,Vector{Float64}[])
+        false,rational,Vector{Float64}[],Float64[],zeros(36),
+        fill((0.0,0.0,0.0),9))
 end
 
 function _model_nurbs_cache_bohm(poles::Vector{Vector{Float64}},degree::Int,
@@ -151,6 +159,11 @@ function _model_nurbs_cache_prepare!(cache::_ModelNURBSProjectionCache,u::Float6
     return cache
 end
 
+# Value and derivatives up to `order` at `(u,v)`, from the polynomial of the
+# current span. The arithmetic is `_model_nurbs_cache_polynomial`'s, operation
+# for operation (PLib's Horner scheme, which updates the second derivative
+# before the first and the value), in fixed work space instead of new lists:
+# the results are the same to the last bit.
 function _model_nurbs_cache_evaluate(cache::_ModelNURBSProjectionCache,
                                       u::Float64,v::Float64,order::Int)
     0<=order<=2 || throw(ArgumentError("NURBS projection cache: derivative order must be 0, 1 or 2"))
@@ -161,63 +174,102 @@ function _model_nurbs_cache_evaluate(cache::_ModelNURBSProjectionCache,
         ((u-cache.centers[1])*inverse[1],(v-cache.centers[2])*inverse[2])
     min_parameter,max_parameter=cache.swapped ? reverse(parameter) : parameter
     width=cache.global_rational ? 4 : 3
-    max_values=_model_nurbs_cache_polynomial(cache.coefficients,max_parameter,order)
+    coefficients=cache.coefficients
+    count=length(coefficients)
+    len=length(coefficients[1])
     min_degree=cache.swapped ? cache.patch.surface.degree_v : cache.patch.surface.degree_u
-    homogeneous=Dict{NTuple{2,Int},Vector{Float64}}()
-    for b in 0:order
-        pieces=Vector{Float64}[max_values[b+1][a*width+1:(a+1)*width] for a in 0:min_degree]
-        min_values=_model_nurbs_cache_polynomial(pieces,min_parameter,order-b)
-        for a in 0:order-b
-            homogeneous[a,b]=min_values[a+1]
+    rows=cache.rows
+    length(rows)<3len && resize!(rows,3len)
+    # Rows `k*len+1 : (k+1)*len` hold derivative `k` in the longer-degree
+    # parameter, each a list of `min_degree+1` coefficients of `width` numbers.
+    @inbounds begin
+        highest=coefficients[count]
+        for c in 1:len
+            rows[c]=highest[c]
         end
-    end
-    if order==0
-        point=homogeneous[0,0]
-        return cache.global_rational ?
-            (point[1]/point[4],point[2]/point[4],point[3]/point[4]) :
-            (point[1],point[2],point[3])
-    end
-    result=Dict{NTuple{2,Int},NTuple{3,Float64}}()
-    if cache.global_rational
-        inverse_weight=1.0/homogeneous[0,0][4]
-        # The homogeneous storage has min-axis derivatives within each
-        # max-axis row. BSplSLib::RationalDerivative visits those rows first;
-        # this preserves its subtraction order for mixed derivatives.
-        zero_h=(0.0,0.0,0.0,0.0)
-        for b in 0:order,a in 0:order
-            h=get(homogeneous,(a,b),zero_h)
-            value=Float64[h[1],h[2],h[3]]
-            for pp in 0:b-1,qq in 0:a
-                coefficient=binomial(b,pp)*binomial(a,qq)*get(homogeneous,(a-qq,b-pp),zero_h)[4]
-                prior=result[qq,pp]
-                for component in 1:3
-                    value[component]-=coefficient*prior[component]
-                end
+        for c in len+1:(order+1)*len
+            rows[c]=0.0
+        end
+        for row in count-1:-1:1
+            coefficient=coefficients[row]
+            for c in 1:len
+                order>=2 && (rows[2len+c]=rows[2len+c]*max_parameter+rows[len+c]*2.0)
+                order>=1 && (rows[len+c]=rows[len+c]*max_parameter+rows[c])
+                rows[c]=rows[c]*max_parameter+coefficient[c]
             end
-            for qq in 0:a-1
-                coefficient=binomial(a,qq)*homogeneous[a-qq,0][4]
-                prior=result[qq,b]
-                for component in 1:3
-                    value[component]-=coefficient*prior[component]
+        end
+        # Homogeneous derivative `(a,b)`, `a` in the shorter-degree parameter:
+        # four numbers at `((b*3+a)*4+1 : ...)`. Only `a+b <= order` is set.
+        homogeneous=cache.homogeneous
+        for b in 0:order
+            derivatives=order-b
+            base=b*len
+            for component in 1:width
+                value=rows[base+min_degree*width+component];first=0.0;second=0.0
+                for a in min_degree-1:-1:0
+                    derivatives>=2 && (second=second*min_parameter+first*2.0)
+                    derivatives>=1 && (first=first*min_parameter+value)
+                    value=value*min_parameter+rows[base+a*width+component]
                 end
+                homogeneous[(b*3)*4+component]=value
+                derivatives>=1 && (homogeneous[(b*3+1)*4+component]=first)
+                derivatives>=2 && (homogeneous[(b*3+2)*4+component]=second)
             end
-            result[a,b]=(value[1]*inverse_weight,value[2]*inverse_weight,value[3]*inverse_weight)
         end
-    else
-        for (key,value) in homogeneous
-            result[key]=(value[1],value[2],value[3])
+        if order==0
+            return cache.global_rational ?
+                (homogeneous[1]/homogeneous[4],homogeneous[2]/homogeneous[4],
+                 homogeneous[3]/homogeneous[4]) :
+                (homogeneous[1],homogeneous[2],homogeneous[3])
         end
+        # Cartesian derivative `(a,b)` at `b*3+a+1`.
+        cartesian=cache.cartesian
+        if cache.global_rational
+            inverse_weight=1.0/homogeneous[4]
+            # The homogeneous storage has min-axis derivatives within each
+            # max-axis row. BSplSLib::RationalDerivative visits those rows first;
+            # this preserves its subtraction order for mixed derivatives. A
+            # derivative of total order above `order` reads as zero.
+            for b in 0:order,a in 0:order
+                present=a+b<=order
+                at=(b*3+a)*4
+                x=present ? homogeneous[at+1] : 0.0
+                y=present ? homogeneous[at+2] : 0.0
+                z=present ? homogeneous[at+3] : 0.0
+                for pp in 0:b-1,qq in 0:a
+                    weight=(a-qq)+(b-pp)<=order ?
+                        homogeneous[((b-pp)*3+(a-qq))*4+4] : 0.0
+                    coefficient=binomial(b,pp)*binomial(a,qq)*weight
+                    prior=cartesian[pp*3+qq+1]
+                    x-=coefficient*prior[1];y-=coefficient*prior[2];z-=coefficient*prior[3]
+                end
+                for qq in 0:a-1
+                    coefficient=binomial(a,qq)*homogeneous[(a-qq)*4+4]
+                    prior=cartesian[b*3+qq+1]
+                    x-=coefficient*prior[1];y-=coefficient*prior[2];z-=coefficient*prior[3]
+                end
+                cartesian[b*3+a+1]=(x*inverse_weight,y*inverse_weight,z*inverse_weight)
+            end
+        else
+            for b in 0:order,a in 0:order-b
+                at=(b*3+a)*4
+                cartesian[b*3+a+1]=(homogeneous[at+1],homogeneous[at+2],homogeneous[at+3])
+            end
+        end
+        # `(1,0)` is the derivative in the shorter-degree parameter.
+        first_u,first_v=cache.swapped ? (cartesian[4],cartesian[2]) :
+                                        (cartesian[2],cartesian[4])
+        point=cartesian[1]
+        du=(first_u[1]*inverse[1],first_u[2]*inverse[1],first_u[3]*inverse[1])
+        dv=(first_v[1]*inverse[2],first_v[2]*inverse[2],first_v[3]*inverse[2])
+        order==1 && return (point,du,dv)
+        second_u,second_v=cache.swapped ? (cartesian[7],cartesian[3]) :
+                                          (cartesian[3],cartesian[7])
+        mixed=cartesian[5]
+        uu=inverse[1]*inverse[1];vv=inverse[2]*inverse[2];uv=inverse[1]*inverse[2]
+        duu=(second_u[1]*uu,second_u[2]*uu,second_u[3]*uu)
+        dvv=(second_v[1]*vv,second_v[2]*vv,second_v[3]*vv)
+        duv=(mixed[1]*uv,mixed[2]*uv,mixed[3]*uv)
+        return (point,du,dv,duu,dvv,duv)
     end
-    u_slot=cache.swapped ? (0,1) : (1,0)
-    v_slot=cache.swapped ? (1,0) : (0,1)
-    point=result[0,0]
-    du=ntuple(i->result[u_slot][i]*inverse[1],3)
-    dv=ntuple(i->result[v_slot][i]*inverse[2],3)
-    order==1 && return (point,du,dv)
-    uu_slot=cache.swapped ? (0,2) : (2,0)
-    vv_slot=cache.swapped ? (2,0) : (0,2)
-    duu=ntuple(i->result[uu_slot][i]*(inverse[1]*inverse[1]),3)
-    dvv=ntuple(i->result[vv_slot][i]*(inverse[2]*inverse[2]),3)
-    duv=ntuple(i->result[1,1][i]*(inverse[1]*inverse[2]),3)
-    return (point,du,dv,duu,dvv,duv)
 end

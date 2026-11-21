@@ -311,6 +311,7 @@ include("functional/fixtures.jl")
         "geometry/geo_exact_extrusion_parametrization_test.jl",
         "geometry/geo_t3_swept_parametrization_test.jl",
         "geometry/geo_swept_surface_fill_test.jl",
+        "geometry/nurbs_projection_grid_test.jl",
         "interfaces/api_occ_nurbs_periodic_patch_test.jl",
         "interfaces/api_occ_revolve_mixed_dimensions_test.jl",
         "geometry/model_high_order_arc_midpoint_test.jl",

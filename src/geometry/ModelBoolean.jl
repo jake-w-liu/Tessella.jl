@@ -3324,10 +3324,26 @@ end
 # grazes (g touches 0 without crossing) are not piercings.
 function _brep_edge_pierce_tensor(sg,crv,lo,hi,tol)
     mscale=1.0
+    smin=(Inf,Inf,Inf);smax=(-Inf,-Inf,-Inf)
     for c in sg.patch.surface.controls
         mscale=max(mscale,abs(c[1]),abs(c[2]),abs(c[3]))
+        smin=min.(smin,c);smax=max.(smax,c)
     end
     ftol=50tol*mscale
+    # A crossing is kept below only where the curve comes within `ftol` of
+    # the surface. A patch with positive weights lies in the box of its
+    # control points; when the curve's own box stays farther from it than
+    # that (twice, for the rounding of the boxes), no sample can lead to a
+    # kept crossing, and each sample is a projection onto the patch. Slicing
+    # a solid asks every edge against every face: most pairs end here.
+    box=_brep_curve_box(crv,lo,hi)
+    if box!==nothing && all(>(0.0),sg.patch.surface.weights)
+        cmin,cmax=box
+        margin=2ftol
+        (cmin[1]>smax[1]+margin || cmax[1]<smin[1]-margin ||
+         cmin[2]>smax[2]+margin || cmax[2]<smin[2]-margin ||
+         cmin[3]>smax[3]+margin || cmax[3]<smin[3]-margin) && return Float64[]
+    end
     function footlvl(t)
         P=_brep_curve_eval(crv,t)
         u,v,xyz=_model_nurbs_surface_project(sg,P)
@@ -3348,6 +3364,10 @@ function _brep_edge_pierce_tensor(sg,crv,lo,hi,tol)
         fa=ga
         for _ in 1:60
             m=(a+b)/2
+            # Once the bracket is two neighbouring numbers the midpoint is
+            # one of its ends and every further step repeats itself: the
+            # root below is the same, and each step is a projection.
+            (m==a || m==b) && break
             fm=footlvl(m)
             isfinite(fm) || break
             fm==0.0 && (a=b=m;break)
@@ -3358,6 +3378,31 @@ function _brep_edge_pierce_tensor(sg,crv,lo,hi,tol)
         isfinite(fr) && abs(fr)<=ftol && push!(out,r)
     end
     return out
+end
+
+# A box that holds the curve record over `[lo,hi]`, or `nothing` when none is
+# known: the end points of a segment (each coordinate is monotone along it),
+# a circle's center give or take its radius along each axis, the control
+# points of a B-spline with positive weights.
+function _brep_curve_box(crv,lo::Float64,hi::Float64)
+    if crv.kind===:line
+        a=_brep_curve_eval(crv,lo);b=_brep_curve_eval(crv,hi)
+        return (min.(a,b),max.(a,b))
+    elseif crv.kind===:circle
+        r=abs(crv.r)
+        reach=(r*(abs(crv.x[1])+abs(crv.y[1])),r*(abs(crv.x[2])+abs(crv.y[2])),
+               r*(abs(crv.x[3])+abs(crv.y[3])))
+        return (crv.c.-reach,crv.c.+reach)
+    elseif crv.kind===:bspline && crv.curve isa _ModelOCCNURBSCurve
+        curve=crv.curve.curve
+        all(>(0.0),curve.weights) || return nothing
+        lower=(Inf,Inf,Inf);upper=(-Inf,-Inf,-Inf)
+        for c in curve.controls
+            lower=min.(lower,c);upper=max.(upper,c)
+        end
+        return (lower,upper)
+    end
+    return nothing
 end
 
 # implicit level of an elementary surface record (~signed distance to the
