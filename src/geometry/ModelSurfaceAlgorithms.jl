@@ -708,7 +708,38 @@ struct _OCCSurfaceParamBackgroundSize{G}
     caller::String
 end
 
+# The size is read by the metric of every cavity test, so its type decides
+# whether the insertion kernel runs on unboxed numbers. The general
+# evaluation reads the field and the size callback through untyped slots and
+# its running value is boxed at every step (and with it every metric, radius
+# and in-circle result downstream: about 150 heap objects per triangle on a
+# sphere). Without a field, a callback or curvature sizing the raw size is
+# the constant maximum and needs neither the surface point nor a box.
 function (background::_OCCSurfaceParamBackgroundSize)(u,v)
+    options=background.options
+    if options.inner_field===nothing && background.field===nothing &&
+            options.callback===nothing && !(options.from_curvature>0)
+        return _occ_surface_bounded_size(background,GMSH_MAX_SIZE)
+    end
+    return Float64(_occ_surface_param_size(background,u,v))::Float64
+end
+
+# CTX::lc, Min/Max and the factor `BGM_MeshSize` applies to a raw size.
+function _occ_surface_bounded_size(background::_OCCSurfaceParamBackgroundSize,
+                                   raw::Float64)
+    options=background.options
+    value=raw<options.ctx_lc ? raw : options.ctx_lc
+    value=max(value,options.lc_min)
+    value=min(value,options.lc_max)
+    if value<=0
+        _model_mesh_error(options,
+            "Wrong mesh element size lc = $value on entity (2,$(background.tag))")
+        value=options.ctx_lc
+    end
+    return value*options.lc_factor
+end
+
+function _occ_surface_param_size(background::_OCCSurfaceParamBackgroundSize,u,v)
     options=background.options
     tag=background.tag
     x,y,z=_occ_surface_point(background.geometry,Float64(u),Float64(v))

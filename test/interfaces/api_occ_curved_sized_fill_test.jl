@@ -189,5 +189,34 @@ end
         @test M._occ_curved_surface_fan_flips!(uv,tris,world,trues(4),geometry,none)==0
         @test tris==cells()
     end
+
+    @testset "background size of a curved face is a plain number" begin
+        # The size is read inside the metric of every cavity test. Its general
+        # evaluation goes through untyped field and callback slots, which
+        # boxed the value at every step and every quantity computed from it
+        # (about 150 of the 240 heap objects per triangle of a sphere mesh).
+        # Without a field, a callback or curvature sizing it is a constant
+        # and takes a typed path; both paths must agree.
+        M=Tessella.Model
+        A.initialize()
+        try
+            A.model.occ.add_sphere(0,0,0,1);A.model.occ.synchronize()
+            A.option("Mesh.MeshSizeMin",0.0);A.option("Mesh.MeshSizeMax",0.2)
+            m=A.CURRENT[]
+            options=M._model_algorithm_size_options(m,nothing,"test")
+            size=M._OCCSurfaceParamBackgroundSize(m,1,m.surface_geometry[1],
+                options,nothing,"test")
+            for (u,v) in ((0.3,0.2),(4.0,-1.1),(6.0,1.5))
+                @test size(u,v)===M._occ_surface_param_size(size,u,v)
+            end
+            @test size(0.3,0.2) isa Float64
+            if Base.JLOptions().compile_enabled==1
+                size(1.0,0.5)
+                @test (@allocated size(1.0,0.5))==0
+            end
+        finally
+            A.finalize()
+        end
+    end
 end
 end
