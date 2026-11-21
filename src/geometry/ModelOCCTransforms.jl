@@ -382,14 +382,21 @@ function _model_occ_affine_prepare!(m::GeoModel,kernel,union,dim_tags,
             (haskey(g,:primitive) || haskey(g,:sector)) && (curved=true)
         end
     end
-    # a closure of planes that carry no parameter bounds cannot be turned
-    # into patches: it keeps its plane records, as before
+    # A closure of planes is turned into patches when they carry their
+    # parameter bounds and their edges are lines. With any other edge (a
+    # hyperbola read from a BREP file keeps its own parameter, which the
+    # conversion would replace) it keeps its plane records, as before.
     curved || all(id->begin
             shape=kernel.shapes[id]
-            shape.dimension==2 || return true
-            rec=shape.geometry.geometry
-            rec isa NamedTuple && (haskey(rec,:patch) ||
-                (get(rec,:occ,nothing)===:plane && haskey(rec,:uvb)))
+            rec=shape.dimension in (1,2) ? shape.geometry.geometry : nothing
+            if shape.dimension==2
+                rec isa NamedTuple && (haskey(rec,:patch) ||
+                    (get(rec,:occ,nothing)===:plane && haskey(rec,:uvb)))
+            elseif shape.dimension==1
+                rec isa NamedTuple && get(rec,:occ,nothing)===:line
+            else
+                true
+            end
         end,union) || return nothing
     _model_occ_convert_to_nurbs!(m,dim_tags,caller)
     # The conversion keeps each quadric's analytic record beside its patch
