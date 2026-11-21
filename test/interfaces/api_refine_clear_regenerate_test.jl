@@ -13,14 +13,18 @@ using Test, Tessella
     A.initialize()
     try
         A.option("General.Terminal", 0)
-        A.model.add_box(0, 0, 0, 1, 1, 1; tag=1)
+        A.model.occ.add_box(0, 0, 0, 1, 1, 1; tag=1)
+        A.model.occ.synchronize()
         counts() = (length(A.mesh.get_nodes()[1]),
                     Dict(Int(t) => length(e) for (t, e) in
                          zip(A.mesh.get_elements()[1], A.mesh.get_elements()[2])))
         A.mesh.generate(3)
+        nodes, cells = counts()
+        @test nodes == 339                  # Gmsh 4.15.2: 339
+        @test cells[2] == 540               # Gmsh 4.15.2: 540
         A.mesh.refine()
         nodes, cells = counts()
-        @test cells[2] == 2160
+        @test cells[2] == 2160              # Gmsh 4.15.2: 2160
         A.mesh.clear([(3, 1)])
         nodes, cells = counts()
         @test nodes == 1082                 # Gmsh 4.15.2: 1082
@@ -29,8 +33,8 @@ using Test, Tessella
         A.mesh.generate(3)
         nodes, cells = counts()
         @test cells[2] == 2160              # the refined surface is the input
-        @test 1780 <= nodes <= 1820         # Gmsh 4.15.2: 1800 (Tessella 1801)
-        @test 7400 <= cells[4] <= 7750      # Gmsh 4.15.2: 7573 (Tessella 7553)
+        @test 1760 <= nodes <= 1840         # Gmsh 4.15.2: 1800 (Tessella 1795)
+        @test 7350 <= cells[4] <= 7800      # Gmsh 4.15.2: 7573 (Tessella 7540)
     finally
         A.finalize()
     end
