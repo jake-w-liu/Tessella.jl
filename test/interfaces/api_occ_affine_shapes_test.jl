@@ -38,8 +38,9 @@ const A=Tessella.API
         # dilated cone was meshed with half of Gmsh's triangles.
         @test all(A.model.get_type(2,t)=="BSpline surface"
                   for (_,t) in A.model.get_entities(2))
-        areas=sort!([occ.get_mass(2,t) for (_,t) in A.model.get_entities(2)])
-        @test areas[1:2]≈[π/2,π/2] rtol=1e-10
+        # Surfaces 2 and 3 are the caps (the wall, Surface 1, is a rational
+        # patch whose quadrature takes 18 s when interpreted)
+        @test [occ.get_mass(2,t) for t in (2,3)]≈[π/2,π/2] rtol=1e-10
         if Base.JLOptions().compile_enabled==1
             @test occ.get_mass(3,rod)≈π/2 rtol=1e-10
         end
