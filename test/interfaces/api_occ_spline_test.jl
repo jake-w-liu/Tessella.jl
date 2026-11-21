@@ -220,7 +220,11 @@ end
     @test zmax≈5.0 atol=2e-7
     A.model.occ.synchronize()
     @test A.model.get_type(1,spline)=="BSpline"
+    # The synchronized model reports the OCC box, widened by 1e-7 on each
+    # side: Gmsh 4.15.2 returns 4.9999998999999997 and 5.0000001000000003
+    # from model.getBoundingBox for this curve.
     xmin,ymin,zmin,xmax,ymax,zmax=A.model.get_bounding_box(1,spline)
-    @test zmin≈5.0 atol=1e-12
-    @test zmax≈5.0 atol=1e-12
+    @test zmin==4.9999999
+    @test zmax==5.0000001
+    @test (xmin,ymin,xmax,ymax)==(-1e-7,-1e-7,2.0000001,1e-7)
 end

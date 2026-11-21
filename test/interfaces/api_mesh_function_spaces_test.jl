@@ -192,8 +192,6 @@ end
                 4,"HcurlLegendre0",0),
             ()->_MESH_FUNCTION_API.mesh.get_keys_for_element(
                 3,"HcurlLegendre0",1),
-            ()->_MESH_FUNCTION_API.mesh.get_keys_for_element(
-                0,"HcurlLegendre0"),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
                 4,"HcurlLegendre0",0),
             ()->_MESH_FUNCTION_API.mesh.get_basis_functions_orientation(
@@ -213,6 +211,13 @@ end
             @test _MESH_FUNCTION_API.mesh.get_all_edges()==before
             @test mesh_crc(_MESH_FUNCTION_API.mesh.get())==baseline
         end
+        # An element tag that does not exist is Gmsh's own diagnostic, raised
+        # under the API default General.AbortOnError=2: Gmsh 4.15.2 fails
+        # getKeysForElement(0,"HcurlLegendre0") with "Unknown element 0".
+        @test_throws ErrorException("Unknown element 0") _MESH_FUNCTION_API.mesh.get_keys_for_element(
+            0,"HcurlLegendre0")
+        @test _MESH_FUNCTION_API.mesh.get_all_edges()==before
+        @test mesh_crc(_MESH_FUNCTION_API.mesh.get())==baseline
 
         # A single-element query creates only that element's edges. Calling the
         # triangle afterward reuses the same global identifiers.

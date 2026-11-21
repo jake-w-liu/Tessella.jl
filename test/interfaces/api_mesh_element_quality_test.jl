@@ -62,8 +62,6 @@ end
             ()->_MESH_QUALITY_API.mesh.get_element_qualities(1),
             ()->_MESH_QUALITY_API.mesh.get_element_qualities(Bool[true]),
             ()->_MESH_QUALITY_API.mesh.get_element_qualities([1.0]),
-            ()->_MESH_QUALITY_API.mesh.get_element_qualities(UInt64[0]),
-            ()->_MESH_QUALITY_API.mesh.get_element_qualities(UInt64[4]),
             ()->_MESH_QUALITY_API.mesh.get_element_qualities(
                 UInt64[2,1],"minIsotropy"),
             ()->_MESH_QUALITY_API.mesh.get_element_qualities(
@@ -78,6 +76,14 @@ end
                 UInt64[2],"volume",0,0),
         )
             @test_throws ArgumentError call()
+            @test mesh_crc(_MESH_QUALITY_API.mesh.get())==fixture_crc
+        end
+        # An element tag that does not exist is Gmsh's own diagnostic, raised
+        # under the API default General.AbortOnError=2: Gmsh 4.15.2 fails
+        # getElementQualities([0]) with "Unknown element 0".
+        for unknown in (0,4)
+            @test_throws ErrorException("Unknown element $unknown") _MESH_QUALITY_API.mesh.get_element_qualities(
+                UInt64[unknown])
             @test mesh_crc(_MESH_QUALITY_API.mesh.get())==fixture_crc
         end
 

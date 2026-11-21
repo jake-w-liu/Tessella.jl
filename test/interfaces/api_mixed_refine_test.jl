@@ -121,7 +121,9 @@ _api_refine_counts(mesh)=Dict(Int(b.msh)=>size(b.nodes,2) for b in mesh.blocks)
             api.mesh.generate(2)
             refined=api.mesh.refine()
             @test nnodes(refined)==25
-            @test _api_refine_counts(refined)==Dict(3=>16)
+            # The cache carries the curve and point elements too, as after
+            # Gmsh 4.15.2's refine: 16 quadrangles, 16 lines, 4 points.
+            @test _api_refine_counts(refined)==Dict(3=>16,1=>16,15=>4)
             @test length(api.mesh.get_nodes(2,1)[1])==9
             @test all(curve->length(api.mesh.get_nodes(1,curve)[1])==3,1:4)
             @test length(api.mesh.get_nodes(2,1,true)[1])==25
@@ -220,7 +222,11 @@ _api_refine_counts(mesh)=Dict(Int(b.msh)=>size(b.nodes,2) for b in mesh.blocks)
             end
         end
     end
-    @testset "curved CAD placement fails before cache mutation" begin
+    @testset "curved CAD placement puts new nodes on the curves" begin
+        # Refinement used to reject curved boundaries ("quadratic CAD
+        # placement"). It now places the new nodes on the CAD like Gmsh
+        # 4.15.2, whose refine of this model gives 10 nodes, 4 quadrangles,
+        # 8 lines and 5 points, with the arc midpoints quoted below.
         source="""
         Point(1)={1,0,0,1};Point(2)={2,0,0,1};Point(3)={0,2,0,1};
         Point(4)={0,1,0,1};Point(5)={0,0,0,1};
@@ -235,11 +241,21 @@ _api_refine_counts(mesh)=Dict(Int(b.msh)=>size(b.nodes,2) for b in mesh.blocks)
                 api.open_geo!(path)
             end
             api.mesh.generate(2)
-            before=api.LAST_MESH[];class=api.LAST_MESH_CLASS[]
-            @test_throws r"quadratic CAD placement.*Curve" api.mesh.refine()
-            @test api.LAST_MESH[]===before
-            @test api.LAST_MESH_CLASS[]===class
-            @test nnodes(before)==4
+            before=api.LAST_MESH[]
+            # Four corners and the arcs' centre Point(5), which has its own node.
+            @test nnodes(before)==5
+            refined=api.mesh.refine()
+            @test nnodes(refined)==10
+            @test _api_refine_counts(refined)==Dict(3=>4,1=>8,15=>5)
+            @test validate(refined).ok
+            # Every node other than the centre lies in the annulus, and the
+            # two arc midpoints are on their circles at Gmsh's coordinates.
+            radii=[hypot(refined.coords[1,j],refined.coords[2,j]) for j in 1:nnodes(refined)]
+            @test count(iszero,radii)==1
+            @test all(r->r==0 || 1-1e-12<=r<=2+1e-12,radii)
+            points=Set(Tuple(refined.coords[:,j]) for j in 1:nnodes(refined))
+            @test (1.4142135587089986,1.4142135660371915,0.0) in points
+            @test (0.70710678301859575,0.70710677935449928,0.0) in points
         finally
             api.finalize()
         end
@@ -262,8 +278,10 @@ _api_refine_counts(mesh)=Dict(Int(b.msh)=>size(b.nodes,2) for b in mesh.blocks)
             end
             api.mesh.generate(2)
             refined=api.mesh.refine()
-            @test nnodes(refined)==9
-            @test _api_refine_counts(refined)==Dict(3=>4)
+            # Gmsh 4.15.2 meshes and refines the unrelated Circle as well:
+            # 15 nodes, 4 quadrangles, 12 lines, 7 points.
+            @test nnodes(refined)==15
+            @test _api_refine_counts(refined)==Dict(3=>4,1=>12,15=>7)
             @test validate(refined).ok
         finally
             api.finalize()
@@ -285,9 +303,13 @@ _api_refine_counts(mesh)=Dict(Int(b.msh)=>size(b.nodes,2) for b in mesh.blocks)
                 api.open_geo!(path)
             end
             api.mesh.generate(3)
-            refined=api.mesh.refine(max_nodes=45,max_cells=16)
+            # The cell budget counts every element of the cache, as Gmsh
+            # 4.15.2 holds after refine: 16 hexahedra, 40 quadrangles,
+            # 32 lines and 8 points (96 elements on 45 nodes).
+            @test_throws ArgumentError api.mesh.refine(max_nodes=45,max_cells=95)
+            refined=api.mesh.refine(max_nodes=45,max_cells=96)
             @test nnodes(refined)==45
-            @test _api_refine_counts(refined)==Dict(5=>16)
+            @test _api_refine_counts(refined)==Dict(5=>16,3=>40,1=>32,15=>8)
             @test _api_refine_volume(refined)≈1
             @test validate(refined).ok
         finally

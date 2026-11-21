@@ -555,10 +555,21 @@ end
     @test sort!(collect(keys(r.model.curves)))==[2]
     @test r.model.curve_control_points[2]==[1,2,3]
 
-    # The deprecated `Split Curve(c) {...}` form parses with its warning.
-    r=_execute_transform_source(_spl*"Split Curve(1) {2};")
+    # The deprecated `Split Curve(c) {...}` form parses. Gmsh 4.15.2 reports
+    # the deprecation as an Info line (`yymsg(2, ...)` in Gmsh.y), not as a
+    # warning, so it is printed and not collected in `warnings`.
+    info=mktemp() do capture_path,capture
+        r=redirect_stdout(capture) do
+            _execute_transform_source(_spl*"Split Curve(1) {2};")
+        end
+        flush(capture)
+        read(capture_path,String)
+    end
     @test sort!(collect(keys(r.model.curves)))==[2,3]
-    @test any(w->occursin("deprecated",w),r.warnings)
+    @test !any(w->occursin("deprecated",w),r.warnings)
+    @test occursin("Info    : ",info) && occursin(
+        "'Split Curve(c) {...}' is deprecated: use 'Split Curve {c} " *
+        "Point {...}' instead",info)
 
     # Unknown curve / unsplittable type are recoverable `Msg::Error`s plus
     # `Could not split curve` — execution continues upstream (the error

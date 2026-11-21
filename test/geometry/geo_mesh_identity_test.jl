@@ -250,8 +250,15 @@ end
         """)
     @test square.mesh isa MixedMesh
     @test nnodes(square.mesh)==10
+    # Gmsh 4.15.2 puts the transfinite grid's centre node at
+    # 0.50000000000037581 in x and y (its curve nodes come from numerical
+    # integration), so only the orphan Point sits at exactly (0.5,0.5,0);
+    # the two are distinct nodes 5e-13 apart.
     @test count(j->Tuple(square.mesh.coords[:,j])==(0.5,0.5,0.0),
-                1:nnodes(square.mesh))==2
+                1:nnodes(square.mesh))==1
+    @test count(j->Tuple(square.mesh.coords[:,j])==
+                   (0.50000000000037581,0.50000000000037581,0.0),
+                1:nnodes(square.mesh))==1
     quads=only(filter(b->b.msh==3,square.mesh.blocks))
     @test length(Set(quads.nodes))==9
     @test validate(square.mesh).ok
