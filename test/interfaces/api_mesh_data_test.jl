@@ -141,8 +141,9 @@ end
         @test node_tags==UInt64[1,2,3,4]
         @test coordinates==collect(vec(source.coords))
         @test parameters==Float64[]
-        # An unclassified cache cannot report a node's owning entity.
-        @test_throws ArgumentError _MESH_DATA_API.mesh.get_node(1)
+        # A node of an unclassified cache has no owning entity; like Gmsh for
+        # a node no entity holds, the query reports it as unknown.
+        @test_throws ErrorException("Unknown node 1") _MESH_DATA_API.mesh.get_node(1)
         @test _MESH_DATA_API.mesh.get_nodes(-1,-2,true,false)==
               (UInt64[1,2,3,4],collect(vec(source.coords)),Float64[])
         node_tags[1]=99
@@ -671,7 +672,8 @@ end
         all_types,all_tags,all_nodes=_MESH_DATA_API.mesh.get_elements(2,-1)
         @test all_types==types && all_tags==tags && all_nodes==nodes
         @test _MESH_DATA_API.mesh.get_element_types(2,1)==Int32[2]
-        @test _MESH_DATA_API.mesh.get_element_types(1,1)==Int32[]
+        @test _MESH_DATA_API.mesh.get_element_types(1,1)==Int32[1]
+        @test _MESH_DATA_API.mesh.get_element_types(0,1)==Int32[15]
         triangle_count=length(tags[1])
         # Element-by-tag classification resolves block position and owner.
         for element_tag in tags[1]
@@ -683,8 +685,11 @@ end
             @test Set(element_nodes)⊆Set(surface_with_boundary)
         end
         @test_throws ErrorException _MESH_DATA_API.mesh.get_element(0)
-        @test_throws ErrorException _MESH_DATA_API.mesh.get_element(
-            length(tags[1])+1)
+        # Point, line and triangle elements share one tag sequence, so only a
+        # tag past the last element is unknown.
+        @test _MESH_DATA_API.mesh.get_element(1)[[1,3,4]]==(Int32(15),0,1)
+        beyond=Int(_MESH_DATA_API.mesh.get_max_element_tag())+1
+        @test_throws ErrorException("Unknown element $beyond") _MESH_DATA_API.mesh.get_element(beyond)
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_element(1.5)
         # Single-node queries report coordinates, owner, and owner parameters.
         dense_nodes=_MESH_DATA_API.mesh.get_nodes(-1,-1)[1]
@@ -895,9 +900,10 @@ Plane Surface(1)={1};Plane Surface(2)={2};Plane Surface(3)={3};
 Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
 Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
 """
-        mktemp() do path,io
-            write(io,source)
-            close(io)
+        # `open_geo!` takes a file named *.geo.
+        mktempdir() do directory
+            path=joinpath(directory,"cube.geo")
+            write(path,source)
             _MESH_DATA_API.open_geo!(path)
         end
         _MESH_DATA_API.mesh.generate(3)
@@ -1161,15 +1167,21 @@ end
         @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(0,99)
         # Entity-selective reversal on the classified cache.
         _MESH_DATA_API.mesh.generate(2)
-        _,tri_before,_,_=_MESH_DATA_API.mesh.get_element(1)
+        # `remove_elements(0,1)` above removed Point 1's point element and
+        # regeneration does not recreate it: element 1 is the point element
+        # on Point 2, as in Gmsh 4.15.2 (getElement(1) == (15,[2],0,2)).
+        @test _MESH_DATA_API.mesh.get_element(1)[[1,3,4]]==(Int32(15),0,2)
+        @test isempty(_MESH_DATA_API.mesh.get_elements(0,1)[1])
+        triangle=first(_MESH_DATA_API.mesh.get_elements_by_type(2,1)[1])
+        _,tri_before,_,_=_MESH_DATA_API.mesh.get_element(triangle)
         _MESH_DATA_API.mesh.reverse([(2,1)])
-        _,tri_after,_,_=_MESH_DATA_API.mesh.get_element(1)
+        _,tri_after,_,_=_MESH_DATA_API.mesh.get_element(triangle)
         @test tri_after==[tri_before[1],tri_before[3],tri_before[2]]
-        # Boundary-owned entities own no cells and no-op.
+        # Reversing a Curve and a Point leaves the triangles alone.
         _MESH_DATA_API.mesh.reverse([(1,1),(0,1)])
-        @test _MESH_DATA_API.mesh.get_element(1)[2]==tri_after
+        @test _MESH_DATA_API.mesh.get_element(triangle)[2]==tri_after
         _MESH_DATA_API.mesh.reverse([(2,1)])
-        @test _MESH_DATA_API.mesh.get_element(1)[2]==tri_before
+        @test _MESH_DATA_API.mesh.get_element(triangle)[2]==tri_before
         @test_throws ArgumentError _MESH_DATA_API.mesh.reverse([(2,99)])
         # Ownership-filtered duplicate scans on a conforming cache are empty.
         @test _MESH_DATA_API.mesh.get_duplicate_nodes()==UInt64[]
@@ -1177,15 +1189,15 @@ end
         @test _MESH_DATA_API.mesh.get_duplicate_nodes([(2,1)])==UInt64[]
         @test_throws ArgumentError _MESH_DATA_API.mesh.get_duplicate_nodes(
             [(2,99)])
-        # Classification-dependent calls fail explicitly after clearing.
+        # After clearing, the Surface still exists: like Gmsh, the calls
+        # succeed on its empty mesh and only an unknown entity is an error.
         _MESH_DATA_API.mesh.clear()
-        for call in (
-            ()->_MESH_DATA_API.mesh.remove_elements(2,1),
-            ()->_MESH_DATA_API.mesh.reverse([(2,1)]),
-            ()->_MESH_DATA_API.mesh.get_duplicate_nodes([(2,1)]),
-        )
-            @test_throws ArgumentError call()
-        end
+        @test _MESH_DATA_API.mesh.remove_elements(2,1)===nothing
+        @test _MESH_DATA_API.mesh.reverse([(2,1)])===nothing
+        @test _MESH_DATA_API.mesh.get_duplicate_nodes([(2,1)])==UInt64[]
+        @test_throws ArgumentError _MESH_DATA_API.mesh.remove_elements(2,99)
+        @test_throws ArgumentError _MESH_DATA_API.mesh.reverse([(2,99)])
+        @test_throws ArgumentError _MESH_DATA_API.mesh.get_duplicate_nodes([(2,99)])
     finally
         _MESH_DATA_API.finalize()
     end
@@ -1200,7 +1212,7 @@ end
         tags,coords,_=_MESH_DATA_API.mesh.get_nodes()
         @test tags==UInt64[1,2,3,4]
         @test reshape(coords,3,:)[:,2]==[4.0,5.0,6.0]
-        @test_throws ArgumentError _MESH_DATA_API.mesh.set_node(5,[0,0,0.0])
+        @test_throws ErrorException("Unknown node 5") _MESH_DATA_API.mesh.set_node(5,[0,0,0.0])
         @test_throws ArgumentError _MESH_DATA_API.mesh.set_node(
             1,[0,0,0.0],[0.5])
         @test_throws ArgumentError _MESH_DATA_API.mesh.set_node(
@@ -1315,7 +1327,8 @@ end
         _MESH_DATA_API.mesh.relocate_nodes()
         _MESH_DATA_API.mesh.relocate_nodes(2,1)
         @test_throws ArgumentError _MESH_DATA_API.mesh.relocate_nodes(2,99)
-        @test_throws ArgumentError _MESH_DATA_API.mesh.relocate_nodes(-1,3)
+        # A negative dimension selects every entity, whatever the tag.
+        @test _MESH_DATA_API.mesh.relocate_nodes(-1,3)===nothing
         @test_throws ArgumentError _MESH_DATA_API.mesh.rebuild_node_cache(1)
     finally
         _MESH_DATA_API.finalize()
@@ -1338,14 +1351,16 @@ end
         _MESH_DATA_API.model.add_point(0.25,0.5,0.0;tag=6)
         _MESH_DATA_API.model.embed(0,[5,6],2,1)
         _MESH_DATA_API.mesh.generate(2)
+        nodes_before_removal=_MESH_DATA_API.mesh.get_nodes()[1]
+        @test !isempty(nodes_before_removal)
         @test _MESH_DATA_API.mesh.get_embedded(2,1)==
             Tuple{Int32,Int32}[(0,5),(0,6)]
         # Parent-level removal clears all embeddings on the surface.
         _MESH_DATA_API.mesh.remove_embedded([(2,1)])
         @test isempty(_MESH_DATA_API.mesh.get_embedded(2,1))
-        # Model mutations invalidate the mesh cache; queries then return empty
-        # data like Gmsh.
-        @test _MESH_DATA_API.mesh.get_nodes()==(UInt64[],Float64[],Float64[])
+        # Removing the embedding leaves the generated mesh in place, as in
+        # Gmsh (14 nodes before and after for this model there).
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==nodes_before_removal
         # The dimension filter only drops matching embedded dimensions.
         _MESH_DATA_API.model.embed(0,[5,6],2,1)
         _MESH_DATA_API.mesh.remove_embedded([(2,1)],1)

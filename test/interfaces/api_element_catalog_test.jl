@@ -79,8 +79,6 @@ end
 
     for call in (
         ()->_CATALOG_API.mesh.get_element_type(:Line,1),
-        ()->_CATALOG_API.mesh.get_element_type("",1),
-        ()->_CATALOG_API.mesh.get_element_type("Quadrilateral",1),
         ()->_CATALOG_API.mesh.get_element_type("Line\0",1),
         ()->_CATALOG_API.mesh.get_element_type("Line",true),
         ()->_CATALOG_API.mesh.get_element_type("Triangle",-1),
@@ -96,6 +94,12 @@ end
     )
         @test_throws ArgumentError call()
     end
+    # A family name Gmsh does not know is not an error there: 4.15.2 returns
+    # type 0 for getElementType("", 1) and getElementType("Quadrilateral", 1)
+    # (the family is called "Quadrangle").
+    @test _CATALOG_API.mesh.get_element_type("",1)==0
+    @test _CATALOG_API.mesh.get_element_type("Quadrilateral",1)==0
+    @test _CATALOG_API.mesh.get_element_type("Quadrangle",1)==3
 
     try
         _CATALOG_API.initialize()
