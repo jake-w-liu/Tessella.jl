@@ -1760,13 +1760,26 @@ function _dim01_finish!(assembly,m,entities,discarded,high_order,renumber,p2_pas
     end
     Model._model_native_curve_endpoint_remap!(m,node_tag_map)
     _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_parameters=node_parameters)
+    # `records_mesh` states which mesh the model's entity records were just
+    # reconciled with: a commit of this very mesh need not derive them again.
     return (model=m,mesh=mesh,class=class,authority=Set(entities),
         node_tag_map=node_tag_map,element_tag_map=element_tag_map,
         visibility_tag_map=visibility_tag_map,
         max_node_tag=assembly.node_max,max_element_tag=assembly.cell_max,
             node_counter_wrapped=assembly.node_counter_wrapped,
-            element_counter_wrapped=assembly.cell_counter_wrapped)
+            element_counter_wrapped=assembly.cell_counter_wrapped,
+        records_mesh=mesh)
 end
+
+# Whether a generation plan's model already holds the entity records of the
+# mesh the plan is about to commit. `_dim01_finish!` derives them from
+# `plan.records_mesh` with the plan's classification; the commit would derive
+# the same records from the same mesh a second time. The fact holds only for
+# that very mesh object and only while no later step moves its nodes, so a
+# plan whose mesh was replaced, or that a high-order optimisation is about to
+# relocate, is reconciled at the commit as before.
+_dim01_plan_records_reconciled(plan)=plan.mesh isa MixedMesh &&
+    get(plan,:records_mesh,nothing)===plan.mesh
 
 function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_parameters=nothing)
     data=mesh.entity_data

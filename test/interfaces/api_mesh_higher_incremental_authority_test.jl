@@ -234,4 +234,35 @@ end
         A.finalize()
     end
 end
+
+# A generation plan reconciles the model's entity records with its mesh, and
+# the commit of that very mesh skips deriving them a second time. That is
+# sound because the second derivation changes nothing: here it is run by hand
+# on the committed state and every record must come out as it was.
+same_record(a,b)=all(isequal(getfield(a,name),getfield(b,name)) for name in fieldnames(typeof(a)))
+
+@testset "a generation's entity records need no second reconciliation" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.model.add_physical_group(2,[1,4];tag=7)
+        A.option("Mesh.MeshSizeMin",0.4);A.option("Mesh.MeshSizeMax",0.4)
+        for dimension in (1,2)
+            A.mesh.generate(dimension)
+            model=A.CURRENT[];mesh=A.LAST_MESH[];class=A.LAST_MESH_CLASS[]
+            before=deepcopy(model.meshing.attached)
+            @test !isempty(before)
+            @test any(record->!isempty(record.element_tags),values(before))
+            identity=Dict(tag=>tag for tag in class.public_tags.node_tags)
+            A._dim01_reconcile_records!(model,collect(class.public_tags.authority),mesh,identity;
+                runtime_parameters=class.node_parametric)
+            after=model.meshing.attached
+            @test Set(keys(after))==Set(keys(before))
+            @test all(same_record(before[key],after[key]) for key in keys(before))
+        end
+    finally
+        A.finalize()
+    end
+end
 end

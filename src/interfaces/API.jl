@@ -2944,9 +2944,12 @@ function _generate_native_lookup_live(dim::Integer)
                 initial_element_counter_wrapped=ELEMENT_COUNTER_WRAPPED[],
                 generation_meshing=_generation_meshing_options(order)))::NamedTuple
             Base.inferencebarrier(_higher_capture_dim01_authority!)(plan)
+            reconciled=(_dim01_plan_records_reconciled(plan) &&
+                !_high_order_optimize_relocation())::Bool
             plan=(Base.inferencebarrier(_high_order_optimize_plan!)(plan,caller))::NamedTuple
             (Base.inferencebarrier(_commit_tagged_plan_locked!)(plan;preserve_visibility=true,
-                                       element_tag_map=plan.visibility_tag_map))::Nothing
+                                       element_tag_map=plan.visibility_tag_map,
+                                       reconcile_records=!reconciled))::Nothing
             # Native renumber/completed generation clears lookup state before
             # queued homology can report an error from the published mesh.
             _native_lookup_invalidate_locked!()
@@ -2980,9 +2983,11 @@ function _generate_native_lookup_live(dim::Integer)
             size_field=_session_size_field_locked(source_model),
             initial_max_node_tag=NODE_TAG_MAX[],initial_max_element_tag=ELEMENT_TAG_MAX[],
             preserve_geometry))::NamedTuple
+        reconciled=(_dim01_plan_records_reconciled(plan) &&
+            !_high_order_optimize_relocation())::Bool
         plan=(Base.inferencebarrier(_high_order_optimize_plan!)(plan,caller))::NamedTuple
         (Base.inferencebarrier(_commit_tagged_plan_locked!)(plan;preserve_visibility=true,
-            element_tag_map=plan.visibility_tag_map))::Nothing
+            element_tag_map=plan.visibility_tag_map,reconcile_records=!reconciled))::Nothing
         for (kind,message) in get(plan,:native_recombine_events,())
             kind===:error ? _native_mesh_input_error_locked(message) :
                 _native_diagnostic_emit_locked(kind,message)
