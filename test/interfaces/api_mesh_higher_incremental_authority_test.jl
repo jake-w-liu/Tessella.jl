@@ -642,4 +642,100 @@ end
         A.finalize()
     end
 end
+
+# A transfinite block of hexahedra is a lattice of rows. Its carrier cells are
+# matched to lattice cells by position, and its boundary faces and edges are
+# read from the lattice, instead of sorting and hashing the corners, faces
+# and edges of every cell. Each must agree with the generic table it replaces.
+@testset "a lattice block's cells, boundary and edges come from the lattice" begin
+    counts=(2,3,2);spanj=counts[2]+1;spank=counts[3]+1
+    total=(counts[1]+1)*spanj*spank
+    # Lattice point (i,j,k) is row `rows[(i*spanj+j)*spank+k+1]`, in a scrambled numbering.
+    rows=Int32[mod(7*position,total)+1 for position in 1:total]
+    @test sort(rows)==1:total
+    place=zeros(Int32,total)
+    for (position,row) in enumerate(rows)
+        place[row]=position
+    end
+    at(i,j,k)=rows[(i*spanj+j)*spank+k+1]
+    coords=zeros(3,total)
+    for i in 0:counts[1],j in 0:counts[2],k in 0:counts[3]
+        coords[:,at(i,j,k)]=[i,j,k]
+    end
+    lattice_cells=[(i,j,k) for i in 0:counts[1]-1 for j in 0:counts[2]-1 for k in 0:counts[3]-1]
+    corners(i,j,k)=Int32[at(i,j,k),at(i+1,j,k),at(i+1,j+1,k),at(i,j+1,k),
+        at(i,j,k+1),at(i+1,j,k+1),at(i+1,j+1,k+1),at(i,j+1,k+1)]
+    # Carrier cells in another order than the lattice's.
+    order=reverse(eachindex(lattice_cells))
+    cells=reduce(hcat,[corners(lattice_cells[index]...) for index in order])
+    mesh=Tessella.MixedMesh(coords,[Tessella.ElementBlock(5,cells)])
+    @test Tessella.validate(mesh).ok
+    columns=A._higher_transfinite_hex_columns!(zeros(Int,counts...),cells,rows,place,spanj,spank)
+    @test all(columns[(lattice_cells[index].+1)...]==column for (column,index) in enumerate(order))
+    # The same cell with its corners listed in another order is still found;
+    # a cell that is not a lattice cell is not.
+    scrambled=copy(cells);scrambled[:,1]=scrambled[[5,6,7,8,1,2,3,4],1]
+    @test A._higher_transfinite_hex_columns!(zeros(Int,counts...),scrambled,rows,place,spanj,spank)==columns
+    foreign=copy(cells);foreign[1,1]=foreign[2,1]
+    missing_one=A._higher_transfinite_hex_columns!(zeros(Int,counts...),foreign,rows,place,spanj,spank)
+    @test count(iszero,missing_one)==1
+    @test A._higher_lattice_boundary_faces(rows,counts)==first(M._volume_cell_boundary_faces(mesh))
+    edges=M._volume_edge_set(mesh)
+    @test all(A._higher_lattice_edge(place,counts,a,b)==(minmax(Int32(a),Int32(b)) in edges)
+        for a in 1:total for b in 1:total if a!=b)
+    @test !A._higher_lattice_edge(place,counts,0,1) && !A._higher_lattice_edge(place,counts,1,total+1)
+end
+
+# The geometry carrier asks, for every traced cell, whether the assembly
+# still holds that cell object. With distinct dense labels the answer is read
+# from a vector by label; otherwise from a table of the objects. Both must
+# name the same cells live.
+@testset "live traced cells are found by label or by object" begin
+    cell(tag)=A._Dim01Cell(4,(3,Int32(1)),Int32[1,2,3,4],UInt64(tag),nothing,Int32(0))
+    cells=[cell(tag) for tag in (3,1,2,5)]
+    stale=cell(2)
+    by_label=A._higher_live_cells(cells)
+    @test by_label isa Vector{Int32}
+    block=Union{Nothing,A._Dim01Cell}[cells[2],nothing,cells[4]]
+    @test A._higher_live_cell_tags(by_label,cells,block,"test")==[UInt64(1),nothing,UInt64(5)]
+    @test_throws ArgumentError A._higher_live_cell_tags(by_label,cells,Union{Nothing,A._Dim01Cell}[stale],"test")
+    repeated=[cell(1),cell(1),cell(2)]
+    by_object=A._higher_live_cells(repeated)
+    @test by_object isa IdDict
+    @test A._higher_live_cell_tags(by_object,repeated,Union{Nothing,A._Dim01Cell}[repeated[2]],"test")==[UInt64(1)]
+    @test_throws ArgumentError A._higher_live_cell_tags(by_object,repeated,Union{Nothing,A._Dim01Cell}[stale],"test")
+    @test A._higher_live_cells([cell(0)]) isa IdDict
+    @test A._higher_live_cells([cell(10_000_000)]) isa IdDict
+end
+
+const TRANSFINITE_BLOCK="""
+Point(1)={0,0,0}; Point(2)={1,0,0}; Point(3)={1,1,0}; Point(4)={0,1,0};
+Line(1)={1,2}; Line(2)={2,3}; Line(3)={3,4}; Line(4)={4,1};
+Curve Loop(1)={1,2,3,4}; Plane Surface(1)={1};
+Extrude {0,0,1} { Surface{1}; }
+Transfinite Curve{:} = 4;
+Transfinite Surface{:};
+Recombine Surface{:};
+Transfinite Volume{1};
+"""
+
+@testset "a transfinite hexahedral block meshes through the lattice route" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        mktempdir() do directory
+            path=joinpath(directory,"block.geo")
+            write(path,TRANSFINITE_BLOCK)
+            A.open_geo!(path;mesh_dim=0)
+        end
+        A.mesh.generate(3)
+        types,tags,_=A.mesh.get_elements(3)
+        @test types==[5] && length(only(tags))==27
+        @test length(A.mesh.get_nodes()[1])==64
+        types2,tags2,_=A.mesh.get_elements(2)
+        @test types2==[3] && length(only(tags2))==54
+    finally
+        A.finalize()
+    end
+end
 end
