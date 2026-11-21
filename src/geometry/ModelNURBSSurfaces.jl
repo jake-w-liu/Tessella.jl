@@ -113,6 +113,57 @@ end
     return nothing
 end
 
+# A patch that closes on itself in one direction (clamped there, first and
+# last control rows equal, weights included) is periodic in it: a parameter
+# one period outside the knot domain names the surface point one period back.
+# Evaluating it as given instead extends the last span's polynomial, which
+# for a converted torus stays on the torus but at another point and with
+# other derivatives. A face meshed on a sheet shifted by a period (the sheet
+# is anchored where its seam curve's pcurve lies) then folded over itself.
+# Excursions within rounding of the domain keep their one-sided evaluation.
+@inline function _model_nurbs_closed_parameters(patch::_ModelNURBSSurface,u::Float64,v::Float64)
+    s=patch.surface
+    lo=s.knots_u[s.degree_u+1];hi=s.knots_u[end-s.degree_u]
+    tolerance=1e-9*(hi-lo)
+    (u<lo-tolerance || u>hi+tolerance) && (u=_model_nurbs_wrapped(s,1,u,lo,hi))
+    lo=s.knots_v[s.degree_v+1];hi=s.knots_v[end-s.degree_v]
+    tolerance=1e-9*(hi-lo)
+    (v<lo-tolerance || v>hi+tolerance) && (v=_model_nurbs_wrapped(s,2,v,lo,hi))
+    return u,v
+end
+
+@noinline function _model_nurbs_wrapped(s,axis::Int,value::Float64,lo::Float64,hi::Float64)
+    width=hi-lo
+    isfinite(value) && width>0 && _model_nurbs_closed(s,axis) || return value
+    return lo+mod(value-lo,width)
+end
+
+function _model_nurbs_closed(s,axis::Int)
+    knots=axis==1 ? s.knots_u : s.knots_v
+    degree=axis==1 ? s.degree_u : s.degree_v
+    for k in 1:degree
+        knots[k+1]==knots[1] && knots[end-k]==knots[end] || return false
+    end
+    controls=s.controls;weights=s.weights
+    last=size(controls,axis)
+    last>1 || return false
+    scale=0.0
+    for point in controls
+        scale=max(scale,abs(point[1]),abs(point[2]),abs(point[3]))
+    end
+    tolerance=1e-12*max(scale,floatmin(Float64))
+    for other in axes(controls,3-axis)
+        a=axis==1 ? controls[1,other] : controls[other,1]
+        b=axis==1 ? controls[last,other] : controls[other,last]
+        wa=axis==1 ? weights[1,other] : weights[other,1]
+        wb=axis==1 ? weights[last,other] : weights[other,last]
+        abs(a[1]-b[1])<=tolerance && abs(a[2]-b[2])<=tolerance &&
+            abs(a[3]-b[3])<=tolerance && abs(wa-wb)<=1e-12*max(abs(wa),abs(wb)) ||
+            return false
+    end
+    return true
+end
+
 # Point and derivatives of the bare patch. The evaluation used to be written
 # in `_model_nurbs_surface_d2` itself, where the results were assigned in two
 # branches and captured by closures: every intermediate was boxed, and each
@@ -120,6 +171,7 @@ end
 # control row. That was several hundred heap objects per evaluated point,
 # and a caller that wanted the point alone still paid for all six nets.
 function _model_nurbs_patch_d2(patch::_ModelNURBSSurface,u::Float64,v::Float64)
+    u,v=_model_nurbs_closed_parameters(patch,u,v)
     columns,buffer=_model_nurbs_scratch(patch)
     h=_model_nurbs_homogeneous(patch,1,u,v,columns,buffer)
     hu=_model_nurbs_homogeneous(patch,2,u,v,columns,buffer)
@@ -144,6 +196,7 @@ _model_nurbs_patch_d2(patch::_ModelNURBSSurface,u,v)=
 
 # The first three results of `_model_nurbs_patch_d2`, from three nets.
 function _model_nurbs_patch_d1(patch::_ModelNURBSSurface,u::Float64,v::Float64)
+    u,v=_model_nurbs_closed_parameters(patch,u,v)
     columns,buffer=_model_nurbs_scratch(patch)
     h=_model_nurbs_homogeneous(patch,1,u,v,columns,buffer)
     hu=_model_nurbs_homogeneous(patch,2,u,v,columns,buffer)
@@ -159,6 +212,7 @@ end
 
 # The point alone, from the control net.
 function _model_nurbs_patch_point(patch::_ModelNURBSSurface,u::Float64,v::Float64)
+    u,v=_model_nurbs_closed_parameters(patch,u,v)
     columns,buffer=_model_nurbs_scratch(patch)
     h=_model_nurbs_homogeneous(patch,1,u,v,columns,buffer)
     _model_nurbs_weight_check(h,u,v)

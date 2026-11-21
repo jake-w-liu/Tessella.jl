@@ -310,6 +310,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_context_length_test.jl",
         "geometry/geo_exact_extrusion_parametrization_test.jl",
         "geometry/geo_t3_swept_parametrization_test.jl",
+        "interfaces/api_occ_nurbs_periodic_patch_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
