@@ -16,7 +16,7 @@ const P = Tessella.API
 #
 # On a processor with two kinds of cores the capacities depend on the core
 # the thread is on when they are read (48 KiB and 32 KiB L1 data caches on a
-# hybrid Intel part), compiled or not. The tests below therefore compare
+# hybrid Intel part), compiled or not. The first test therefore compares
 # against the operating system's list for all processors.
 const COMPILED = Base.JLOptions().compile_enabled in (1, 2)
 const X86 = Sys.ARCH in (:x86_64, :i686)
@@ -27,12 +27,22 @@ digest(a) = bytes2hex(sha256(reinterpret(UInt8, vec(a))))
 
 @testset "Cache capacities agree with the operating system's" begin
     detected = P._native_cell_cache_sizes()
+    # Every platform: three positive capacities, read once per process, and
+    # the first level is the smallest. (L2 <= L3 is not asserted: Eigen's
+    # 2 MiB stands in for a missing L3 and a real L2 can be larger.)
     @test all(>(0), detected)
-    @test detected == P._native_cell_cache_sizes()          # read once per process
+    @test detected[1] <= detected[2] && detected[1] <= detected[3]
+    @test detected == P._native_cell_cache_sizes()
+    # The operating system query never throws; `nothing` means not available.
     reported = P._native_cell_os_cache_sizes()
-    # Windows always answers; a Linux guest may not expose the cache directories.
-    X86 && Sys.iswindows() && Sys.WORD_SIZE == 64 && @test reported !== nothing
-    if X86 && reported !== nothing
+    @test reported === nothing || reported isa Vector{Pair{Int,NTuple{3,Int}}}
+    # Compared with the operating system on Windows only, where it was
+    # measured: on an Intel Core Ultra 7 265K a compiled run pinned to each of
+    # the 20 logical processors read from CPUID exactly the capacities listed
+    # for that processor. The Linux and macOS queries have not been run, and a
+    # virtual machine may present CPUID and the system tables differently.
+    if X86 && Sys.iswindows() && Sys.WORD_SIZE == 64
+        @test reported !== nothing
         capacities = [P._native_cell_cache_defaults(last(entry)...) for entry in reported]
         @test issorted(first.(reported))
         # Compiled, `detected` is what CPUID said; interpreted, it is the
