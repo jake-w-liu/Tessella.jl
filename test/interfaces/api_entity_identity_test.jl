@@ -10,7 +10,15 @@ const _IDENTITY_API=Tessella.API
         _IDENTITY_API.initialize()
         _IDENTITY_API.model.add_box(0,0,0,1,1,1;tag=1)
         generated=_IDENTITY_API.mesh.generate(3)
-        generated_crc=mesh_crc(generated)
+        # Regeneration must reproduce the public mesh exactly: Gmsh 4.15.2
+        # returns identical node and element arrays from generate(3),
+        # generate(3) again and generate(3) after setEntityName. The Mesh
+        # object `generate` returns is Tessella's own and keeps its producer's
+        # node order on the first call, so it is compared by statistics.
+        statistics(mesh)=Base.structdiff(mesh_crc(mesh),(;sha=""))
+        public()=(_IDENTITY_API.mesh.get_nodes(),_IDENTITY_API.mesh.get_elements())
+        generated_statistics=statistics(generated)
+        generated_public=public()
         cached=_IDENTITY_API.LAST_MESH[]
 
         @test _IDENTITY_API.model.get_entity_name(3,1)==""
@@ -27,7 +35,8 @@ const _IDENTITY_API=Tessella.API
         @test _IDENTITY_API.LAST_MESH[]===nothing
         @test _IDENTITY_API.model.get_entity_name(3,1)=="domain"
         regenerated=_IDENTITY_API.mesh.generate(3)
-        @test mesh_crc(regenerated)==generated_crc
+        @test statistics(regenerated)==generated_statistics
+        @test public()==generated_public
         cached=_IDENTITY_API.LAST_MESH[]
         @test _IDENTITY_API.model.set_entity_name(3,1,"domain")===nothing
         @test _IDENTITY_API.LAST_MESH[]===cached
@@ -38,7 +47,8 @@ const _IDENTITY_API=Tessella.API
         @test _IDENTITY_API.model.get_entity_name(3,1)==""
         @test _IDENTITY_API.model.get_entity_name(3,10)=="domain"
         retagged=_IDENTITY_API.mesh.generate(3)
-        @test mesh_crc(retagged)==generated_crc
+        @test statistics(retagged)==generated_statistics
+        @test public()==generated_public
         cached=_IDENTITY_API.LAST_MESH[]
 
         stable_model=deepcopy(_IDENTITY_API.CURRENT[])
@@ -54,7 +64,8 @@ const _IDENTITY_API=Tessella.API
         @test _IDENTITY_API.model.remove_entity_name("domain")===nothing
         @test _IDENTITY_API.LAST_MESH[]===nothing
         @test _IDENTITY_API.model.get_entity_name(3,10)==""
-        @test mesh_crc(_IDENTITY_API.mesh.generate(3))==generated_crc
+        @test statistics(_IDENTITY_API.mesh.generate(3))==generated_statistics
+        @test public()==generated_public
         cached=_IDENTITY_API.LAST_MESH[]
         @test _IDENTITY_API.model.remove_entity_name("")===nothing
         @test _IDENTITY_API.LAST_MESH[]===cached
