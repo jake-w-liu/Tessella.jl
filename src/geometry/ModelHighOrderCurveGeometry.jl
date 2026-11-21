@@ -36,25 +36,40 @@ end
 # MinGW's paired sin/cos uses FSINCOS on Windows x86. Keep this native
 # Julia-compiled evaluation local to actual high-order geometry; separate CRT
 # calls differ by an ulp, which finite differences amplify in the Newton solve.
+#
+# `llvmcall` needs the compiler, so the instruction itself runs only in a
+# compiled x86 Windows session: that is where high-order nodes on Circle and
+# Ellipse arcs reproduce Gmsh's Windows build bit for bit. An interpreted
+# session (`--compile=min`) evaluates the same instruction in software, which
+# is correctly rounded and one ulp away from the FPU on about 3 in 100000
+# arguments. It used to take the C runtime instead, whose cosine of the
+# Float64 nearest π/2 is the exact 6.123233995736766e-17 and not the FPU's
+# 6.123031769111886e-17, and placed the mid-edge node of a quarter Circle of
+# radius 2 at x = 1.4142135587734221 instead of 1.4142135587089986.
+_model_high_order_fsincos_exact()=
+    Sys.iswindows() && Sys.ARCH in (:x86_64,:i686) &&
+    Base.JLOptions().compile_enabled in (1,2)
+
 @inline function _model_high_order_curve_sincos(x::Float64)
     @static if Sys.iswindows() && Sys.ARCH in (:x86_64,:i686)
         if isfinite(x) && abs(x)<0x1p63
-            try
-                return Base.llvmcall(raw"""
-                %input = alloca double, align 8
-                %output = alloca [2 x double], align 8
-                store double %0, ptr %input, align 8
-                %sin = getelementptr [2 x double], ptr %output, i32 0, i32 0
-                %cos = getelementptr [2 x double], ptr %output, i32 0, i32 1
-                call void asm sideeffect "fldl ($0); fsincos; fstpl ($1); fstpl ($2)", "r,r,r,~{st},~{st(1)},~{memory}"(ptr %input, ptr %cos, ptr %sin)
-                %result = load [2 x double], ptr %output, align 8
-                ret [2 x double] %result
-            """,NTuple{2,Float64},Tuple{Float64},x)
-            catch err
-                err isa ErrorException || rethrow()
-                # `llvmcall` needs the compiler — interpreted minimal-JIT
-                # runs take the same `_gm_sincos` path other platforms use.
+            if _model_high_order_fsincos_exact()
+                try
+                    return Base.llvmcall(raw"""
+                    %input = alloca double, align 8
+                    %output = alloca [2 x double], align 8
+                    store double %0, ptr %input, align 8
+                    %sin = getelementptr [2 x double], ptr %output, i32 0, i32 0
+                    %cos = getelementptr [2 x double], ptr %output, i32 0, i32 1
+                    call void asm sideeffect "fldl ($0); fsincos; fstpl ($1); fstpl ($2)", "r,r,r,~{st},~{st(1)},~{memory}"(ptr %input, ptr %cos, ptr %sin)
+                    %result = load [2 x double], ptr %output, align 8
+                    ret [2 x double] %result
+                """,NTuple{2,Float64},Tuple{Float64},x)
+                catch err
+                    err isa ErrorException || rethrow()
+                end
             end
+            return _x87_fsincos_emulated(x)
         end
     end
     return _gm_sincos(x)

@@ -175,6 +175,35 @@ function _x87_trig(r::BigFloat)
     return isodd(k) ? (-s, -c) : (s, c)
 end
 
+# The `fsincos` instruction evaluated in software, for runs that cannot
+# execute it (`llvmcall` needs the compiler, so `--compile=min` cannot). Above
+# π/4 the FPU reduces by quadrants of its 66-bit π, so the zero of the cosine
+# sits at π_hw/2 and not at π/2: `fcos` of the Float64 nearest π/2 is
+# 6.1230317691118863e-17, where the exact cosine is 6.123233995736766e-17.
+# Reducing by whole multiples of π_hw (`_x87_trig`) does not reproduce that.
+#
+# This evaluation is correctly rounded; the instruction is not. Against the
+# instruction on one Intel x86_64 machine it agrees on every one of 32481
+# arguments within 200 ulps of a multiple of π/2 and on 499986 of 500000
+# others; in the 14 exceptions the exact value lies within 0.44 to 0.54 of an
+# extended-precision ulp of a Float64 rounding tie, which is inside the
+# instruction's own error, so no rounding rule reproduces them (directed
+# rounding of the extended result disagrees about 250 times instead).
+function _x87_fsincos_emulated(x::Float64)
+    isfinite(x) && abs(x) < _X87_LIM || return (sin(x), cos(x))
+    xb = BigFloat(x; precision=256)
+    if abs(x) <= _X87_PI_HI/4
+        return (Float64(_x87e(sin(xb))), Float64(_x87e(cos(xb))))
+    end
+    half = _X87_PI_HW[]/2
+    quadrant = round(BigInt, xb/half)
+    residue = xb - quadrant*half
+    s = Float64(_x87e(sin(residue)))
+    c = Float64(_x87e(cos(residue)))
+    turn = mod(quadrant, 4)
+    return turn == 0 ? (s, c) : turn == 1 ? (c, -s) : turn == 2 ? (-s, -c) : (-c, s)
+end
+
 function _win_sincos(x::Float64)
     if _win_x87_llvm()
         try

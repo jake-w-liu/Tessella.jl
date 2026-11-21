@@ -79,7 +79,7 @@ using ..Transform: _affine_coordinate, _transform_homogeneous,
 using ..Predicates: orient2, orient3
 using ..GmshLibm: _gm_sin, _gm_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm_atan2, _gm_pow, _gm_sincos, _gm_exp, _gm_log,
-                  _gm87_sincos
+                  _gm87_sincos, _x87_fsincos_emulated
 import LinearAlgebra
 using LinearAlgebra: Symmetric, eigen
 using Printf: @sprintf

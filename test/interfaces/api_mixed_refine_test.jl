@@ -253,9 +253,18 @@ _api_refine_counts(mesh)=Dict(Int(b.msh)=>size(b.nodes,2) for b in mesh.blocks)
             radii=[hypot(refined.coords[1,j],refined.coords[2,j]) for j in 1:nnodes(refined)]
             @test count(iszero,radii)==1
             @test all(r->r==0 || 1-1e-12<=r<=2+1e-12,radii)
-            points=Set(Tuple(refined.coords[:,j]) for j in 1:nnodes(refined))
-            @test (1.4142135587089986,1.4142135660371915,0.0) in points
-            @test (0.70710678301859575,0.70710677935449928,0.0) in points
+            # The coordinates are those of Gmsh's Windows build. A compiled
+            # x86 Windows run evaluates the arcs' sine and cosine with the same
+            # x87 instruction and reproduces them bit for bit; an interpreted
+            # run and the other platforms are within 5e-10 (see
+            # geometry/model_high_order_arc_midpoint_test.jl for the bound).
+            points=[Tuple(refined.coords[:,j]) for j in 1:nnodes(refined)]
+            exact=Tessella.Model._model_high_order_fsincos_exact()
+            for expected in ((1.4142135587089986,1.4142135660371915,0.0),
+                             (0.70710678301859575,0.70710677935449928,0.0))
+                @test any(p->exact ? p==expected :
+                    maximum(abs.(p.-expected))<=5e-10,points)
+            end
         finally
             api.finalize()
         end
