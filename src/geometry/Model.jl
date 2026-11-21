@@ -4830,7 +4830,21 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
             hypot(point[1]-coordinate[1],point[2]-coordinate[2],
                   point[3]-coordinate[3])
         end
+        # A node of the mesh boundary belongs to a bounding curve, and the
+        # curve chains below certify it there. A surface made by a rotating
+        # Extrude is its source curve moved by the sweep, while the curves
+        # its end points trace are splines that only approximate their
+        # helices (`InterpolateExtrudedSurface` against the Nurb
+        # trajectories): their nodes sit off the surface by the spline's
+        # error and `XYZtoUV` does not converge on them, in Gmsh as here.
+        # Gmsh never inverts them (`gmshEdge::reparamOnFace` maps a
+        # generatrix parameter straight to the patch side), so only the
+        # nodes inside the patch are held to the surface. (An inversion that
+        # does not converge runs every relaxation level of the 81-guess
+        # Newton, about 13 ms a node, so the boundary is not even tried.)
+        mesh_boundary=first(_surface_boundary_topology(mesh,caller))
         for node in axes(mesh.coords,2)
+            mesh_boundary[node] && continue
             coordinate=(mesh.coords[1,node],mesh.coords[2,node],
                         mesh.coords[3,node])
             offset=ruled_offset(coordinate)
@@ -4863,11 +4877,35 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
         # legitimately sit off the surface (unlike a plane face, where the
         # coplanarity audit must cover them). The curves' on-surface-ness is
         # still audited through their produced boundary mesh nodes above.
+        #
+        # A curve need not end at its end point: Gmsh draws a Circle with the
+        # radius of its first point and accepts a last point up to 10% off
+        # that radius (`End_Curve`), and written coordinates are rarely
+        # cocircular to the last digit (examples/simple_geo/piece.geo: 1e-5).
+        # The patch's corner is its generatrices' ends blended, so it sits
+        # beside the model point by at most the two mismatches meeting there.
+        end_slack=0.0
+        for curve in all_curve_tags
+            first_point,last_point=m.curves[curve]
+            mismatch=try
+                t0,t1=_model_curve_param_bounds(m,curve,caller)
+                p0=_model_curve_point(m,curve,t0,caller)
+                p1=_model_curve_point(m,curve,t1,caller)
+                q0=m.points[first_point];q1=m.points[last_point]
+                max(hypot(p0[1]-q0[1],p0[2]-q0[2],p0[3]-q0[3]),
+                    hypot(p1[1]-q1[1],p1[2]-q1[2],p1[3]-q1[3]))
+            catch err
+                err isa ArgumentError || rethrow()
+                0.0
+            end
+            isfinite(mismatch) && mismatch>end_slack && (end_slack=mismatch)
+        end
+        corner_tol=ruled_tol+2*end_slack
         for curve in all_curve_tags,
             point in m.curves[curve]
             p=m.points[point]
             offset=ruled_offset(p)
-            (isfinite(offset) && offset<=ruled_tol) || throw(ArgumentError(
+            (isfinite(offset) && offset<=corner_tol) || throw(ArgumentError(
                 "$caller: Point[$point] is not on Surface[$surface] " *
                 "(offset $offset)"))
         end

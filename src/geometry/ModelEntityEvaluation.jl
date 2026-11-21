@@ -596,6 +596,19 @@ function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
     end
     exact=_ruled_exact_surface_point(m,tag,gens,u,v,caller)
     exact===nothing || return exact
+    return _ruled_blend_surface_point(m,tag,gens,u,v,caller,old_ruled)
+end
+
+# The transfinite blend of the generatrices: `_ruled_surface_point` for a
+# surface that is not a rigid sweep.
+function _ruled_blend_surface_point(m::GeoModel,tag::Int,gens::Vector{Int},
+                                    u::Float64,v::Float64,
+                                    caller::AbstractString,old_ruled::Bool)
+    corner(i)=begin
+        signed=gens[i]
+        endpoints=m.curves[abs(signed)]
+        m.points[signed>0 ? endpoints[1] : endpoints[2]]
+    end
     center=_ruled_cached(()->_ruled_sphere_center(m,tag,gens,caller),:sphere,tag)
     if length(gens)>=4
         S=(corner(1),corner(2),corner(3),corner(4))
@@ -887,6 +900,36 @@ function _ruled_cached(builder,kind::Symbol,tag::Int)
     cache=get(task_local_storage(),:_ruled_eval_cache,nothing)
     cache===nothing && return builder()
     return get!(builder,cache::Dict{Tuple{Symbol,Int},Any},(kind,tag))
+end
+
+# `_ruled_surface_point` with the surface resolved once, for any number of
+# evaluations on an unchanged model: the same values.
+#
+# Asked point by point, a swept surface looks up its sweep record, finds its
+# source among the generatrices and puts the four corners through the sweep
+# to see that the formula still applies (four more curve evaluations), and
+# each curve evaluation rebuilds the arc's frame. A mesher asks thousands of
+# points of one surface; on Gmsh's examples/simple_geo/indheat.geo (a coil
+# of 23 screw extrusions) that was 87% of generate(2).
+function _ruled_surface_evaluator(m::GeoModel,tag::Int,caller::AbstractString,
+                                  old_ruled::Bool=false)
+    gens=m.loops[first(m.surfaces[tag])]
+    isempty(gens) && throw(ArgumentError(
+        "$caller: no curves on boundary of ruled surface $tag"))
+    exact=_ruled_exact_extrusion(m,tag,gens,caller)
+    exact===nothing && return (u::Float64,v::Float64)->
+        _ruled_blend_surface_point(m,tag,gens,u,v,caller,old_ruled)
+    return _ruled_swept_evaluator(_ruled_curve_evaluator(m,exact.source,caller),
+                                  exact.spec,exact.slot,String(caller))
+end
+
+# Past the lookups, specialized on the curve and the sweep record.
+function _ruled_swept_evaluator(curve::C,spec::S,slot::Int,caller::String) where {C,S}
+    return (u::Float64,v::Float64)->begin
+        t,s=slot==1 ? (u,v) : slot==2 ? (v,1.0-u) : slot==3 ? (1.0-u,1.0-v) :
+            (1.0-v,u)
+        _ruled_point3(_extrude_at(spec,curve(t),s,caller))
+    end
 end
 
 # `_ruled_curve_point` for one signed generatrix with its type and geometry

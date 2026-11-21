@@ -57,6 +57,63 @@ function _gmsh_delaunay_cavity(T::Triangulation,t0,vid,trace=nothing)
     return cavity,boundary
 end
 
+# `delaunayizeBDS` (meshGFaceBDS.cpp): before the first point is inserted Gmsh
+# swaps the edges of a face's initial triangulation until each is Delaunay in
+# the face's first fundamental form. `edgeSwapTestDelaunayAniso` reads the
+# tensor at the parametric midpoint of the edge and asks whether the vertex
+# opposite in one triangle lies inside the circumcircle of the other;
+# `BDS_SwapEdgeTestQuality(false)` admits the swap when the quadrilateral is
+# strictly convex in the parameter plane; each set of four vertices is examined
+# once (`swapquad`), which also ends the loop.
+#
+# The triangulation of the parameters alone is Delaunay in the parameter
+# plane. On a chart that maps a long strip onto the unit square its cells fan
+# across the strip, their circumradii on the surface are many times the target
+# size and no frontal point is admitted into them. `ground(u,v)` returns
+# `(E,F,G)`; `interior` is unchanged because a swap keeps both cell ids.
+function _gmsh_delaunayize_initial!(T::Triangulation,ground::G,
+                                    interior::AbstractVector{Bool}) where {G}
+    examined=Set{NTuple{4,Int32}}()
+    swaps=0
+    while true
+        pass=0
+        for t in Int32(1):Int32(length(T.alive))
+            (T.alive[t] && interior[t] && !_is_ghost_tri(T,t)) || continue
+            for k in 1:3
+                neighbour=_nbr(T,t,k)
+                neighbour==0 && continue
+                (T.alive[neighbour] && interior[neighbour] &&
+                 !_is_ghost_tri(T,neighbour)) || continue
+                a,b=_edge(T,t,k)
+                _constrained_edge(T,_skey(a,b)) && continue
+                p=_vert(T,t,k)
+                s=_vert(T,neighbour,_nslot(T,neighbour,t))
+                quad=_gmsh_swapquad(a,b,p,s)
+                quad in examined && continue
+                push!(examined,quad)
+                pa=_pt(T,a);pb=_pt(T,b);pp=_pt(T,p);ps=_pt(T,s)
+                metric=ground(0.5*(pa[1]+pb[1]),0.5*(pa[2]+pb[2]))
+                center,radius=_gmsh_circumcenter_metric(pa,pb,pp,metric)
+                _gmsh_metric_distance2(center,ps,metric)<radius || continue
+                orient2(pp,pa,ps)*orient2(pp,ps,pb)>0 || continue
+                _flip!(T,t,k)
+                pass+=1
+                break
+            end
+        end
+        swaps+=pass
+        pass==0 && return swaps
+    end
+end
+
+# Four vertex ids in increasing order, as `swapquad` keys a configuration.
+@inline function _gmsh_swapquad(a,b,c,d)
+    a,b=minmax(Int32(a),Int32(b));c,d=minmax(Int32(c),Int32(d))
+    a,c=minmax(a,c);b,d=minmax(b,d)
+    b,c=minmax(b,c)
+    return (a,b,c,d)
+end
+
 @inline function _gmsh_surface_area2(a,b,c)
     return 0.5*abs((b[1]-a[1])*(c[2]-a[2])-
                    (c[1]-a[1])*(b[2]-a[2]))

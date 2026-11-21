@@ -442,6 +442,12 @@ function (background::_ModelSurfaceParamBackgroundSize)(u,v)
     return background.background(point...)
 end
 
+# The patch Jacobian of a resolved evaluator, given its point at `(u,v)`:
+# the differences `_ruled_surface_d1` takes, without asking that point again.
+@inline function _ruled_jacobian(lift::F,here,u::Float64,v::Float64) where {F}
+    return (_ruled_fd_d1(lift,here,u,v,1),_ruled_fd_d1(lift,here,u,v,2))
+end
+
 # The patch Jacobian: `d1` finite-difference columns of `_ruled_surface_point`.
 @inline function _ruled_jacobian(m::GeoModel,t::Int,u::Float64,v::Float64,
                                  caller)
@@ -479,7 +485,7 @@ function _surface_ruled_trace_carrier(m,options,size_field,lift,T,t,caller,
         function(u,v)
             w=lift(u,v)
             mm=metric_at(wrapped,w[1],w[2],w[3],entity)
-            du,dv=_ruled_jacobian(m,t,u,v,caller)
+            du,dv=_ruled_jacobian(lift,w,Float64(u),Float64(v))
             return _ruled_metric_pullback(mm,du,dv)
         end
     else
@@ -488,7 +494,7 @@ function _surface_ruled_trace_carrier(m,options,size_field,lift,T,t,caller,
         function(u,v)
             w=lift(u,v)
             h=background(w...)
-            du,dv=_ruled_jacobian(m,t,u,v,caller)
+            du,dv=_ruled_jacobian(lift,w,Float64(u),Float64(v))
             inv2=1.0/(h*h)
             return (inv2*Mesh2D._gmsh_dot3(du,du),
                     inv2*Mesh2D._gmsh_dot3(du,dv),
@@ -506,7 +512,7 @@ function _surface_ruled_trace_carrier(m,options,size_field,lift,T,t,caller,
     # `G/vs²` — the actual `I/vs²` pullback — instead of the world-aligned
     # eigenvalue floor `_gmsh_metric_floor` applies on planar domains.
     ground=function(u,v)
-        du,dv=_ruled_jacobian(m,t,u,v,caller)
+        du,dv=_ruled_jacobian(lift,lift(u,v),Float64(u),Float64(v))
         return (Mesh2D._gmsh_dot3(du,du),
                 Mesh2D._gmsh_dot3(du,dv),
                 Mesh2D._gmsh_dot3(dv,dv))
@@ -575,6 +581,11 @@ function _surface_algorithm_ruled_refine!(m,T,xs,ys,segs,markers,embedded,
                                          _gmsh_surface_trace=nothing)
     interior=Vector{Bool}(collect(classify_interior(T)))
     algorithm==3 && return interior
+    # `delaunayizeBDS` runs on the initial mesh before `setLcs` reads its
+    # edges, so the vertex sizes below come from cells that follow the patch.
+    _gmsh_surface_trace isa Mesh2D._GmshSurfaceMetricCarrier &&
+        _gmsh_surface_trace.ground!==nothing &&
+        Mesh2D._gmsh_delaunayize_initial!(T,_gmsh_surface_trace.ground,interior)
     embedded_ids=_surface_embedded_vertex_ids(embedded,index)
     sizes=_ruled_vertex_sizes(T,xs,ys,segs,markers,embedded_ids,world;
                               interior)
@@ -643,12 +654,28 @@ function _model_ruled_surface_mesh(m::GeoModel,t::Int,forced,
                                        Dict{Tuple{Int,Float64},Float64}(),
                                    _periodic_positions=nothing,
                                    algorithm::Int=6)
+    # One surface is asked for thousands of points while the model stands
+    # still: its generatrices' geometry is looked up once for all of them.
+    haskey(task_local_storage(),:_ruled_eval_cache) &&
+        return _model_ruled_surface_fill(m,t,forced,caller,size_field,
+            _mesh1d_options,param_sizes,_periodic_positions,algorithm)
+    return task_local_storage(:_ruled_eval_cache,
+                              Dict{Tuple{Symbol,Int},Any}()) do
+        _model_ruled_surface_fill(m,t,forced,caller,size_field,
+            _mesh1d_options,param_sizes,_periodic_positions,algorithm)
+    end
+end
+
+function _model_ruled_surface_fill(m::GeoModel,t::Int,forced,
+                                   caller::AbstractString,size_field,
+                                   _mesh1d_options,param_sizes,
+                                   _periodic_positions,algorithm::Int)
     xs,ys,markers,segs,embedded,internal,index,canonical=
         _surface_ruled_pslg(m,t,forced,caller;param_sizes=param_sizes,
             _periodic_positions)
     T=constrained_delaunay(xs,ys,segs;internal_segments=internal)
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
-    lift=(u,v)->_ruled_surface_point(m,t,u,v,caller)
+    lift=_ruled_surface_evaluator(m,t,caller)
     bgm_size=_ModelSurfaceParamBackgroundSize(lift,
         _ModelAlgorithmBackgroundSize(m,2,t,options,size_field,caller))
     trace=_surface_ruled_trace_carrier(m,options,size_field,lift,T,t,caller,
