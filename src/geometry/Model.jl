@@ -36,7 +36,7 @@ using ..SizeField: AbstractField, AbstractSizeField, AbstractAnisoField,
                    MinAnisoField, Metric3, metric_size, PostViewField,
                    BoundedSize,
                    field_value, size_at,
-                   AutomaticMeshSizeField, ExtendField,
+                   AutomaticMeshSizeField, ExtendField, AttractorAnisoCurveField,
                    GMSH_MAX_SIZE, _gmsh_bbox_characteristic_length, _metric_scale,
                    _metric_displacement
 import ..SizeField: metric_at, field_value
@@ -6059,6 +6059,36 @@ function _automatic_context_field(m::GeoModel,spec,config,entities,
         hbulk=config.hbulk>=0 ? config.hbulk : nothing,
         gradation=config.gradation,smoothing=config.smoothing,
         features=config.features)
+end
+
+# Upstream `AttractorAnisoCurveField::update`: `Sampling` points per listed
+# curve at equal parameter steps over `parBounds(0)`, each with its normalized
+# first derivative; unknown curves are skipped. Shared by the `.geo` executor
+# and the API session.
+function _attractor_aniso_curve_context_field(m::GeoModel,spec,config,
+                                              caller::AbstractString)
+    points=NTuple{3,Float64}[];tangents=NTuple{3,Float64}[]
+    n=config.sampling
+    for tag in config.curves
+        haskey(m.curves,tag) || continue
+        low,high=model_parametrization_bounds(m,1,tag)
+        ts=[low[1]+(n==1 ? 0.0 : i/(n-1))*(high[1]-low[1]) for i in 0:n-1]
+        xyz=model_value(m,1,tag,ts)
+        der=model_derivative(m,1,tag,ts)
+        for i in 1:n
+            push!(points,(xyz[3i-2],xyz[3i-1],xyz[3i]))
+            d=(der[3i-2],der[3i-1],der[3i]);l=hypot(d...)
+            push!(tangents,l>0 ? d./l : d)
+        end
+    end
+    isempty(points) && throw(ArgumentError(
+        "$caller: Field[$(spec.tag)] AttractorAnisoCurve samples no curves"))
+    return AttractorAnisoCurveField(points,tangents;
+        dist_min=config.dist_min,dist_max=config.dist_max,
+        size_min_tangent=config.size_min_tangent,
+        size_max_tangent=config.size_max_tangent,
+        size_min_normal=config.size_min_normal,
+        size_max_normal=config.size_max_normal)
 end
 
 # Upstream `ExtendField` reads the boundary mesh when the first surface is

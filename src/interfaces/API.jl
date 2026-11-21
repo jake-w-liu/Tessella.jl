@@ -11125,6 +11125,8 @@ function _session_size_field_locked(m::GeoModel;raw::Bool=false)
         elseif kind=="automaticmeshsizefield"
             return _automatic_context_field(
                 m,spec,config,entities,"gmsh API")
+        elseif kind=="attractoranisocurve"
+            return Model._attractor_aniso_curve_context_field(m,spec,config,"gmsh API")
         elseif kind=="extend"
             return Model._extend_context_field(m,spec,config,_params,"gmsh API";
                 mesh1d=()->_session_mesh1d_options(m,"gmsh API"))
