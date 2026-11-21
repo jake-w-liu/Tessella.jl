@@ -17,6 +17,9 @@ out[]=Extrude{{0,0,0.2},{0,0,1},{0.15,0.15,0},Pi/2}{Surface{1};Layers{3};Recombi
 c[]=Extrude{{0,1,0},{0.6,0,0},Pi/2}{Curve{2};Layers{2};};
 """
 
+_point_allocations(m,surface)=
+    @allocated Tessella.Model._ruled_surface_point(m,surface,0.3,0.4,"test")
+
 @testset "exact extrusion evaluates swept surfaces" begin
     A=Tessella.API
     A.initialize()
@@ -43,6 +46,12 @@ c[]=Extrude{{0,1,0},{0.6,0,0},Pi/2}{Curve{2};Layers{2};};
             @test A.mesh.get_nodes(2,30,false,true)[3]==[0.5,0.5]
             @test A.model.get_parametrization(2,13,coords[1:3])==params[1:2]
             if Base.JLOptions().compile_enabled==1
+                # A swept point, as the transfinite grid asks per node.
+                A._with_model() do m
+                    _point_allocations(m,13);_point_allocations(m,30)
+                    @test _point_allocations(m,13)==0
+                    @test _point_allocations(m,30)==0
+                end
                 A.model.get_parametrization(2,13,coords[1:3])
                 # One inversion: a few surface evaluations, no per-step arrays.
                 @test (@allocated A.model.get_parametrization(2,13,coords[1:3]))<
