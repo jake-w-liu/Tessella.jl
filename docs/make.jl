@@ -39,7 +39,7 @@ end
 makedocs(;
     modules=[Tessella],
     sitename="Tessella.jl",
-    authors="Jake Liu",
+    authors="Jake Liu, Claude (Anthropic)",
     format=Documenter.HTML(;
         canonical="https://jake-w-liu.github.io/Tessella.jl/stable/",
         prettyurls=get(ENV, "CI", "false") == "true"),

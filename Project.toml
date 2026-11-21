@@ -1,6 +1,6 @@
 name = "Tessella"
 uuid = "b6a9d00f-e4b0-4f2d-b0cf-3bfe84a413e6"
-authors = ["Jake Liu"]
+authors = ["Jake Liu", "Claude (Anthropic) <noreply@anthropic.com>"]
 version = "0.1.2"
 
 [deps]
