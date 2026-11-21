@@ -201,6 +201,36 @@ function _higher_index_candidates(index::_HigherAssemblyIndex,assembly,owner,ini
         Float64[assembly.nodes[i].point[selected_axis] for i in ordered],ordered)
 end
 
+# What `Model._model_mesh_status` answers for the authority of this assembly,
+# counted on the assembly: cells per dimension outside discrete entities, the
+# completed entities and the Point-owned nodes. A plan asks it once, before
+# its first pass; building a whole authority for three numbers copied and
+# checked every node and cell of the previous mesh.
+function _higher_assembly_status(assembly,m,done;only_visible=false)
+    have=zeros(Int,4)
+    for cell in assembly.cells
+        dimension=msh_dimension(cell.msh)
+        haskey(m.discrete,(dimension,Int(cell.owner[2]))) && continue
+        have[dimension+1]+=1
+    end
+    have[4]>0 && return 3
+    for dim in (2,1)
+        have[dim+1]>0 || continue
+        complete=true
+        for (edim,tag) in model_entities(m)
+            edim==dim || continue
+            only_visible && model_entity_visibility(m,dim,tag)==0 && continue
+            if !((dim,Int32(tag)) in done)
+                complete=false
+                break
+            end
+        end
+        complete && return dim
+    end
+    any(node->node.owner[1]==0 && haskey(m.points,Int(node.owner[2])),assembly.nodes) && return 0
+    return -1
+end
+
 function _higher_assembly_authority(assembly,m,done;ranks=nothing,carrier=nothing,
                                     carrier_rows=Int32[],old_supports=nothing)
     # SetOrder1 deletes old native high-order vertices before extrusion reads
@@ -4495,8 +4525,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     end
     done=old===nothing ? Set{Tuple{Int,Int32}}() : copy(old.done)
     ranks=_higher_node_ranks(assembly,cached,source_node_positions,old)
-    actual=_higher_assembly_authority(assembly,m,done;ranks)
-    status=Model._model_mesh_status(m,actual;only_visible=options.mesh_only_visible)
+    status=_higher_assembly_status(assembly,m,done;only_visible=options.mesh_only_visible)
     phases=Model._model_mesh_generation_phases(dimension,status)
     _higher_ingest_native_inputs!(assembly,m,old)
     _higher_native_parameters!(assembly,m)
