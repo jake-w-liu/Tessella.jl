@@ -46,7 +46,7 @@ function fixture(name;strip_length=5,plane=:XY,shape=:unit,winding=1,height=1.,
     require(law in ("Progression","Bump","Beta"),"unrecognized native grading law")
     grading=law=="Progression" && coefficient==1. ? "" : " Using $law $coefficient"
     text=replace(f.source,before=>"Transfinite Curve{$curves}=$(strip_length+1)$grading;")
-    coherent && (text=replace(text,"Geometry.AutoCoherence=0;"=>"Geometry.AutoCoherence=1;"))
+    coherent || (text=replace(text,"Geometry.AutoCoherence=1;"=>"Geometry.AutoCoherence=0;"))
     levels=layers===:nonbinary ? [0.,.2,.2+(1.0-.2)/2,1.] : f.levels
     grid=long_pair==(1,3) ? (strip_length,1) : (1,strip_length)
     return merge(f,(;source=text,levels,grid,strip_length,law,coefficient,

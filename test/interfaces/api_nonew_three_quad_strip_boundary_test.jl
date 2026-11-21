@@ -16,7 +16,7 @@ function run_tests()
         try
             mktempdir() do directory
                 path=joinpath(directory,"strip.geo")
-                write(path,replace(f.source,"Geometry.AutoCoherence=0"=>"Geometry.AutoCoherence=$coherence"))
+                write(path,replace(f.source,"Geometry.AutoCoherence=1"=>"Geometry.AutoCoherence=$coherence"))
                 opened=API.open_geo!(path;mesh_dim=0);volume=Int(opened.lists["sweep"][2])
                 if coherence==0
                     @test_throws ArgumentError API.mesh.generate(3)

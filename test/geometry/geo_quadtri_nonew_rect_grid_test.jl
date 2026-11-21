@@ -127,8 +127,12 @@ end
         _rgsc_quadratic_reference()
     end
     @testset "Native B3/B2/B0 maps, complete shells and all public surface routes" begin
-        first=_rgsc_product(_RGSC.fixture("rectangular";grid=(2,3),plane=:XY,
-            height=1.,laterals=false,layers=:one))
+        # Without AutoCoherence the sweep leaves coincident Points, which the
+        # conversion to one mixed mesh refuses.
+        duplicated=_RGSC.fixture("rectangular";grid=(2,3),plane=:XY,
+            height=1.,laterals=false,layers=:one)
+        first=_rgsc_product(merge(duplicated,(;source=replace(duplicated.source,
+            "Geometry.AutoCoherence=1;"=>"Geometry.AutoCoherence=0;"))))
         @test_throws r"Points\[[0-9]+\] and \[[0-9]+\] map to mesh node" model_to_mixed(
             first.geometry.model,first.volume,3,Int(first.geometry.lists["sweep"][2]))
         for (grid,plane,height,laterals,layers) in (

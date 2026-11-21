@@ -173,7 +173,6 @@ function check_quadratic(carriers,f,expected)
     return signature
 end
 
-    "quad_strip_$(profile)_R$(laterals)_D$(direction)_P$(order)"
 
 
 function node_geometry(volume=nothing)

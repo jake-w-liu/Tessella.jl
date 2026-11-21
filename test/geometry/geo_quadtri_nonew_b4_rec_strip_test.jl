@@ -86,7 +86,10 @@ function b4_atomic_standalone(f)
         @test text!=f.source
         geometry=B4.execute(text;dim=0);m=geometry.model;t=Int(geometry.lists["sweep"][2])
         before=(repr(m),m.curve_params,deepcopy(m.curve_params))
-        @test_throws r"QuadTriNoNewVerts" mesh_model_volume(m,t)
+        # The first input has unequal opposite sides: Gmsh 4.15.2 meshes it
+        # by falling back to the unstructured algorithm, Tessella refuses it
+        # (recorded as broken in geo_quadtri_nonew_test.jl).
+        @test_throws r"QuadTriNoNewVerts|non-matching node counts" mesh_model_volume(m,t)
         @test repr(m)==before[1] && m.curve_params===before[2] && m.curve_params==before[3]
         @test_throws r"QuadTriNoNewVerts" B4.execute(text;dim=3)
     end

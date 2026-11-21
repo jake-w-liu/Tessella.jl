@@ -86,7 +86,7 @@ function _qtt_arc_source(plane)
     planar=((1.,0.),(2.,0.),(0.,2.),(0.,1.),(0.,0.))
     points=join(["Point($tag)={$(join(ntuple(k->k==axes[1] ? p[1] : k==axes[2] ? p[2] : 0.,3),',')),1};" for (tag,p) in enumerate(planar)],"\n")
     return """
-    Geometry.AutoCoherence=0;
+    Geometry.AutoCoherence=1;
     $points
     Line(1)={1,2};Circle(2)={2,5,3};Line(3)={3,4};Circle(4)={4,5,1};
     Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
@@ -100,7 +100,7 @@ function _qtt_old_source(category,direction,laterals)
     count=length(corners);ids=join(1:count,',')
     points=join("Point($tag)={$(p[1]),$(p[2]),0,1};" for (tag,p) in enumerate(corners))
     curves=join("Line($tag)={$tag,$(mod1(tag+1,count))};" for tag in 1:count)
-    return "Geometry.AutoCoherence=0;"*points*curves*
+    return "Geometry.AutoCoherence=1;"*points*curves*
         "Curve Loop(1)={$ids};Plane Surface(1)={1};"*
         "Transfinite Curve{$ids}=2;Transfinite Surface{1};"*
         (category===:quadrangle ? "Recombine Surface{1};" : "")*

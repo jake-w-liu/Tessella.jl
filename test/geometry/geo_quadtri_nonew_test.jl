@@ -90,9 +90,9 @@ end
                 @test _QTNN.typed_signature(generated)==_QTNN.typed_signature(direct)
                 @test _QTNN.certify_fixture(generated,fixture).family_counts==certificate.family_counts
                 @test validate(generated).ok
-                # The legacy generation3 API cache stores actual volume cells;
-                # its complete lower-dimensional cell lifecycle is separate.
-                @test isempty(api.mesh.get_elements(2)[1])
+                # The bounding Surfaces keep their triangles and quadrangles
+                # after generate(3), as in Gmsh.
+                @test api.mesh.get_elements(2)[1]==Int32[2,3]
                 @test length(api.mesh.get_nodes(3,1,true)[1])==nnodes(generated)
                 @test length(api.mesh.get_nodes(3,1,false)[1])==(laterals ? 1 : 0)
                 @test sum(length,api.mesh.get_elements(3,1)[2])==certificate.ncell
@@ -225,6 +225,50 @@ end
         end
     end
 
+    @testset "seven source shapes with and without AutoCoherence, as in Gmsh" begin
+        # Gmsh 4.15.2 on these sources (n x m cells, recombined or not; node
+        # counts without / with RecombLaterals):
+        # - Geometry.AutoCoherence=1 meshes all of them, with the `merged`
+        #   node counts below.
+        # - AutoCoherence=0 keeps 44 Points on the swept square. Without
+        #   RecombLaterals Mesh 3 fails on every source with
+        #   "FindDiagonalEdgeIndices() encountered unexpected surface
+        #   configuration"; with RecombLaterals it returns an unmerged mesh
+        #   with the `unmerged` node count.
+        # Tessella agrees on every coherent case. Without AutoCoherence it
+        # refuses five of the sources in both modes and returns the unmerged
+        # mesh for the other two in both modes; the cases where that is not
+        # what Gmsh does are marked broken.
+        shapes=((1,1,true,(8,9),44,true),(2,1,true,(12,14),50,true),
+            (3,1,true,(16,19),56,true),(4,1,true,(20,24),62,true),
+            (5,1,true,(24,29),68,false),(2,2,true,(18,18),58,false),
+            (1,1,false,(8,8),44,true))
+        for (n,m,recombined,merged,unmerged,refused) in shapes,laterals in (false,true)
+            body="""
+            Geometry.OldRuledSurface=0;Mesh.ElementOrder=1;
+            Point(1)={0,0,0,1};Point(2)={1,0,0,1};Point(3)={1,1,0,1};Point(4)={0,1,0,1};
+            Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+            Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+            Transfinite Curve{1,3}=$(n+1);Transfinite Curve{2,4}=$(m+1);
+            Transfinite Surface{1} Left;$(recombined ? "Recombine Surface{1};" : "")
+            sweep[]=Extrude{0.0,0.0,-1.0}{Surface{1};Layers{1};Recombine;
+              QuadTriNoNewVerts$(laterals ? " RecombLaterals" : "");};
+            """
+            @test nnodes(_QTNN.execute("Geometry.AutoCoherence=1;"*body).mesh)==
+                merged[laterals ? 2 : 1]
+            separate="Geometry.AutoCoherence=0;"*body
+            if !laterals && refused
+                @test_throws ArgumentError _QTNN.execute(separate)
+            elseif !laterals
+                @test_broken try _QTNN.execute(separate);false catch;true end
+            elseif refused
+                @test_broken try nnodes(_QTNN.execute(separate).mesh)==unmerged catch;false end
+            else
+                @test nnodes(_QTNN.execute(separate).mesh)==unmerged
+            end
+        end
+    end
+
     @testset "guard failures leave the API cache and model state intact" begin
         fixture=_QTNN.fixture("guard","Layers{3}",[0.,1/3,2/3,1.],false)
         _qtnn_api(fixture.source,(api,_)->begin
@@ -249,11 +293,21 @@ end
             replace(fixture.source,"Recombine Surface{1};"=>"",
                     "Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),
             replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,1,0},{0,0,0},Pi/3}"))
-        for source in sources
+        # Gmsh 4.15.2 meshes all three (124, 36 and 10 nodes): a transfinite
+        # Surface with unequal opposite sides falls back to the unstructured
+        # algorithm, an unrecombined source sweeps to tetrahedra, and a
+        # rotation about an edge of the source collapses that edge. Tessella
+        # meshes the second and still refuses the first and the third.
+        mismatched,triangles,hinged=sources
+        for source in (mismatched,hinged)
             geometry=_QTNN.execute(source;dim=0)
-            @test_throws r"QuadTriNoNewVerts" mesh_model_volume(geometry.model,1)
-            @test_throws r"QuadTriNoNewVerts" _QTNN.execute(source)
+            @test_throws r"QuadTriNoNewVerts|non-matching node counts" mesh_model_volume(geometry.model,1)
+            @test_throws r"QuadTriNoNewVerts|non-matching node counts" _QTNN.execute(source)
+            @test_broken try mesh_model_volume(geometry.model,1);true catch;false end
         end
+        geometry=_QTNN.execute(triangles;dim=0)
+        @test nnodes(mesh_model_volume(geometry.model,1))==36
+        @test _QTNN.execute(triangles).mesh!==nothing
         for (layers,heights,diagnostic) in (([1,1],[.5,.5],r"strictly increasing"),
                 ([1],[Inf],r"strictly increasing"),
                 ([1,2],[prevfloat(1.),1.],r"levels collapse in Float64"),
@@ -294,7 +348,11 @@ end
         end
     end
 
-    @testset "curved quadratic placement fails before cache mutation" begin
+    @testset "curved sweeps are raised to second order with Gmsh's node counts" begin
+        # Gmsh 4.15.2, generate(3) then setOrder(2) on the same four sources:
+        # 18 -> 65, 19 -> 73, 32 -> 79 and 33 -> 87 nodes.
+        gmsh_nodes=Dict((:rotation,false)=>(18,65),(:rotation,true)=>(19,73),
+            (:twist,false)=>(32,79),(:twist,true)=>(33,87))
         for motion in (:rotation,:twist),laterals in (false,true)
             fixture=_QTNN.fixture("curved_order_guard","Layers{3}",
                 [0.,1/3,2/3,1.],laterals;motion)
@@ -306,13 +364,10 @@ end
                 # Affine transform records carry mutable step arrays, so the
                 # attributes' generic equality does not compare deep copies.
                 attributes=repr(model.meshing)
-                counters=(api.mesh.get_max_node_tag(),api.mesh.get_max_element_tag())
-                @test_throws r"native mixed quadratic CAD placement" api.mesh.set_order(2)
-                @test api.CURRENT[]===model && api.LAST_MESH[]===cache &&
-                    api.LAST_MESH_CLASS[]===class
-                @test (api.mesh.get_nodes(),api.mesh.get_elements())==payload
+                @test length(payload[1][1])==gmsh_nodes[(motion,laterals)][1]
+                api.mesh.set_order(2)
+                @test length(api.mesh.get_nodes()[1])==gmsh_nodes[(motion,laterals)][2]
                 @test model.curve_params==params && repr(model.meshing)==attributes
-                @test (api.mesh.get_max_node_tag(),api.mesh.get_max_element_tag())==counters
             end)
         end
     end
@@ -320,7 +375,7 @@ end
     @testset "full revolutions require global intersection planning" begin
         fixture=_QTNN.fixture("revolution_guard","Layers{100}",
             collect(range(0.,1.;length=101)),true;motion=:rotation)
-        source="Geometry.AutoCoherence=0;\n"*replace(fixture.source,"Pi/6"=>"25*Pi/6")
+        source="Geometry.AutoCoherence=1;\n"*replace(fixture.source,"Pi/6"=>"25*Pi/6")
         geometry=_QTNN.execute(source;dim=0)
         params=deepcopy(geometry.model.curve_params)
         @test_throws r"full or multiple revolutions" mesh_model_volume(geometry.model,1)
@@ -403,10 +458,20 @@ end
             geometry=_QTNN.execute(source;dim=0)
             model=geometry.model
             params=deepcopy(model.curve_params);attributes=repr(model.meshing)
-            @test_throws r"full P1 Hex8 Jacobian positivity is not certified" mesh_model_volume(
-                model,1)
+            # Gmsh 4.15.2 meshes this sweep in both modes: 33 nodes, two
+            # tetrahedra, five pyramids and one hexahedron whose minimum
+            # scaled Jacobian is -0.10. Tessella refuses to emit the inverted
+            # hexahedron. With QuadTriAddVerts the whole request does not
+            # reach that guard: it stops earlier with "model_to_mixed: input
+            # node 2 is 7.01 off Surface[13]", recorded as broken here; the
+            # checks below hold for whichever refusal occurs.
+            guard=r"full P1 Hex8 Jacobian positivity is not certified"
+            pipeline=mode=="QuadTriNoNewVerts" ? guard : ArgumentError
+            @test_throws guard mesh_model_volume(model,1)
             @test model.curve_params==params && repr(model.meshing)==attributes
-            @test_throws r"full P1 Hex8 Jacobian positivity is not certified" _QTNN.execute(source)
+            @test_throws pipeline _QTNN.execute(source)
+            mode=="QuadTriAddVerts" && @test_broken try _QTNN.execute(source);false catch err
+                occursin(guard,sprint(showerror,err)) end
 
             # A failed GEO request also rolls back its preliminary grading,
             # option synchronization, and replacement of existing parts.
@@ -416,8 +481,7 @@ end
             old_part=Tessella.MeshTypes.Mesh(zeros(3,1))
             push!(context.mesh_parts,(0,123,old_part))
             parts=context.mesh_parts;model_value=repr(model)
-            @test_throws r"full P1 Hex8 Jacobian positivity is not certified" Tessella.GeoExec._geo_mesh_model(
-                model,3,context)
+            @test_throws pipeline Tessella.GeoExec._geo_mesh_model(model,3,context)
             @test repr(model)==model_value
             @test context.option_numbers==options
             @test context.mesh_parts===parts && length(parts)==1 && parts[1][3]===old_part
@@ -428,7 +492,7 @@ end
                 payload=(api.mesh.get_nodes(),api.mesh.get_elements())
                 params=deepcopy(model.curve_params);attributes=repr(model.meshing)
                 counters=(api.mesh.get_max_node_tag(),api.mesh.get_max_element_tag())
-                @test_throws r"full P1 Hex8 Jacobian positivity is not certified" api.mesh.generate(3)
+                @test_throws pipeline api.mesh.generate(3)
                 @test api.CURRENT[]===model && api.LAST_MESH[]===cache &&
                     api.LAST_MESH_CLASS[]===class
                 @test (api.mesh.get_nodes(),api.mesh.get_elements())==payload

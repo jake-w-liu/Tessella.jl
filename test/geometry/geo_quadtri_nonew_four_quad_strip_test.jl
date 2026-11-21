@@ -175,7 +175,11 @@ end
         larger=replace(f.source,"Transfinite Curve{$(join(long_tags,','))}=5;"=>
             "Transfinite Curve{$(first(long_tags))}=6;Transfinite Curve{$(last(long_tags))}=7;")
         @test larger!=f.source
-        _fqsc_atomic(merge(f,(;source=larger)),r"QuadTriNoNewVerts")
+        # Gmsh 4.15.2 meshes this input (a transfinite Surface with unequal
+        # opposite sides falls back to the unstructured algorithm); Tessella
+        # refuses it, which geo_quadtri_nonew_test.jl records as broken. What
+        # is checked here is that the refusal changes nothing.
+        _fqsc_atomic(merge(f,(;source=larger)),r"QuadTriNoNewVerts|non-matching node counts")
         tilted=replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.1,0.0,1.0}")
         @test tilted!=f.source
         _fqsc_atomic(merge(f,(;source=tilted)),r"normal|translation")

@@ -55,7 +55,7 @@ function fixture(name; plane=:XY, shape=:unit, winding=1, height=1., laterals=fa
     pin_text=pins===:auto ? "" : "={$(join((pt[i] for i in pin_order),','))}"
     delta=ntuple(k->k==axes[3] ? Float64(height) : 0.,3)
     source="""
-    Geometry.AutoCoherence=0;Geometry.OldRuledSurface=0;Mesh.ElementOrder=1;
+    Geometry.AutoCoherence=1;Geometry.OldRuledSurface=0;Mesh.ElementOrder=1;
     $points
     $lines
     Curve Loop($loop)={$(join(loop_nodes,','))};Plane Surface($surface)={$loop};

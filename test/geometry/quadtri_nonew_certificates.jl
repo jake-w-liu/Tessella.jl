@@ -152,7 +152,7 @@ end
 
 function helical_fixture(name,pitch,laterals=true)
     levels=collect(range(0.,1.;length=53))
-    source="Geometry.AutoCoherence=0;\n"*SQUARE*
+    source="Geometry.AutoCoherence=1;\n"*SQUARE*
         "sweep[]=Extrude{{0,$pitch,0},{0,1,0},{-1,0,0},13*Pi/6}{Surface{1};"*
         "Layers{52};Recombine;QuadTriNoNewVerts$(laterals ? " RecombLaterals" : "");};\n"
     return (;name,source,levels,laterals,motion=:helical,delta=(0.,Float64(pitch),0.),
@@ -167,7 +167,7 @@ const FOLDED_HEX_VERTICES=(
     (4.8519268813883984,-4.815888438662733,-.9699593788940275))
 
 function folded_hex_source()
-    return "Geometry.AutoCoherence=0;\n"*SQUARE*"""
+    return "Geometry.AutoCoherence=1;\n"*SQUARE*"""
     Extrude{{5.608013059266764,-7.535936173815433,-4.3120799162487025},
             {1,1,0},{1.940745333694334,2.08924428794778,2.658811780113151},
             -2.445577491942423}{

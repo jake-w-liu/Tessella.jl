@@ -39,7 +39,7 @@ function fixture(name;plane=:XY,shape=:unit,winding=1,height=1.,laterals=false,
     pin_text=pins===:auto ? "" : pins===:opposite ? "={3,2,1,4}" : "={$(join(pins,','))}"
     delta=ntuple(k->k==axes[3] ? Float64(height) : 0.,3)
     source="""
-    Geometry.AutoCoherence=0;
+    Geometry.AutoCoherence=1;
     $points
     Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
     Curve Loop(1)={$loop};Plane Surface(1)={1};
