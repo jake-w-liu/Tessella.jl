@@ -1166,12 +1166,14 @@ end
     @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-9),
               axes(reflected.mesh.coords,2))
     # Gmsh 4.15.2's slave nodes: the reflected master nodes of its
-    # integrated grading, about 1e-9 off the exact 30-degree points.
+    # integrated grading, about 1e-9 off the exact 30-degree points. (A
+    # compiled run matches them to 1e-13; the interpreted suite's arc
+    # integration lands 2e-11 away.)
     expected=[-0.8660254030604478,0.5000000012539889,0.0]
-    @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-12),
+    @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-10),
               axes(reflected.mesh.coords,2))
     expected=[-0.49999999864257416,0.8660254045681488,0.0]
-    @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-12),
+    @test any(i->isapprox(reflected.mesh.coords[:,i],expected;atol=1e-10),
               axes(reflected.mesh.coords,2))
 
     # A spline pair under a transfinite constraint: the slave inherits the
