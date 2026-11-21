@@ -377,8 +377,10 @@ Physical Volume("domain", 72) = {1};
         @test read(dynamic_tag_input,String)==_DYNAMIC_TAG_CLI_GEO
         dynamic_tag_mesh=read_mixed_msh(dynamic_tag_output)
         @test validate(dynamic_tag_mesh).ok
+        # Gmsh 4.15.2 `-3` gives the same 83 nodes, 36 lines, 160 triangles
+        # and 188 tetrahedra at the same positions.
         @test mixed_crc(dynamic_tag_mesh).sha==
-              "319dc114170ef39264b379d374d0bb545bca5c18527914f6f7405a9229a65beb"
+              "9d46557219488041b41716230ec11ad024b4f5d3b8b22d1a2eaa0d083ad8af6b"
         @test dynamic_tag_mesh.physical_names==Dict(
             (0,61)=>"corners",(0,65)=>"face probes",(1,62)=>"edges",
             (2,63)=>"boundary",(3,64)=>"domain")
