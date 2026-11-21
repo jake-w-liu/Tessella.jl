@@ -130,6 +130,8 @@ function _model_import_views(slot,caller;sections=nothing)
     mesh=slot.mesh
     mesh isa MixedMesh || return _SessionView[]
     views=_SessionView[];positions=Dict{Tuple{String,String},Int}()
+    # No data section, no view: skip the per-cell tables (a vector per cell).
+    isempty(sections===nothing ? mesh.data_sections : sections) && return views
     element_tags=reduce(vcat,mesh.entity_data.external_element_tags;init=UInt64[])
     cell_nodes=[copy(block.nodes[:,column]) for block in mesh.blocks for column in axes(block.nodes,2)]
     for section in (sections===nothing ? mesh.data_sections : sections)

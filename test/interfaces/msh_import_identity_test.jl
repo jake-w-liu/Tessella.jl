@@ -51,7 +51,8 @@ const IOA_QUAD_TRI_MSH4 = """
             # `Tuple(vector)` made the receipt's type grow with the element
             # count and overflowed the stack for meshes of ~5e5 cells.
             @test identities.cell_events isa Vector
-            @test length(identities.cell_events) == 2
+            # Per-cell source events are only kept for the native-factory certificate.
+            @test isempty(identities.cell_events)
         end
 
         @testset "repeated opens give independent models" begin

@@ -3207,6 +3207,43 @@ end
 
 include("ElementsMshFactory.jl")
 
+# Set of the element tags read so far. Tags are almost always a compact range,
+# so those live in a bitmap (no hashing, no per-tag object); anything sparse or
+# huge goes to a Set. Only `in`, `push!`, `length` and `sizehint!` are used.
+mutable struct _TagSet
+    words::Vector{UInt64}
+    sparse::Set{UInt64}
+    count::Int
+end
+_TagSet()=_TagSet(UInt64[],Set{UInt64}(),0)
+Base.length(set::_TagSet)=set.count
+Base.sizehint!(set::_TagSet,n::Integer)=set
+const _TAGSET_DENSE_LIMIT=UInt64(1)<<26
+@inline _tagset_dense(set::_TagSet,tag::UInt64)=
+    tag<_TAGSET_DENSE_LIMIT && tag<=UInt64(8)*UInt64(set.count)+UInt64(1024)
+@inline function Base.in(tag::UInt64,set::_TagSet)
+    word=Int(tag>>6)+1
+    if word<=length(set.words)
+        @inbounds (set.words[word]>>(tag&63))&UInt64(1)==UInt64(1) && return true
+    end
+    return !isempty(set.sparse) && tag in set.sparse
+end
+@inline function Base.push!(set::_TagSet,tag::UInt64)
+    if _tagset_dense(set,tag)
+        word=Int(tag>>6)+1
+        old=length(set.words)
+        if word>old
+            resize!(set.words,max(word,2old))
+            @inbounds for i in old+1:length(set.words);set.words[i]=UInt64(0);end
+        end
+        @inbounds set.words[word]|=UInt64(1)<<(tag&63)
+    else
+        push!(set.sparse,tag)
+    end
+    set.count+=1
+    return set
+end
+
 mutable struct _MixedReadAccum
     x::Vector{Float64}
     y::Vector{Float64}
@@ -3221,7 +3258,7 @@ mutable struct _MixedReadAccum
     external_node_tags::Vector{UInt64}
     node_entities::Vector{Tuple{Int,Int32}}
     node_parametric::Vector{Union{Nothing,Vector{Float64}}}
-    element_tags::Set{UInt64}
+    element_tags::_TagSet
     connectivity_entries::Int
     physical_name_records::Int
     node_blocks::Int
@@ -3248,7 +3285,7 @@ _MixedReadAccum(track_source_events::Bool=false,factory=nothing) = _MixedReadAcc
     Dict{Int,_MixedReadBucket}(),Dict{Tuple{Int,Int},String}(),
     Dict{Tuple{Int,Int},Int32}(),Dict{Tuple{Int,Int},MixedEntity}(),
     Set{Tuple{Int,Int}}(),Set{Tuple{Int,Int}}(),UInt64[],Tuple{Int,Int32}[],
-    Union{Nothing,Vector{Float64}}[],Set{UInt64}(),0,0,0,0,
+    Union{Nothing,Vector{Float64}}[],_TagSet(),0,0,0,0,
     MixedPeriodicLink[],0,
     Union{MshAncillarySection,_PendingDataSection}[],-1,
     Dict{Tuple{Int,Int},MixedEntity}(),Tuple{Int32,Int32}[],
@@ -4071,7 +4108,8 @@ end
 function _read_mixed_stream(io,limits::_MixedReadLimits,tessella_extensions::Bool,
                             source_identities=nothing,factory_context=nothing;
                             switch_tags::Bool=false)
-    acc=_MixedReadAccum(source_identities!==nothing,factory_context)
+    # Per-cell source events only feed the native-factory certificate.
+    acc=_MixedReadAccum(factory_context!==nothing,factory_context)
     version=0.0
     binary=false; swap=false; wide=true; old_partition=false
     seen_format=false; seen_names=false; seen_entities=false
@@ -5181,17 +5219,20 @@ function _record_mixed_element_tag!(acc,tag::UInt64)
 end
 
 function _msh_element_layout(etype::Int,context::AbstractString)
+    # One concrete tuple type for every branch: a Union here made every
+    # per-cell reader loop box its counters. `nnodes` is 0 for the
+    # variable-connectivity records, which every caller rejects first.
     fixed=get(MSH_CATALOG,etype,nothing)
     fixed!==nothing && return (
-        dim=fixed.dim,nnodes=fixed.nnodes,variable=false,special=false,
-        unit=fixed.nnodes,links=:none)
+        dim=Int(fixed.dim),nnodes=Int(fixed.nnodes),variable=false,special=false,
+        unit=Int(fixed.nnodes),links=:none)
     record=get(MSH_SPECIAL_RECORDS,etype,nothing)
     if record!==nothing
         special=MSH_SPECIAL_TYPES[etype]
-        return (dim=special.dim,
-                nnodes=record.variable ? nothing : record.unit,
-                variable=record.variable,special=true,
-                unit=record.unit,links=record.links)
+        return (dim=Int(special.dim),
+                nnodes=record.variable ? 0 : Int(record.unit),
+                variable=Bool(record.variable),special=true,
+                unit=Int(record.unit),links=Symbol(record.links))
     end
     if haskey(MSH_SPECIAL_TYPES,etype)
         throw(ArgumentError(
@@ -5597,6 +5638,38 @@ function _read_mixed_elements_v4!(acc,io,limits)
     acc.element_blocks=cumulative_blocks
 end
 
+# Translate one binary block of ordinary cells (`width` words per cell: the
+# element tag, then `nn` node tags) into compact node rows. A function barrier
+# with concrete argument types: the per-cell loop must not allocate.
+function _mixed_fill_block_v4!(nodes::Vector{Int32},tags::Vector{UInt64},
+        data::Vector{UInt64},nlocal::Int,nn::Int,width::Int,n0::Int,c0::Int,
+        nodevec::Union{Nothing,Vector{Int32}},nodemap::Dict{UInt64,Int32},
+        seen::_TagSet,allow_zero::Bool)
+    lo=typemax(UInt64); hi=zero(UInt64)
+    @inbounds for k in 1:nlocal
+        offset=(k-1)*width+1
+        tag=data[offset]
+        (tag>0 || allow_zero) || throw(ArgumentError(
+            "read_mixed_msh: element tags must be positive"))
+        tag in seen && throw(ArgumentError(
+            "read_mixed_msh: duplicate element tag $tag"))
+        push!(seen,tag)
+        lo=min(lo,tag); hi=max(hi,tag)
+        base=n0+(k-1)*nn
+        for i in 1:nn
+            external=data[offset+i]
+            external>0 || throw(ArgumentError(
+                "read_mixed_msh: element node tags must be positive"))
+            internal=_mixed_node_internal(nodevec,nodemap,external)
+            internal!=0 || throw(ArgumentError(
+                "read_mixed_msh: element references unknown node tag $external"))
+            nodes[base+i]=internal
+        end
+        tags[c0+k]=tag
+    end
+    return lo,hi
+end
+
 function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
     nblocks=_binary_count(
         _binary_size_t(io,swap,wide,"v4 binary Elements header"),
@@ -5675,6 +5748,29 @@ function _read_mixed_elements_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
             err isa InterruptException && rethrow()
             throw(ArgumentError(
                 "read_mixed_msh: v4 connectivity count overflows Int"))
+        end
+        if !layout.special
+            # Ordinary cells: translate the whole block in place instead of
+            # pushing five values per cell.
+            nn=layout.nnodes
+            n0=length(bucket.nodes); c0=length(bucket.tags)
+            resize!(bucket.nodes,node_target); resize!(bucket.tags,cell_target)
+            resize!(bucket.entities,cell_target); resize!(bucket.external_tags,cell_target)
+            resize!(bucket.partitions,cell_target)
+            lo,hi=_mixed_fill_block_v4!(bucket.nodes,bucket.external_tags,data,
+                nlocal,nn,width,n0,c0,nodevec,acc.node_map,acc.element_tags,
+                acc.factory!==nothing)
+            actual_min=min(actual_min,lo); actual_max=max(actual_max,hi)
+            fill!(view(bucket.tags,c0+1:cell_target),physical)
+            fill!(view(bucket.entities,c0+1:cell_target),Int32(entity))
+            fill!(view(bucket.partitions,c0+1:cell_target),Int32(0))
+            if acc.track_source_events
+                @inbounds for k in 1:nlocal
+                    push!(acc.source_cell_events,(etype,Int32(entity),bucket.external_tags[c0+k]))
+                end
+            end
+            nread+=nlocal
+            continue
         end
         sizehint!(bucket.nodes,node_target); sizehint!(bucket.tags,cell_target)
         sizehint!(bucket.entities,cell_target); sizehint!(bucket.external_tags,cell_target)
