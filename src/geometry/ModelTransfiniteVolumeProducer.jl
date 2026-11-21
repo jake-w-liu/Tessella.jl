@@ -514,7 +514,8 @@ end
 
 function _model_transfinite_volume_production(m,t,mesh,bindings,input,geometry_points,
     node_high_water,element_high_water,caller)
-    tags,retained,layout=bindings
+    tags,retained,layout=bindings[1],bindings[2],bindings[3]
+    actual_faces=length(bindings)>=4 ? bindings[4] : nothing
     positions=Dict(tag=>row for (row,tag) in enumerate(input.mesh.entity_data.external_node_tags))
     for row in eachindex(tags)
         retained[row] || continue
@@ -525,8 +526,12 @@ function _model_transfinite_volume_production(m,t,mesh,bindings,input,geometry_p
     geometry=nothing
     if geometry_points!==nothing && !isempty(geometry_points)
         # Preserve the standalone geometry kernel's arithmetic and cell order.
-        geometry=_mesh_model_volume(m,t;_mesh_input=nothing,_geometry_points=nothing,
-            _boundary_regrade=false)
+        # That kernel is a function of the face grids and the model, so when
+        # the model's own face grids equal the actual ones it would repeat
+        # this mesh bit for bit: copy it instead of meshing the block twice.
+        geometry=_model_transfinite_geometry_repeat(m,t,mesh,actual_faces,caller)
+        geometry===nothing && (geometry=_mesh_model_volume(m,t;_mesh_input=nothing,
+            _geometry_points=nothing,_boundary_regrade=false))
         nnodes(geometry)==nnodes(mesh) &&
             _model_transfinite_volume_cells(geometry)==_model_transfinite_volume_cells(mesh) ||
             throw(ArgumentError("$caller: geometry volume does not share actual emitter events"))
@@ -543,6 +548,27 @@ function _model_transfinite_volume_production(m,t,mesh,bindings,input,geometry_p
         reverse=get(m.meshing.reverse,(3,t),false))
     return _ModelTransfiniteVolumeProduction(mesh,tags,retained,geometry,emission,
         UInt64(node_high_water),UInt64(0),UInt64[],UInt64(element_high_water))
+end
+
+# The standalone geometry rerun differs from the actual block only through
+# its face grids (the model's own, which may differ in the last bit from the
+# actual lower products): its cells are the actual cells, so only the
+# coordinate fill is repeated. Volume smoothing moves the interior after the
+# fill, so a smoothed Region keeps the full rerun.
+function _model_transfinite_geometry_repeat(m,t,mesh,actual_faces,caller)
+    actual_faces===nothing && return nothing
+    get(m.meshing.smoothing,(3,t),0)>0 && return nothing
+    # The standalone run starts with this check; keep its failure.
+    _model_require_point_mesh_geometry(m,caller)
+    boundaries=_model_volume_boundary_surfaces(m,t,caller)
+    length(boundaries)==6 || return nothing
+    s,_,us,vs,ws=_transfinite_volume_frame(m,t,boundaries,caller)
+    faces,_=_transfinite_volume_faces(m,t,boundaries,s,caller)
+    coords=_transfinite_volume_coords(NTuple{3,Float64}[m.points[p] for p in s],
+        (us[1],vs[1],ws[1]),Tuple(faces))
+    size(coords)==size(mesh.coords) || return nothing
+    return mesh isa Mesh ? Mesh(coords;tets=copy(mesh.tets),tet_tag=copy(mesh.tet_tag)) :
+        MixedMesh(coords,deepcopy(mesh.blocks))
 end
 
 _model_transfinite_volume_cells(mesh::Mesh)=[(4,mesh.tets)]

@@ -898,6 +898,25 @@ function _transfinite_volume_warped_mesh(converted_corners, raw_faces,
     return mesh
 end
 
+# Node coordinates of the face-grid (Coons) volume fill alone, in the
+# kernel's lattice order: what `mesh_transfinite_volume(corners, cells;
+# faces)` stores in `coords`, without emitting or certifying cells.
+function _transfinite_volume_coords(corners, cells, raw_faces)
+    nu, nv, nw = _three_counts(cells)
+    npu = _checked_add(nu, 1, "node")
+    npv = _checked_add(nv, 1, "node")
+    npw = _checked_add(nw, 1, "node")
+    node_count = _checked_mul("node", npu, npv, npw)
+    node_id(i::Int, j::Int, k::Int) = Int32(i + 1 + npu * (j + npv * k))
+    converted_corners = _eight_corners(corners)
+    faces = _warped_faces(raw_faces, nu, nv, nw)
+    _certify_shared_edges(faces, nu, nv, nw)
+    coords = Matrix{Float64}(undef, 3, node_count)
+    _fill_warped_volume_coords!(coords, converted_corners, faces, nu, nv, nw,
+                                node_id)
+    return coords
+end
+
 function _mesh_transfinite_volume_warped(corners, nu::Int, nv::Int, nw::Int,
                                          faces, node_id, coords, tets,
                                          tri_tags_source, face_tags;

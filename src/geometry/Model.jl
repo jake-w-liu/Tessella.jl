@@ -57,7 +57,7 @@ using ..Mesh3D: mesh_covers_segment3, mesh_covers_triangle3,
                 _plc_self_intersection3
 using ..BoundaryRecovery: recover_boundary_flips
 using ..Periodic: periodic_identify_affine
-using ..TransfiniteVolume: mesh_transfinite_volume
+using ..TransfiniteVolume: mesh_transfinite_volume, _transfinite_volume_coords
 using ..TransfinitePrism: mesh_transfinite_prism
 using ..StructuredQuadTri: _transfinite_quadtri, _write_pyramid!
 using ..TransfiniteCurve: transfinite_curve_parameters, transfinite_curve_hwall
@@ -8568,6 +8568,31 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
     length(boundaries)==6 || throw(ArgumentError(
         "$caller: transfinite Volume[$t] requires exactly 5 (prism) or 6 " *
         "(hexahedron) boundary surfaces; found $(length(boundaries))"))
+    s,mirror,us,vs,ws=_transfinite_volume_frame(m,t,boundaries,caller)
+    faces,slot_tags,face_ids=_transfinite_volume_faces(m,t,boundaries,s,caller;
+        _mesh_input,_geometry_points)
+    # Gmsh's `MeshTransfiniteVolume` derives `recombined[i]` from each face's
+    # `GFace::recombined()` flag in canonical slot order — `Recombine Surface`
+    # attributes and `Mesh.RecombineAll`, never `Recombine Volume`.
+    recombined=quadtri ? true : Tuple(
+        _model_surface_recombined(m,Int(slot_tags[i])) for i in 1:6)
+    mesh=mesh_transfinite_volume(
+        NTuple{3,Float64}[m.points[p] for p in s],
+        (us[1],vs[1],ws[1]);volume_tag=t,faces=Tuple(faces),
+        face_tags=Tuple(slot_tags),recombine=recombined,
+        mirror=mirror && recombined isa Tuple && !any(recombined))
+    mesh=quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller;_mesh_input) : mesh
+    # The face grids ride with the bindings: the kernel is a function of
+    # them and of model data, which lets the producer tell when a standalone
+    # geometry rerun would repeat this mesh bit for bit.
+    return _return_bindings ? (mesh,(_model_transfinite_volume_boundary(
+        mesh,face_ids,(us[1],vs[1],ws[1]),caller;input=_mesh_input,face_tags=slot_tags,
+        mirror)...,quadtri ? nothing : Tuple(faces))) : mesh
+end
+
+# Canonical corner order `s`, the left-handed-frame flag and the per-
+# direction edge counts of a six-face transfinite Volume (model data only).
+function _transfinite_volume_frame(m::GeoModel,t::Int,boundaries,caller::AbstractString)
     edge_curve=Dict{NTuple{2,Int},Int}()
     neighbors=Dict{Int,Set{Int}}()
     for signed_surface in boundaries
@@ -8658,6 +8683,13 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
             "$caller: transfinite Volume[$t] $direction-direction edges " *
             "have non-matching node counts $family"))
     end
+    return s,mirror,us,vs,ws
+end
+
+# The six face grids of a transfinite Volume in canonical slot order, read
+# from the actual lower products (`_mesh_input`) or from the model.
+function _transfinite_volume_faces(m::GeoModel,t::Int,boundaries,s,caller::AbstractString;
+                                   _mesh_input=nothing,_geometry_points=nothing)
     # Gmsh requires every boundary face to carry a transfinite surface mesh;
     # each face grid is reindexed into its canonical slot here so the volume
     # kernel can interpolate the full Coons transfiniteHex interior — warped
@@ -8682,20 +8714,7 @@ function _transfinite_volume_mesh(m::GeoModel,t::Int,caller::AbstractString;
     all(seen) || throw(ErrorException(
         "$caller: transfinite Volume[$t] boundary faces do not cover the " *
         "canonical six-slot layout"))
-    # Gmsh's `MeshTransfiniteVolume` derives `recombined[i]` from each face's
-    # `GFace::recombined()` flag in canonical slot order — `Recombine Surface`
-    # attributes and `Mesh.RecombineAll`, never `Recombine Volume`.
-    recombined=quadtri ? true : Tuple(
-        _model_surface_recombined(m,Int(slot_tags[i])) for i in 1:6)
-    mesh=mesh_transfinite_volume(
-        NTuple{3,Float64}[m.points[p] for p in s],
-        (us[1],vs[1],ws[1]);volume_tag=t,faces=Tuple(faces),
-        face_tags=Tuple(slot_tags),recombine=recombined,
-        mirror=mirror && recombined isa Tuple && !any(recombined))
-    mesh=quadtri ? _model_transfinite_quadtri(m,t,mesh,boundaries,caller;_mesh_input) : mesh
-    return _return_bindings ? (mesh,_model_transfinite_volume_boundary(
-        mesh,face_ids,(us[1],vs[1],ws[1]),caller;input=_mesh_input,face_tags=slot_tags,
-        mirror)) : mesh
+    return faces,slot_tags,face_ids
 end
 
 # Resolve the actual boundary cells after their independent surface kernels
@@ -11161,7 +11180,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                         Union{
                             _ModelTransfiniteVolumeLayout{_ModelTransfiniteCubeIndex},
                             _ModelTransfiniteVolumeLayout{_ModelTransfinitePrismIndex},
-                            _ModelTransfiniteVolumeLayout{_ModelTransfiniteCompactIndex}}}}}
+                            _ModelTransfiniteVolumeLayout{_ModelTransfiniteCompactIndex}},
+                        Vararg{Any}}}}
         mesh,bindings=_mesh_input===nothing ? (fill,nothing) : fill
         mesh=_consume_volume_attributes(m,t,mesh,caller)
         # model_to_mixed expects an untagged pure volume complex — boundary
