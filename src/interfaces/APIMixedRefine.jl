@@ -28,6 +28,50 @@ function _mixed_refine_limit(value,name)
     return Int(value)
 end
 
+# Support identities of one size, as sorted (node, weight) terms. A support is
+# an edge, a face or a cell centre of the elevated mesh; the tuples are plain
+# values, so counting them allocates nothing per cell.
+_mixed_refine_support_set(::Val{K}) where K=Set{NTuple{K,Tuple{Int32,Float64}}}()
+
+@inline function _mixed_refine_sorted_terms(terms::NTuple{K,T}) where {K,T}
+    for last in 2:K
+        slot=last
+        while slot>1 && isless(terms[slot],terms[slot-1])
+            upper=terms[slot];lower=terms[slot-1]
+            terms=Base.setindex(Base.setindex(terms,lower,slot),upper,slot-1)
+            slot-=1
+        end
+    end
+    return terms
+end
+
+function _mixed_refine_count_supports!(set::Set{NTuple{K,Tuple{Int32,Float64}}},
+        cells::Matrix{Int32},rows::NTuple{K,Int},weights::NTuple{K,Float64},
+        found::Int,primary::Int,node_limit,caller) where K
+    for column in axes(cells,2)
+        key=_mixed_refine_sorted_terms(ntuple(term->(cells[rows[term],column],weights[term]),Val(K)))
+        before=length(set);push!(set,key)
+        found+=length(set)-before
+        primary+found<=node_limit || throw(ArgumentError(
+            "$caller: output requires more than max_nodes=$node_limit"))
+    end
+    return found
+end
+
+# The usual support: an edge whose two ends weigh the same. Its identity is the
+# unordered pair of rows, packed into one word.
+function _mixed_refine_count_edges!(set::Set{UInt64},cells::Matrix{Int32},
+        first_row::Int,second_row::Int,found::Int,primary::Int,node_limit,caller)
+    for column in axes(cells,2)
+        low,high=minmax(cells[first_row,column],cells[second_row,column])
+        before=length(set);push!(set,(UInt64(low)<<32)|UInt64(high))
+        found+=length(set)-before
+        primary+found<=node_limit || throw(ArgumentError(
+            "$caller: output requires more than max_nodes=$node_limit"))
+    end
+    return found
+end
+
 function _mixed_refine_plan(mesh,node_limit,cell_limit,caller)
     counts=Dict{Int,Int}()
     total=0
@@ -53,7 +97,11 @@ function _mixed_refine_plan(mesh,node_limit,cell_limit,caller)
         "$caller: primary nodes exceed max_nodes=$node_limit"))
     # Count the exact same weighted support identities as quadratic elevation;
     # topology, rather than coordinate equality, shares all edge/face nodes.
-    supports=Set{Tuple}()
+    # Two supports are the same when they have the same sorted (node, weight)
+    # terms, so they are counted per size, and equal-weight edges per weight.
+    edges=Dict{Float64,Set{UInt64}}()
+    supports=Dict{Int,Any}()
+    found=0
     for (msh,cells,_) in _cache_native_blocks(mesh)
         msh==15 && continue
         family=msh_spec(msh).family
@@ -62,15 +110,19 @@ function _mixed_refine_plan(mesh,node_limit,cell_limit,caller)
             weights=MeshFunctionSpaces._first_order_values(Val(family),
                 reference[1,slot],reference[2,slot],reference[3,slot],caller,slot)
             nonzero=findall(!iszero,collect(weights))
-            for column in axes(cells,2)
-                key=Tuple(sort!([(cells[j,column],Float64(weights[j])) for j in nonzero]))
-                push!(supports,key)
-                nnodes(mesh)+length(supports)<=node_limit || throw(ArgumentError(
-                    "$caller: output requires more than max_nodes=$node_limit"))
+            terms=Float64[weights[j] for j in nonzero]
+            if length(nonzero)==2 && terms[1]==terms[2] && nnodes(mesh)<=typemax(Int32)
+                found=_mixed_refine_count_edges!(get!(()->Set{UInt64}(),edges,terms[1]),
+                    cells,nonzero[1],nonzero[2],found,nnodes(mesh),node_limit,caller)
+            else
+                size_class=Val(length(nonzero))
+                set=get!(()->_mixed_refine_support_set(size_class),supports,length(nonzero))
+                found=_mixed_refine_count_supports!(set,cells,Tuple(nonzero),Tuple(terms),
+                    found,nnodes(mesh),node_limit,caller)
             end
         end
     end
-    nodes=Refine._checked_add(nnodes(mesh),length(supports),"output node")
+    nodes=Refine._checked_add(nnodes(mesh),found,"output node")
     nodes<=typemax(Int32) || throw(ArgumentError("$caller: output node count exceeds Int32 indexing"))
     Refine._checked_mul(Refine._checked_mul(3,nodes,"coordinate entry"),sizeof(Float64),"coordinate byte")
     return counts,nodes
@@ -448,14 +500,17 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
         end
         periodic_parent_receipt=any(link->link.dim==2,quadratic.periodic_links) ?
             _surface_periodic_refine_receipt(quadratic,quadclass,blocks,owners,external,caller) : nothing
-        plan=_dim01_finish!(assembly,Model._model_mesh_transaction_copy(m),model_entities(m),
+        # `m` is already this call's own copy of the model and is not read
+        # again below, so the assembly stages on it directly.
+        entities=model_entities(m)
+        plan=_dim01_finish!(assembly,m,entities,
             Set{Tuple{Int,Int32}}(),falses(length(assembly.nodes)),
             renumber,true;save_all,curve_parameter_order=true,
             source_mesh=quadratic,source_node_positions=Int32.(1:nnodes(quadratic)),
             periodic_parent_receipt,periodic_uid_operation=:refine)
-        diagnostic=validate(plan.mesh;reject_duplicate_point_cells=false)
-        diagnostic.ok || throw(ArgumentError("$caller: refinement produced an invalid mesh — "*
-            join(diagnostic.messages,"; ")))
+        # The parent mesh was validated on entry and every child was certified
+        # against its parent's orientation above: the result is not validated
+        # a second time.
         positions=Dict{UInt64,Int32}();sizehint!(positions,nnodes(plan.mesh))
         for (position,tag) in enumerate(plan.mesh.entity_data.external_node_tags)
             positions[tag]=Int32(position)

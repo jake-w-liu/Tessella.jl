@@ -863,9 +863,89 @@ function _model_mesh_refined_carrier(plan,carrier::Mesh,tags;caller="mesh refine
     end
     allunique(rows) && all(row->0<row<=nnodes(plan.mesh),rows) || throw(ArgumentError(
         "$caller: refined carrier identities do not form a valid injection"))
-    # Node provenance alone does not certify a carrier's new cells.
-    catalog,actual=_model_mesh_primary_catalog(plan.mesh)
+    # Node provenance alone does not certify a carrier's new cells: each must be
+    # the only cell of the refined mesh on its primary nodes, and an even
+    # permutation of it. Node labels name the rows one to one, so two cells
+    # have the same labels exactly when they have the same rows. A cell is
+    # looked up among the cells that share its largest row (a refined cell's
+    # largest row is a midpoint, which few cells share) and that have the same
+    # row sum: nothing is hashed and nothing is allocated per cell.
     labels=plan.mesh.entity_data.external_node_tags
+    if allunique(labels)
+        function by_largest_row(tables::Vector{Matrix{Int32}},width::Int,node_count::Int)
+            starts=zeros(Int32,node_count+2);total=0
+            @inbounds for nodes in tables,column in axes(nodes,2)
+                high=nodes[1,column]
+                for row in 2:width
+                    high=max(high,nodes[row,column])
+                end
+                starts[high+2]+=Int32(1);total+=1
+            end
+            @inbounds for node in 3:node_count+2
+                starts[node]+=starts[node-1]
+            end
+            table_of=Vector{Int32}(undef,total);column_of=Vector{Int32}(undef,total)
+            sum_of=Vector{Int64}(undef,total)
+            @inbounds for (table,nodes) in enumerate(tables),column in axes(nodes,2)
+                high=nodes[1,column];sum=Int64(high)
+                for row in 2:width
+                    high=max(high,nodes[row,column]);sum+=nodes[row,column]
+                end
+                position=starts[high+1]+Int32(1);starts[high+1]=position
+                table_of[position]=table;column_of[position]=column;sum_of[position]=sum
+            end
+            # Afterwards the cells whose largest row is `r` are starts[r]+1:starts[r+1].
+            return starts,table_of,column_of,sum_of
+        end
+        function certified(tables::Vector{Matrix{Int32}},starts::Vector{Int32},
+                table_of::Vector{Int32},column_of::Vector{Int32},sum_of::Vector{Int64},
+                rows::Vector{Int32},cells::Matrix{Int32},width::Int)
+            @inbounds for column in axes(cells,2)
+                high=rows[cells[1,column]];sum=Int64(high)
+                for row in 2:width
+                    node=rows[cells[row,column]]
+                    high=max(high,node);sum+=node
+                end
+                found=0;inversions=0
+                for position in starts[high]+1:starts[high+1]
+                    sum_of[position]==sum || continue
+                    target=tables[table_of[position]];target_column=column_of[position]
+                    # Where each carrier node sits in the candidate cell (0: nowhere).
+                    p1=0;p2=0;p3=0;p4=0
+                    for row in 1:width
+                        node=rows[cells[row,column]];spot=0
+                        for slot in 1:width
+                            if target[slot,target_column]==node
+                                spot=slot
+                                break
+                            end
+                        end
+                        row==1 ? (p1=spot) : row==2 ? (p2=spot) : row==3 ? (p3=spot) : (p4=spot)
+                    end
+                    (p1==0 || p2==0 || (width>=3 && p3==0) || (width>=4 && p4==0)) && continue
+                    found+=1
+                    inversions=(p1>p2)+(width>=3 ? (p1>p3)+(p2>p3) : 0)+
+                        (width>=4 ? (p1>p4)+(p2>p4)+(p3>p4) : 0)
+                end
+                (found==1 && iseven(inversions)) || return false
+            end
+            return true
+        end
+        for (family,cells) in ((:lin,trace.mesh.segs),(:tri,trace.mesh.tris),(:tet,trace.mesh.tets))
+            isempty(cells) && continue
+            width=size(cells,1)
+            tables=Matrix{Int32}[block.nodes for block in plan.mesh.blocks
+                if block isa ElementBlock && msh_family(block.msh)===family]
+            starts,table_of,column_of,sum_of=by_largest_row(tables,width,nnodes(plan.mesh))
+            certified(tables,starts,table_of,column_of,sum_of,rows,cells,width) ||
+                return nothing,Int32[]
+        end
+        refined=trace.mesh
+        output=Mesh(plan.mesh.coords[:,rows];segs=refined.segs,tris=refined.tris,tets=refined.tets,
+            seg_tag=refined.seg_tag,tri_tag=refined.tri_tag,tet_tag=refined.tet_tag)
+        return output,rows
+    end
+    catalog,actual=_model_mesh_primary_catalog(plan.mesh)
     for (family,cells) in ((:lin,trace.mesh.segs),(:tri,trace.mesh.tris),(:tet,trace.mesh.tets))
         for column in axes(cells,2)
             key=_model_mesh_primary_key(family,labels[rows[cells[:,column]]])
