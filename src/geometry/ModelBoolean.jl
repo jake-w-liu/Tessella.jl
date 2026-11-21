@@ -257,7 +257,11 @@ function _brep_scalar_roots(f,ts::AbstractVector{<:Real},tol;
         elseif signbit(fa)!=signbit(fb)
             flo=fa;lo_,hi_=a,b
             for _ in 1:80
-                mid=(lo_+hi_)/2;fm=f(mid)
+                mid=(lo_+hi_)/2
+                # the bracket is two neighbouring numbers: a further step
+                # evaluates one of them again and leaves it as it is
+                (mid==lo_ || mid==hi_) && break
+                fm=f(mid)
                 fm==0.0 && (lo_=hi_=mid;break)
                 signbit(fm)==signbit(flo) ? (lo_=mid;flo=fm) : (hi_=mid)
             end
@@ -275,6 +279,201 @@ function _brep_scalar_roots(f,ts::AbstractVector{<:Real},tol;
     fs[n]==0.0 && (isempty(out) || ts[n]-out[end]>1e-9*max(1.0,ts[n]-ts[n-1])) &&
         push!(out,Float64(ts[n]))
     return out
+end
+
+# `_brep_scalar_roots(f,_brep_pc_grid(pc,lo,hi),tol)` for an `f` that is a
+# linear form a·x+b·y+c of a B-spline pcurve (`order` 0) or of its first
+# derivative (`order` 1): the same roots, bit for bit, without evaluating
+# the knot spans that cannot hold one.
+#
+# The grid has nine points in every knot span, and a section trace fitted
+# on a sphere chart to 1e-9 has some 1,400 spans: one root search evaluated
+# the spline 12,850 times, and the 96 searches of one sphere/box Boolean
+# 421,450 times (730 s when interpreted). On a knot span the spline lies in
+# the hull of the span's poles, so the linear form is bounded by its values
+# on those poles: a span whose bounds keep one sign, clear of zero, has no
+# zero, no sign change and no near-zero node, and contributes nothing to the
+# search. Only the other spans are sampled, with `f` itself and on the same
+# nodes, and the search runs over them as it does over the whole grid.
+#
+# The one global quantity of the search is the scale of its tangent test,
+# the largest |f| on the grid. The poles bound it from above and the
+# sampled nodes from below; a node between the two thresholds falls back
+# on the full grid.
+function _brep_spl_linear_roots(f,pc,order::Int,a::Float64,b::Float64,
+                                c::Float64,lo,hi,tol;tangents::Bool=true,
+                                subs::Int=8)
+    full()=_brep_scalar_roots(f,_brep_pc_grid(pc,lo,hi;subs=subs),tol;
+                              tangents=tangents)
+    hasproperty(pc,:spl2d) || return full()
+    knots,deg,cps=pc.spl2d
+    (deg isa Integer && order<=deg<=7 && length(cps)>deg) || return full()
+    p=Int(deg);q=p-order
+    npoles=length(cps)-order
+    count=length(knots)-2order
+    inner=@view(knots[1+order:end-order])
+    # the linear form on pole `i` of the spline or of its derivative
+    form(i)=begin
+        pole=_occ_spl2d_pole(knots,p,cps,i,order)
+        a*pole[1]+b*pole[2]+c
+    end
+    bounds=Float64[lo]
+    last_knot=NaN
+    for k in knots
+        k==last_knot && continue
+        last_knot=k
+        lo-1e-12<k<hi+1e-12 && push!(bounds,Float64(k))
+    end
+    push!(bounds,Float64(hi))
+    sort!(bounds)
+    spans=length(bounds)-1
+    spans>=1 || return full()
+    # bounds of the form on each grid span, from the poles of its knot span
+    lows=Vector{Float64}(undef,spans);highs=Vector{Float64}(undef,spans)
+    top=0.0
+    for k in 1:spans
+        mid=clamp((bounds[k]+bounds[k+1])/2,knots[1+order],knots[end-order])
+        sidx=clamp(searchsortedlast(inner,mid),q+1,count-q-1)
+        low=Inf;high=-Inf
+        for i in sidx-q:sidx
+            1<=i<=npoles || continue
+            value=form(i)
+            low=min(low,value);high=max(high,value)
+        end
+        (isfinite(low) && isfinite(high)) || return full()
+        lows[k]=low;highs[k]=high
+        top=max(top,abs(low),abs(high))
+    end
+    scale=max(1.0,top)
+    # clear of zero by more than the tangent threshold and the rounding of
+    # an evaluation or of a node one ulp past its knot
+    margin=4.0*tol*scale+1.0e-9*scale
+    # The last node of a span sits on its right knot and is evaluated on
+    # the span beyond it; where the spline (or its derivative) jumps there,
+    # that value belongs to the next hull, so a span answers for both.
+    active=Vector{Bool}(undef,spans)
+    for k in 1:spans
+        low=lows[k];high=highs[k]
+        k<spans && (low=min(low,lows[k+1]);high=max(high,highs[k+1]))
+        active[k]=!(low>margin || high<-margin)
+    end
+    any(active) || return Float64[]
+    n=(subs+1)*spans
+    out=Float64[]
+    ts=Vector{Float64}(undef,subs+1);fs=Vector{Float64}(undef,subs+1)
+    previous_f=0.0;previous_t=0.0;previous_before=0.0;have_previous=false
+    seen=0.0                   # largest |f| sampled so far
+    pending=Tuple{Int,Float64,Float64}[]   # tangent candidates (out slot, t, |f|)
+    emit(r,width)=(isempty(out) || r-out[end]>1e-9*max(1.0,width)) &&
+        push!(out,r)
+    # one grid step of `_brep_scalar_roots`: nodes i and i+1, the value
+    # before node i for the tangent test
+    function step(i,ta,tb,fa,fb,before,has_before)
+        if fa==0.0
+            emit(Float64(ta),tb-ta)
+        elseif signbit(fa)!=signbit(fb)
+            flo=fa;lo_,hi_=ta,tb
+            for _ in 1:80
+                mid=(lo_+hi_)/2
+                (mid==lo_ || mid==hi_) && break
+                fm=f(mid)
+                fm==0.0 && (lo_=hi_=mid;break)
+                signbit(fm)==signbit(flo) ? (lo_=mid;flo=fm) : (hi_=mid)
+            end
+            emit((lo_+hi_)/2,tb-ta)
+        elseif tangents && i>1 && i<n-1 && has_before &&
+                abs(fa)<=abs(before) && abs(fa)<=abs(fb)
+            # decided once the scale of the whole grid is bracketed
+            push!(pending,(length(out),ta,abs(fa)))
+            abs(fa)<=tol*scale &&
+                (isempty(out) || ta-out[end]>1e-9*max(1.0,tb-ta)) &&
+                push!(out,Float64(ta))
+        end
+        return nothing
+    end
+    for k in 1:spans
+        if !active[k]
+            have_previous=false
+            continue
+        end
+        lower=bounds[k];upper=bounds[k+1]
+        for j in 0:subs
+            t=fma(upper-lower,j/subs,lower)
+            ts[j+1]=t;fs[j+1]=f(t)
+            seen=max(seen,abs(fs[j+1]))
+        end
+        base=(subs+1)*(k-1)
+        # the step from the last node of the span before to this first one
+        have_previous && step(base,previous_t,ts[1],previous_f,fs[1],
+                              previous_before,true)
+        for j in 1:subs
+            before=j>1 ? fs[j-1] : previous_f
+            step(base+j,ts[j],ts[j+1],fs[j],fs[j+1],before,
+                 j>1 || have_previous)
+        end
+        previous_f=fs[subs+1];previous_t=ts[subs+1]
+        previous_before=fs[subs];have_previous=true
+    end
+    active[spans] && fs[subs+1]==0.0 &&
+        (isempty(out) || ts[subs+1]-out[end]>1e-9*max(1.0,ts[subs+1]-ts[subs])) &&
+        push!(out,Float64(ts[subs+1]))
+    # the tangent test compared |f| with tol·(largest |f| on the grid): the
+    # answers above used the upper bound of that scale; they stand when the
+    # lower bound gives the same ones
+    exact_low=tol*max(1.0,seen);exact_high=tol*scale
+    for (_,_,magnitude) in pending
+        exact_low<magnitude<=exact_high && return full()
+    end
+    return out
+end
+
+# Outer and inner bounds (umin,umax,vmin,vmax) of what a B-spline pcurve's
+# sample grid over [lo,hi] spans: the hull of its poles contains every
+# sample, and the sample nearest the parameter of each extreme pole is one
+# of them. `nothing` when the record is not a plain spline over that range.
+function _brep_spl_extent_bounds(pc,lo,hi;subs::Int=8)
+    knots,deg,cps=pc.spl2d
+    (deg isa Integer && 0<=deg<=7 && length(cps)>deg) || return nothing
+    p=Int(deg);n=length(cps)
+    (lo<=knots[1] && hi>=knots[end]) || return nothing
+    umin=vmin=Inf;umax=vmax=-Inf
+    iumin=iumax=ivmin=ivmax=1
+    for i in 1:n
+        pole=cps[i]
+        pole[1]<umin && (umin=pole[1];iumin=i)
+        pole[1]>umax && (umax=pole[1];iumax=i)
+        pole[2]<vmin && (vmin=pole[2];ivmin=i)
+        pole[2]>vmax && (vmax=pole[2];ivmax=i)
+    end
+    (isfinite(umin) && isfinite(umax) && isfinite(vmin) && isfinite(vmax)) ||
+        return nothing
+    # the grid node nearest pole i's own parameter (the mean of its knots)
+    function sample(i)
+        t=p==0 ? knots[i] : sum(@view(knots[i+1:i+p]))/p
+        t=clamp(t,lo,hi)
+        k=clamp(searchsortedlast(knots,t),1,length(knots)-1)
+        lower=knots[k];upper=knots[k+1]
+        while upper==lower && k<length(knots)-1
+            k+=1;upper=knots[k+1]
+        end
+        upper>lower || return _brep_pc_eval(pc,lower)
+        j=clamp(round(Int,subs*(t-lower)/(upper-lower)),0,subs)
+        return _brep_pc_eval(pc,fma(upper-lower,j/subs,lower))
+    end
+    return ((umin,umax,vmin,vmax),
+            (sample(iumin)[1],sample(iumax)[1],
+             sample(ivmin)[2],sample(ivmax)[2]))
+end
+
+# The linear form of `_brep_pc_level` when the pcurve is a line: (a,b,c) with
+# level(uv)=a·u+b·v+c, else `nothing`.
+function _brep_pc_level_linear(pc)
+    hasproperty(pc,:neg2d) && return _brep_pc_level_linear(pc.neg2d[1])
+    (hasproperty(pc,:lvl2d) || !hasproperty(pc,:lin2d)) && return nothing
+    o,d=pc.lin2d
+    nn=hypot(d[1],d[2])
+    nn==0.0 && return nothing
+    return (d[2]/nn,-d[1]/nn,-(o[1]*d[2]-o[2]*d[1])/nn)
 end
 
 # implicit level of an elementary pcurve — ~signed uv distance (negative
@@ -332,15 +531,83 @@ function _brep_pc_project(pc,uv,lo,hi,tol)
     return t
 end
 
+# The node of `_brep_pc_grid(pc,lo,hi;subs)` nearest to `uv`, the first one
+# in grid order among equals, for a plain B-spline pcurve; `nothing` for
+# any other record. Every projection onto a fitted trace walked that whole
+# grid (five points in each of some 1,400 knot spans, about 300 projections
+# in one sphere/box Boolean: 2.2 million evaluations). A knot span lies in
+# the box of its poles, so the distance from `uv` to that box bounds what
+# any of its nodes can reach: the spans are visited nearest box first and
+# the walk ends when no box left can beat the node in hand.
+function _brep_spl_nearest_node(pc,uv,lo,hi;subs::Int=4)
+    hasproperty(pc,:spl2d) || return nothing
+    knots,deg,cps=pc.spl2d
+    (deg isa Integer && 0<=deg<=7 && length(cps)>deg) || return nothing
+    p=Int(deg);npoles=length(cps);count=length(knots)
+    bounds=Float64[lo]
+    last_knot=NaN
+    for k in knots
+        k==last_knot && continue
+        last_knot=k
+        lo-1e-12<k<hi+1e-12 && push!(bounds,Float64(k))
+    end
+    push!(bounds,Float64(hi))
+    sort!(bounds)
+    spans=length(bounds)-1
+    spans>=1 || return nothing
+    reach=Vector{Float64}(undef,spans)     # squared distance to the box
+    at=Vector{Int}(undef,spans)            # knot span of each grid span
+    for k in 1:spans
+        mid=clamp((bounds[k]+bounds[k+1])/2,knots[1],knots[end])
+        at[k]=clamp(searchsortedlast(knots,mid),p+1,count-p-1)
+    end
+    for k in 1:spans
+        umin=vmin=Inf;umax=vmax=-Inf
+        # the span's own poles, and the next span's: the last node sits on
+        # the right knot and can be evaluated there
+        for i in at[k]-p:at[min(k+1,spans)]
+            1<=i<=npoles || continue
+            pole=cps[i]
+            umin=min(umin,pole[1]);umax=max(umax,pole[1])
+            vmin=min(vmin,pole[2]);vmax=max(vmax,pole[2])
+        end
+        (isfinite(umin) && isfinite(umax) && isfinite(vmin) && isfinite(vmax)) ||
+            return nothing
+        du=max(umin-uv[1],0.0,uv[1]-umax);dv=max(vmin-uv[2],0.0,uv[2]-vmax)
+        reach[k]=du*du+dv*dv
+    end
+    best=bounds[1];bd=Inf;best_index=typemax(Int)
+    for k in sortperm(reach)
+        # a box strictly farther than the node in hand (rounding allowed
+        # for) holds no nearer node, and no equal one either
+        reach[k]>bd*(1.0+1.0e-9) && break
+        lower=bounds[k];upper=bounds[k+1]
+        for j in 0:subs
+            t=fma(upper-lower,j/subs,lower)
+            q=_brep_pc_eval(pc,t)
+            d2=(q[1]-uv[1])*(q[1]-uv[1])+(q[2]-uv[2])*(q[2]-uv[2])
+            index=(subs+1)*(k-1)+j+1
+            if d2<bd || (d2==bd && index<best_index)
+                bd=d2;best=t;best_index=index
+            end
+        end
+    end
+    isfinite(bd) || return nothing
+    return best
+end
+
 # project uv onto pc over [lo,hi] — returns (t, uv residual) at the
 # converged nearest point regardless of tolerance
 function _brep_pc_project_res(pc,uv,lo,hi)
-    ts=_brep_pc_grid(pc,lo,hi;subs=4)
-    best=ts[1];bd=Inf
-    for t in ts
-        p=_brep_pc_eval(pc,t)
-        d2=(p[1]-uv[1])*(p[1]-uv[1])+(p[2]-uv[2])*(p[2]-uv[2])
-        d2<bd && (bd=d2;best=t)
+    best=_brep_spl_nearest_node(pc,uv,lo,hi)
+    if best===nothing
+        ts=_brep_pc_grid(pc,lo,hi;subs=4)
+        best=ts[1];bd=Inf
+        for t in ts
+            p=_brep_pc_eval(pc,t)
+            d2=(p[1]-uv[1])*(p[1]-uv[1])+(p[2]-uv[2])*(p[2]-uv[2])
+            d2<bd && (bd=d2;best=t)
+        end
     end
     t=best
     for _ in 1:40
@@ -682,10 +949,10 @@ function _brep_pc_ray_crossings(pc,t0,t1,pu,pv,tol)
     # generic records (spl2d, tan2d/tan2dv): sign changes of v(t)−pv over
     # the curve's own sample grid; tangency on the ray adds an even count,
     # so parity follows the interior sign-change roots alone
-    ts=_brep_pc_grid(pc,lo,hi)
     hits=0
-    for t in _brep_scalar_roots(t->_brep_pc_eval(pc,t)[2]-pv,ts,tol;
-                                tangents=false)
+    for t in _brep_spl_linear_roots(t->_brep_pc_eval(pc,t)[2]-pv,pc,0,
+                                    0.0,1.0,-Float64(pv),lo,hi,tol;
+                                    tangents=false)
         px=_brep_pc_eval(pc,t)[1]
         px<=pu+tol && continue
         dv=_brep_pc_tangent(pc,t)[2]
@@ -2462,38 +2729,56 @@ function _brep_ix_sec_lin(sec_pc,el,et0,et1,tol;pu=0.0,pv=0.0)
     lo,hi=minmax(et0,et1)
     dlo,dhi=_brep_pc_domain(sec_pc)
     (isfinite(dlo)&&isfinite(dhi)) || return Float64[]
-    ts=_brep_pc_grid(sec_pc,dlo,dhi)
-    umin,umax,vmin,vmax=Inf,-Inf,Inf,-Inf
-    for tt in ts
-        q=_brep_pc_eval(sec_pc,tt)
-        umin=min(umin,q[1]);umax=max(umax,q[1])
-        vmin=min(vmin,q[2]);vmax=max(vmax,q[2])
-    end
     # edge uv extent over its span (linear → ends suffice)
     e1=(eo[1]+lo*ed[1],eo[2]+lo*ed[2])
     e2=(eo[1]+hi*ed[1],eo[2]+hi*ed[2])
     eu_lo,eu_hi=minmax(e1[1],e2[1]);ev_lo,ev_hi=minmax(e1[2],e2[2])
+    # The section's uv extent over its sample grid is only asked which
+    # periodic copies of the line can meet it. The poles bound that extent
+    # from outside and one sample at each extreme pole from inside: when
+    # both give the same copies, those are the grid's (the grid, nine
+    # evaluations in each of a fitted trace's 1,400 spans, was walked for
+    # every edge otherwise, and is when the two disagree).
+    copies(umin,umax,vmin,vmax)=(
+        pu>0 ? (floor(Int,(umin-eu_hi)/pu)-1,ceil(Int,(umax-eu_lo)/pu)+1) : (0,0),
+        pv>0 ? (floor(Int,(vmin-ev_hi)/pv)-1,ceil(Int,(vmax-ev_lo)/pv)+1) : (0,0))
+    kuv=nothing
+    if pu<=0 && pv<=0
+        kuv=((0,0),(0,0))
+    elseif hasproperty(sec_pc,:spl2d)
+        outer=_brep_spl_extent_bounds(sec_pc,dlo,dhi)
+        if outer!==nothing
+            from_poles=copies(outer[1]...)
+            from_poles==copies(outer[2]...) && (kuv=from_poles)
+        end
+    end
+    if kuv===nothing
+        umin,umax,vmin,vmax=Inf,-Inf,Inf,-Inf
+        for tt in _brep_pc_grid(sec_pc,dlo,dhi)
+            q=_brep_pc_eval(sec_pc,tt)
+            umin=min(umin,q[1]);umax=max(umax,q[1])
+            vmin=min(vmin,q[2]);vmax=max(vmax,q[2])
+        end
+        kuv=copies(umin,umax,vmin,vmax)
+    end
     # copies of the line in u: distinct only when the edge is not u-parallel
     un=abs(ed[2])>1e-12*sqrt(dd)          # u-shift moves the line
     vn=abs(ed[1])>1e-12*sqrt(dd)          # v-shift moves the line
-    kus=(pu>0 && un) ?
-        (floor(Int,(umin-eu_hi)/pu)-1:ceil(Int,(umax-eu_lo)/pu)+1) : (0:0)
-    kvs=(pv>0 && vn) ?
-        (floor(Int,(vmin-ev_hi)/pv)-1:ceil(Int,(vmax-ev_lo)/pv)+1) : (0:0)
+    kus=(pu>0 && un) ? (kuv[1][1]:kuv[1][2]) : (0:0)
+    kvs=(pv>0 && vn) ? (kuv[2][1]:kuv[2][2]) : (0:0)
     # validation copies cover both axes fully (a u-parallel edge's copies
     # coincide as lines but its span still lives on the canonical band)
-    kusV=pu>0 ?
-        (floor(Int,(umin-eu_hi)/pu)-1:ceil(Int,(umax-eu_lo)/pu)+1) : (0:0)
-    kvsV=pv>0 ?
-        (floor(Int,(vmin-ev_hi)/pv)-1:ceil(Int,(vmax-ev_lo)/pv)+1) : (0:0)
+    kusV=pu>0 ? (kuv[1][1]:kuv[1][2]) : (0:0)
+    kvsV=pv>0 ? (kuv[2][1]:kuv[2][2]) : (0:0)
     ns=sqrt(dd)
     out=Float64[]
     for ku in kus, kv in kvs
         δu,δv=ku*pu,kv*pv
-        hits=_brep_scalar_roots(
+        hits=_brep_spl_linear_roots(
             t->(q=_brep_pc_eval(sec_pc,t);
                 ((q[1]-δu-eo[1])*ed[2]-(q[2]-δv-eo[2])*ed[1])/ns),
-            ts,tol)
+            sec_pc,0,ed[2]/ns,-ed[1]/ns,
+            ((δv+eo[2])*ed[1]-(δu+eo[1])*ed[2])/ns,dlo,dhi,tol)
         for t in hits
             for ku2 in kusV, kv2 in kvsV
                 uw=(let q=_brep_pc_eval(sec_pc,t);
@@ -2663,12 +2948,18 @@ function _brep_ix_generic(sec_pc,edge_pc,et0,et1,tol;
                           sec_crv=nothing,edge_crv=nothing,
                           pu=0.0,pv=0.0)
     lo,hi=minmax(et0,et1)
-    ts=_brep_pc_grid(edge_pc,lo,hi)
     lvl=_brep_pc_level(sec_pc)
     if lvl!==nothing
-        hits=_brep_scalar_roots(t->lvl(_brep_pc_eval(edge_pc,t)),ts,tol)
+        line=_brep_pc_level_linear(sec_pc)
+        hits=line===nothing ?
+            _brep_scalar_roots(t->lvl(_brep_pc_eval(edge_pc,t)),
+                               _brep_pc_grid(edge_pc,lo,hi),tol) :
+            _brep_spl_linear_roots(t->lvl(_brep_pc_eval(edge_pc,t)),
+                                   edge_pc,0,line[1],line[2],line[3],
+                                   lo,hi,tol)
     else
-        hits=_brep_pc_curve_hits(sec_pc,edge_pc,ts,tol)
+        hits=_brep_pc_curve_hits(sec_pc,edge_pc,
+                                 _brep_pc_grid(edge_pc,lo,hi),tol)
     end
     out=Float64[]
     # fitted traces (spl2d carrying lvl2d) deviate from the true contour by
@@ -3297,8 +3588,8 @@ function _brep_pc_urange(pc,t0,t1)
         u=_brep_pc_eval(pc,t)[1]
         umin=min(umin,u);umax=max(umax,u)
     end
-    for t in _brep_scalar_roots(t->_brep_pc_tangent(pc,t)[1],
-                                _brep_pc_grid(pc,lo,hi),1e-9;tangents=false)
+    for t in _brep_spl_linear_roots(t->_brep_pc_tangent(pc,t)[1],pc,1,
+                                    1.0,0.0,0.0,lo,hi,1e-9;tangents=false)
         u=_brep_pc_eval(pc,t)[1]
         umin=min(umin,u);umax=max(umax,u)
     end
@@ -3316,8 +3607,8 @@ function _brep_pc_vrange(pc,t0,t1)
         v=_brep_pc_eval(pc,t)[2]
         vmin=min(vmin,v);vmax=max(vmax,v)
     end
-    for t in _brep_scalar_roots(t->_brep_pc_tangent(pc,t)[2],
-                                _brep_pc_grid(pc,lo,hi),1e-9;tangents=false)
+    for t in _brep_spl_linear_roots(t->_brep_pc_tangent(pc,t)[2],pc,1,
+                                    0.0,1.0,0.0,lo,hi,1e-9;tangents=false)
         v=_brep_pc_eval(pc,t)[2]
         vmin=min(vmin,v);vmax=max(vmax,v)
     end
@@ -3376,11 +3667,10 @@ function _brep_pc_split_at_useam(pc,t0,t1,u_seam0,period,tol)
         kmin=ceil(Int,(umin-u_seam0)/period)-1
         kmax=floor(Int,(umax-u_seam0)/period)+1
         lo,hi=minmax(t0,t1)
-        ts=_brep_pc_grid(pc,lo,hi)
         for k in kmin:kmax
-            append!(cuts,_brep_scalar_roots(
-                t->_brep_pc_eval(pc,t)[1]-u_seam0-k*period,ts,tol;
-                tangents=false))
+            append!(cuts,_brep_spl_linear_roots(
+                t->_brep_pc_eval(pc,t)[1]-u_seam0-k*period,pc,0,
+                1.0,0.0,-(u_seam0+k*period),lo,hi,tol;tangents=false))
         end
         filter!(t->t>t0+tol && t<t1-tol,cuts)
     end
@@ -3789,11 +4079,10 @@ function _brep_pc_split_all_useams(pc,t0,t1,period,ulo,tol)
         kmin=ceil(Int,(umin-ulo)/period)-1
         kmax=floor(Int,(umax-ulo)/period)+1
         lo,hi=minmax(t0,t1)
-        ts=_brep_pc_grid(pc,lo,hi)
         for k in kmin:kmax
-            append!(cuts,_brep_scalar_roots(
-                t->_brep_pc_eval(pc,t)[1]-ulo-k*period,ts,tol;
-                tangents=false))
+            append!(cuts,_brep_spl_linear_roots(
+                t->_brep_pc_eval(pc,t)[1]-ulo-k*period,pc,0,
+                1.0,0.0,-(ulo+k*period),lo,hi,tol;tangents=false))
         end
         filter!(t->t>t0+tol && t<t1-tol,cuts)
     end

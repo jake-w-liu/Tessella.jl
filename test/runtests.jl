@@ -313,6 +313,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_nurbs_periodic_patch_test.jl",
         "interfaces/api_occ_revolve_mixed_dimensions_test.jl",
         "geometry/model_high_order_arc_midpoint_test.jl",
+        "geometry/brep_spline_roots_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
