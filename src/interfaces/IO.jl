@@ -2100,7 +2100,9 @@ struct _GeoGeometryParts
     build::Any
     cache::Base.RefValue{Any}
 end
-_GeoGeometryParts(carrier,parts,rows,node_tags)=
+# The four-argument form is typed in its last argument: left untyped it
+# replaces the struct's own generic constructor, which precompilation refuses.
+_GeoGeometryParts(carrier,parts,rows,node_tags::AbstractVector)=
     _GeoGeometryParts(carrier,node_tags,nothing,Ref{Any}((parts,rows)))
 _GeoGeometryParts(carrier,node_tags,build)=
     _GeoGeometryParts(carrier,node_tags,build,Ref{Any}(nothing))
