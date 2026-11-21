@@ -1676,7 +1676,9 @@ _subseg_encroached(T::Triangulation, a, b) = _subseg_encroacher(T, a, b) != 0
 end
 
 # split subsegment (a,b) at its midpoint; update constraints and interior flags
-function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vector{Bool},pointids)
+function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vector{Bool},pointids,
+                            encpending::Union{Nothing,Vector{NTuple{2,Int32}}}=nothing,
+                            workspace=nothing,newt::Vector{Int32}=Int32[])
     pa = _pt(T,a); pb = _pt(T,b)
     mx=_midpoint2(pa[1],pb[1]);my=_midpoint2(pa[2],pb[2])
     mp=(mx==0 ? 0.0 : mx,my==0 ? 0.0 : my)
@@ -1697,7 +1699,13 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
     end
     _segidx_delete!(T,key)
     _segidx_insert!(T,_skey(a,mid)); _segidx_insert!(T,_skey(mid,b))
-    _insert_point!(T, mid; constrained=true)
+    # `_insert_point!(T,mid;constrained=true)`, keeping the cavity and the new
+    # cells in hand for the interior update below.
+    px,py=_pt(T,mid)
+    cavity,boundary=_delaunay_cavity(T,locate(T,px,py,mid),mid,true;workspace)
+    for t in cavity; _killtri!(T,t); end
+    empty!(newt)
+    _retriangulate_cavity!(T,boundary,mid,newt;workspace)
     # A rounded midpoint is not exactly on the segment.  At Float64 resolution
     # (cascading splits at a small input angle) the cavity can then miss a half;
     # report that here instead of through a later parity/assertion failure.
@@ -1705,19 +1713,91 @@ function _split_subsegment!(T::Triangulation, a::Int32, b::Int32, interior::Vect
         throw(ErrorException("refine!: splitting constrained segment ($a,$b) at Float64 " *
                              "resolution lost a subsegment (an input angle is too small for " *
                              "the requested quality bound)"))
-    # constraints changed → recompute interior (segment splits are comparatively rare)
-    ni = _classify_interior(T)
-    # Any existing slot whose interior flag changes must be rescanned; new slots
-    # are already pending through `_newtri!`.
-    shared=min(length(interior),length(ni))
-    @inbounds for i in 1:shared
-        if interior[i]!=ni[i]
-            i<T.bad_scan_from && (T.bad_scan_from=Int32(i))
-            _slotheap_push!(T.bad_pending, i)
+    # The split leaves the constrained loops what they were, so every cell
+    # outside the cavity keeps its side. Only the cells of the new vertex's
+    # star need a flag, and each has one edge on the cavity shell: it lies on
+    # its outer neighbour's side unless that edge is a boundary constraint.
+    # (This used to reclassify the whole triangulation by flood fill on every
+    # split: 67% of a refinement to 150,000 triangles, and quadratic.) New
+    # slots are already pending for the quality scan through `_newtri!`.
+    @inbounds for t in cavity
+        t<=length(interior) && (interior[t]=false)
+    end
+    while length(interior)<length(T.alive); push!(interior,false); end
+    @inbounds for t in newt
+        if _is_ghost_tri(T,t)
+            interior[t]=false
+            continue
+        end
+        outer=_nbr(T,t,3)                      # across the shell edge
+        side=outer!=0 && interior[outer]
+        interior[t]=(_skey(_vert(T,t,1),_vert(T,t,2)) in T.seg) ? !side : side
+    end
+    encpending===nothing || _enc_push_cells!(encpending,T,newt)
+    return mid
+end
+
+# ── Candidates of the encroachment search ──────────────────────────────────
+# `_find_encroached` returns the first encroached subsegment in key order,
+# and a subsegment is encroached exactly when the apex of one of its two
+# adjacent cells lies in its diametral disk. That can only change when one
+# of those cells is replaced, so the refinement loop keeps the subsegments
+# whose adjacent cells changed in a min-heap by key and examines only those:
+# the smallest encroached key in the heap is the one a scan of every
+# subsegment would return. (The scan of all subsegments on every step was
+# 21% of a refinement to 150,000 triangles and grew with the boundary.)
+@inline function _enc_push!(heap::Vector{NTuple{2,Int32}},key::NTuple{2,Int32})
+    push!(heap,key)
+    slot=length(heap)
+    @inbounds while slot>1
+        parent=slot>>1
+        heap[parent]<=key && break
+        heap[slot]=heap[parent]
+        slot=parent
+    end
+    @inbounds heap[slot]=key
+    return nothing
+end
+
+function _enc_pop!(heap::Vector{NTuple{2,Int32}})
+    last=pop!(heap)
+    isempty(heap) && return nothing
+    slot=1;count=length(heap)
+    @inbounds while 2slot<=count
+        child=2slot
+        child<count && heap[child+1]<heap[child] && (child+=1)
+        heap[child]<last || break
+        heap[slot]=heap[child]
+        slot=child
+    end
+    @inbounds heap[slot]=last
+    return nothing
+end
+
+# The constrained edges of freshly created cells become candidates.
+function _enc_push_cells!(heap::Vector{NTuple{2,Int32}},T::Triangulation,cells)
+    @inbounds for t in cells
+        _is_ghost_tri(T,t) && continue
+        for k in 1:3
+            a,b=_edge(T,t,k)
+            key=_skey(a,b)
+            (key in T.seg || key in T.internal) && _enc_push!(heap,key)
         end
     end
-    resize!(interior, length(ni)); @inbounds for i in eachindex(ni); interior[i]=ni[i]; end
-    return mid
+    return nothing
+end
+
+# Every subsegment, as the initial candidate heap (an ascending list is one).
+_enc_candidates(T::Triangulation)=copy(_sorted_segs(T))
+
+function _find_encroached!(T::Triangulation,heap::Vector{NTuple{2,Int32}})
+    @inbounds while !isempty(heap)
+        key=heap[1]
+        (key in T.seg || key in T.internal) &&
+            _subseg_encroached(T,key[1],key[2]) && return key
+        _enc_pop!(heap)
+    end
+    return nothing
 end
 
 # Upstream `bidimMeshData`: per-vertex size arrays grown as Steiner vertices
@@ -1917,12 +1997,25 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
     queue=gmsh_algorithm===:legacy ? nothing : _gmsh_queue_init(
         T,interior,skipped,gsizes,gmsh_algorithm,gmsh_extend_boundary,
         numbers,vertex_high_water)
+    # The native Delaunay/Frontal queue has its own loop. In this function
+    # the queue, the sizes and the trace are each `nothing` or a record, and
+    # the loop below serves every combination, so each step boxed the sizes
+    # record, the shell resolver and the keyword tuple of the accept test.
+    queue===nothing || return _refine_gmsh_queue!(T,queue,gsizes,
+        _gmsh_surface_trace,circle_test,interior,skipped,onmodel,pointids,
+        gmsh_algorithm,gmsh_extend_boundary,nsteps,return_vertex_numbers)
+    encpending=gmsh_insertion ? nothing : _enc_candidates(T)
+    workspace=(cavity=Int32[],incav=Set{Int32}(),
+        boundary=Tuple{Int32,Int32,Int32}[],stack=Int32[],
+        spoke=Dict{Int32,Tuple{Int32,Int32}}())
+    steiner_cells=Int32[]
     for _ in 1:nsteps
         # (1) split an encroached subsegment, if any — Gmsh mode never does:
         # `insertVertexB` preserves boundary edges and rejects the point.
-        enc = gmsh_insertion ? nothing : _find_encroached(T)
+        enc = encpending===nothing ? nothing : _find_encroached!(T,encpending)
         if enc !== nothing
-            _split_subsegment!(T, enc[1], enc[2], interior,pointids)
+            _split_subsegment!(T, enc[1], enc[2], interior,pointids,
+                encpending,workspace,steiner_cells)
             continue
         end
         # (2) pick a triangle that violates the angle/area/size criteria
@@ -2049,7 +2142,7 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
                 # triangle out of the queue.
                 push!(skipped,_trikey(T,t))
                 _gmsh_surface_trace isa _GmshSurfaceTrace &&
-                    (_gmsh_surface_trace.radii[_gmsh_triangle_key(T,t)]=ptin==0 ? 0.0 : -1.0)
+                    (_gmsh_surface_trace.radii[t]=ptin==0 ? 0.0 : -1.0)
                 continue
             end
             # A failure past this point is a structural invariant break (a
@@ -2058,6 +2151,8 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
             for ct in cavity; _killtri!(T,ct); end
             newt=Int32[]
             _retriangulate_cavity!(T,boundary,vid,newt)
+            _gmsh_surface_trace isa _GmshSurfaceTrace && gsizes!==nothing &&
+                _gmsh_surface_trace_bind!(_gmsh_surface_trace,newt)
             for nt in newt; _setflag!(interior,nt,true); end
             gsizes===nothing ||
                 (push!(gsizes.vsize,lc1);push!(gsizes.vbgm,bg))
@@ -2072,15 +2167,17 @@ function refine!(T::Triangulation; min_angle_deg::Real=25.0, max_area::Real=Inf,
         # (3) if the circumcenter encroaches subsegments, split those instead
         sp = _encroached_by_point(T, cc)
         if sp !== nothing
-            _split_subsegment!(T, sp[1], sp[2], interior,pointids)
+            _split_subsegment!(T, sp[1], sp[2], interior,pointids,
+                encpending,workspace,steiner_cells)
             continue
         end
         # (4) insert the circumcenter (constrained); skip if it falls outside the domain
         pa=_pt(T,a);pb=_pt(T,b);pc=_pt(T,c)
         fallback=(pa[1]/3+pb[1]/3+pc[1]/3,pa[2]/3+pb[2]/3+pc[2]/3)
-        _insert_steiner!(T, cc, interior,pointids;fallback=fallback)
+        _insert_steiner!(T, cc, interior,pointids;fallback=fallback,
+            encpending,workspace,newt=steiner_cells)
     end
-    enc = gmsh_insertion ? nothing : _find_encroached(T)
+    enc = encpending===nothing ? nothing : _find_encroached!(T,encpending)
     T.bad_scan_from=Int32(1)
     _reset_bad_pending!(T)
     bad=queue===nothing ? _find_bad(T,interior,B,area,size,edge_metric,
@@ -2098,8 +2195,145 @@ end
 
 # Sorted vertex triple identifying a triangle independent of its storage slot
 # (slots recycle through `T.freelist` during refinement).
-@inline _trikey(T,t) =
-    Tuple(sort!(Int32[_vert(T,t,1),_vert(T,t,2),_vert(T,t,3)]))
+@inline function _trikey(T,t)
+    a=_vert(T,t,1);b=_vert(T,t,2);c=_vert(T,t,3)
+    a>b && ((a,b)=(b,a))
+    b>c && ((b,c)=(c,b))
+    a>b && ((a,b)=(b,a))
+    return (a,b,c)
+end
+
+# The insertion loop of the native Delaunay and Frontal-Delaunay modes
+# (`refine!` with a queue): pop the worst triangle, place its candidate,
+# grow the cavity, accept or retire. Every argument has one concrete type
+# here, the list of new cells and the spoke table are reused across
+# insertions, and the trace learns the slot of each new cell from the
+# kernel, so an insertion allocates only its cavity and shell lists.
+function _refine_gmsh_queue!(T::Triangulation,queue::_GmshTriangleQueue,
+        gsizes::_GmshVertexSizes,trace,circle_test,interior::Vector{Bool},
+        skipped::Set{NTuple{3,Int32}},onmodel::BitSet,
+        pointids::Dict{NTuple{2,Float64},Int32},algorithm::Symbol,
+        extend_boundary::Bool,nsteps::Int,return_vertex_numbers::Bool)
+    newt=Int32[]
+    workspace=(spoke=Dict{Int32,Tuple{Int32,Int32}}(),)
+    for _ in 1:nsteps
+        t,active_edge=_gmsh_queue_select!(queue,T,interior,skipped,gsizes,
+                                          algorithm,extend_boundary)
+        if t==0
+            if _gmsh_surface_second_pass!(trace,T,interior,skipped)
+                queue=_gmsh_queue_init(T,interior,skipped,gsizes,
+                    algorithm,extend_boundary,
+                    queue.vertex_numbers,queue.vertex_high_water)
+                continue
+            end
+            _assert_operable(T,"refine! result")
+            return _gmsh_surface_insertion_result(interior,queue,return_vertex_numbers)
+        end
+        a,b,c=_gmsh_surface_triangle_nodes(T,t,trace)
+        candidate=algorithm===:frontal ?
+            _gmsh_frontal_point(T,t,active_edge,gsizes,extend_boundary) :
+            _gmsh_surface_delaunay_point(T,a,b,c,trace)
+        if candidate===nothing
+            push!(skipped,_trikey(T,t))
+            continue
+        end
+        cc=candidate
+        # Upstream `insertAPoint`: the point is placed first (the exact
+        # predicates need its coordinates), the cavity grows from `worst`
+        # while the point is strictly inside its circumcircle and otherwise
+        # from the triangle actually containing it (`ptin`), and
+        # `insertVertexB` then rejects on a single-triangle cavity, an Euler
+        # count mismatch, a non-star-shaped cavity, or a too-close shell
+        # edge — leaving `worst` out of the queue.
+        key=(cc[1]==0 ? 0.0 : cc[1],cc[2]==0 ? 0.0 : cc[2])
+        vid=Int32(0);ptin=Int32(0);lc1=NaN;bg=Inf
+        stored_point_key=false
+        number=UInt64(0)
+        cavity=nothing;boundary=nothing
+        ok=false
+        try
+            if isfinite(cc[1]) && isfinite(cc[2])
+                vid=_add_vertex!(T,cc[1],cc[2])
+                if !haskey(pointids,key)
+                    pointids[key]=vid
+                    stored_point_key=true
+                end
+                if circle_test(T,t,vid)
+                    cavity,boundary=_gmsh_delaunay_cavity(T,t,vid,trace)
+                    ptin=_cavity_container(T,cavity,cc;native_semantics=true,
+                                           trace=trace)
+                else
+                    tc=_gmsh_locate_surface(T,cc,interior,t)
+                    if tc!=0 && tc<=length(interior) && interior[tc] &&
+                       !_is_ghost_tri(T,tc)
+                        ptin=tc
+                        cavity,boundary=_gmsh_delaunay_cavity(T,ptin,vid,trace)
+                    end
+                end
+                if ptin!=0
+                    # Native MFaceVertex allocation and BGM evaluation occur
+                    # only after finding a containing actual Surface triangle.
+                    # A rejected insertion still consumes its birth label.
+                    number=_gmsh_next_vertex_number!(queue)
+                    bg=_gmsh_bgm(gsizes,cc;allow_failure=false)
+                    ta,tb,td=_gmsh_surface_triangle_nodes(T,ptin,trace)
+                    w=_gmsh_barycentric2(_pt(T,ta),_pt(T,tb),_pt(T,td),cc)
+                    lc1 = w===nothing ? NaN :
+                        w[1]*gsizes.vsize[ta]+w[2]*gsizes.vsize[tb]+
+                        w[3]*gsizes.vsize[td]
+                end
+            end
+            if ptin!=0 && isfinite(lc1) && lc1>0
+                _gmsh_surface_trace_children!(trace,T,cavity,boundary,
+                    vid,gsizes,lc1,bg)
+            end
+            ok = ptin!=0 && isfinite(lc1) && lc1>0 &&
+                 _gmsh_cavity_accept(T,cavity,boundary,cc,onmodel,
+                     _GmshShellLL(gsizes,lc1,bg);
+                     native_semantics=true,trace=trace,
+                     verify_star_shapeness=algorithm!==:delaunay)
+        finally
+            # Candidate evaluation has not changed topology. Roll back
+            # its coordinate on rejection and on callback/geometry errors.
+            if !ok && vid!=0
+                pop!(T.x);pop!(T.y);pop!(T.vtri);T.nreal-=1
+                stored_point_key && delete!(pointids,key)
+            end
+        end
+        if !ok
+            # `forceRadius(0)`/`forceRadius(-1)`: drop the point, keep the
+            # triangle out of the queue.
+            push!(skipped,_trikey(T,t))
+            trace isa _GmshSurfaceTrace &&
+                (trace.radii[t]=ptin==0 ? 0.0 : -1.0)
+            continue
+        end
+        # A failure past this point is a structural invariant break (a
+        # partially flipped cavity cannot be undone by popping the
+        # coordinate), so it propagates rather than skipping.
+        for ct in cavity; _killtri!(T,ct); end
+        empty!(newt)
+        _retriangulate_cavity!(T,boundary,vid,newt;workspace)
+        # One new cell per shell edge, in shell order: the trace's records of
+        # the candidate's children move to those slots.
+        _gmsh_surface_trace_bind!(trace,newt)
+        for nt in newt; _setflag!(interior,nt,true); end
+        push!(gsizes.vsize,lc1);push!(gsizes.vbgm,bg)
+        push!(queue.vertex_numbers,number)
+        trace===nothing || push!(trace.world,trace.lift(cc...))
+        _gmsh_queue_update!(queue,T,newt,interior,skipped,gsizes,
+            algorithm,extend_boundary)
+    end
+    T.bad_scan_from=Int32(1)
+    _reset_bad_pending!(T)
+    bad=first(_gmsh_queue_select!(queue,T,interior,skipped,gsizes,
+                                  algorithm,extend_boundary))
+    if bad==0
+        _assert_operable(T,"refine! result")
+        return _gmsh_surface_insertion_result(interior,queue,return_vertex_numbers)
+    end
+    throw(ErrorException("refine!: reached maxsteps=$nsteps before convergence; a triangle still violates a quality/area/size bound"))
+end
 
 # Per-candidate LL resolver for the cavity shell sweep — a callable struct,
 # not a lambda, so the per-iteration `lc1`/`bg` state is never boxed.
@@ -2367,18 +2601,20 @@ end
 # The vertex is added first (so locate's SoS/ghost tests can read its coordinates),
 # then undone if the point falls outside the domain — locate never mutates the
 # triangulation, so the trailing vertex is safe to pop.
-function _insert_steiner!(T::Triangulation,p,interior::Vector{Bool},pointids;fallback=nothing)
+function _insert_steiner!(T::Triangulation,p,interior::Vector{Bool},pointids;fallback=nothing,
+                          encpending::Union{Nothing,Vector{NTuple{2,Int32}}}=nothing,
+                          workspace=nothing,newt::Vector{Int32}=Int32[])
     if !(isfinite(p[1])&&isfinite(p[2]))
         fallback===nothing &&
             throw(ErrorException("refine!: triangle circumcenter is not representable as a finite Float64 point"))
-        return _insert_steiner!(T,fallback,interior,pointids)
+        return _insert_steiner!(T,fallback,interior,pointids;encpending,workspace,newt)
     end
     key=(p[1]==0 ? 0.0 : p[1],p[2]==0 ? 0.0 : p[2])
     existing=get(pointids,key,Int32(0))
     if existing!=0
         fallback===nothing &&
             throw(ErrorException("refine!: required Steiner point coincides with existing vertex $existing at Float64 resolution"))
-        return _insert_steiner!(T,fallback,interior,pointids)
+        return _insert_steiner!(T,fallback,interior,pointids;encpending,workspace,newt)
     end
     vid = _add_vertex!(T, p[1], p[2])
     pointids[key]=vid
@@ -2394,11 +2630,12 @@ function _insert_steiner!(T::Triangulation,p,interior::Vector{Bool},pointids;fal
         pop!(T.x); pop!(T.y); pop!(T.vtri); T.nreal -= 1;delete!(pointids,key)     # undo
         fallback===nothing &&
             throw(ErrorException("refine!: no representable interior Steiner point for the selected triangle"))
-        return _insert_steiner!(T,fallback,interior,pointids)
+        return _insert_steiner!(T,fallback,interior,pointids;encpending,workspace,newt)
     end
-    newt = Int32[]
-    _insert_point!(T,vid;constrained=true,newtris=newt)
+    empty!(newt)
+    _insert_point!(T,vid;constrained=true,newtris=newt,workspace)
     for nt in newt; _setflag!(interior, nt, true); end
+    encpending===nothing || _enc_push_cells!(encpending,T,newt)
     return true
 end
 

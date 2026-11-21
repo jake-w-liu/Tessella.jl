@@ -290,6 +290,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_mirror_orientation_test.jl",
         "geometry/geo_occ_thru_sections_shell_test.jl",
         "geometry/native_surface_source_test.jl",
+        "meshing/mesh2d_refine_incremental_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

@@ -625,7 +625,7 @@ function _gmsh_native_surface_export(T,inside,numbers,source::_ModelSurfaceSourc
         radius=Vector{Float64}(undef,length(T.alive))
         priority=Vector{NTuple{3,eltype(numbers)}}(undef,length(T.alive))
         for triangle in order
-            radius[triangle]=trace.radii[Mesh2D._gmsh_triangle_key(T,triangle)]
+            radius[triangle]=trace.radii[triangle]
             priority[triangle]=Mesh2D._gmsh_triangle_priority_numbers(numbers,T,triangle)
         end
         sort!(order;lt=(a,b)->begin
@@ -666,7 +666,7 @@ function _gmsh_native_surface_export(T,inside,numbers,source::_ModelSurfaceSourc
         triangles[slot,column]=mapping[nodes[slot]]
     end
     labels=trace===nothing ? UInt64[] :
-        UInt64[trace.elements[Mesh2D._gmsh_triangle_key(T,triangle)] for triangle in order]
+        UInt64[trace.elements[triangle] for triangle in order]
     element_max=trace===nothing ? UInt64(0) : trace.element_high_water
     return _ModelSurfaceProduction(Mesh(coords;tris=triangles),numbers[rows],owners,
         parameters,retained,UInt64(high_water),labels,element_max)

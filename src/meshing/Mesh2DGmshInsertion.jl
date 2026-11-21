@@ -281,7 +281,7 @@ end
     # Only a full trace carries persistent birth radii; a metric-only carrier
     # keeps the untraced scalar radius computation.
     gsizes.trace isa _GmshSurfaceTrace &&
-        return gsizes.trace.radii[_gmsh_triangle_key(T,t)]
+        return gsizes.trace.radii[t]
     a=_vert(T,t,1);b=_vert(T,t,2);c=_vert(T,t,3)
     if gsizes.trace isa _GmshSurfaceMetricCarrier
         # Directional queue radius: the metric-normalized circumradius

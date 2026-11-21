@@ -5,17 +5,27 @@ mutable struct _GmshSurfaceTrace{F,G}
     world::Vector{NTuple{3,Float64}}
     lift::F
     metric::G
-    triangles::Dict{NTuple{3,Int32},NTuple{3,Int32}}
-    elements::Dict{NTuple{3,Int32},UInt64}
-    radii::Dict{NTuple{3,Int32},Float64}
+    # Per triangulation slot: the literal MTriangle node order, the element
+    # label and the queue radius of the cell stored there. (These were three
+    # dictionaries keyed by the sorted node triple, hashed on every read.)
+    triangles::Vector{NTuple{3,Int32}}
+    elements::Vector{UInt64}
+    radii::Vector{Float64}
     element_high_water::UInt64
     extend_boundary::Bool
+    # The cells of the candidate under evaluation, one per shell edge in
+    # shell order. They are constructed (and numbered) before the insertion
+    # is accepted; `_gmsh_surface_trace_bind!` moves them to their slots once
+    # the kernel has created the cells.
+    child_triangles::Vector{NTuple{3,Int32}}
+    child_elements::Vector{UInt64}
+    child_radii::Vector{Float64}
 end
 
 @inline _gmsh_surface_triangle_nodes(T,t,::Nothing)=
     (_vert(T,t,1),_vert(T,t,2),_vert(T,t,3))
 @inline _gmsh_surface_triangle_nodes(T,t,trace::_GmshSurfaceTrace)=
-    trace.triangles[_gmsh_triangle_key(T,t)]
+    trace.triangles[t]
 @inline _gmsh_surface_incoming_slots(T,t,::Nothing)=(2,3,1)
 @inline function _gmsh_surface_incoming_slots(T,t,trace::_GmshSurfaceTrace)
     logical=_gmsh_surface_triangle_nodes(T,t,trace)
@@ -45,8 +55,10 @@ function _gmsh_surface_trace(T,inside,world,lift,high_water,sizes,background,ext
         "native Surface element high water must be UInt64 representable"))
     length(world)==T.nreal || throw(ArgumentError(
         "native Surface Cartesian birth rows must align with initial vertices"))
-    trace=_GmshSurfaceTrace(copy(world),lift,metric,Dict{NTuple{3,Int32},NTuple{3,Int32}}(),
-        Dict{NTuple{3,Int32},UInt64}(),Dict{NTuple{3,Int32},Float64}(),UInt64(high_water),extend)
+    slots=length(T.alive)
+    trace=_GmshSurfaceTrace(copy(world),lift,metric,
+        fill((Int32(0),Int32(0),Int32(0)),slots),zeros(UInt64,slots),zeros(slots),
+        UInt64(high_water),extend,NTuple{3,Int32}[],UInt64[],Float64[])
     temporary_cells isa Integer && !(temporary_cells isa Bool) && temporary_cells>=0 ||
         throw(ArgumentError("native temporary Surface cell count must be a nonnegative integer"))
     # meshGenerator constructs the recovered initial faces, delaunayizes BDS,
@@ -57,14 +69,14 @@ function _gmsh_surface_trace(T,inside,world,lift,high_water,sizes,background,ext
     for triangle in eachindex(T.alive)
         inside[triangle] || continue
         nodes=(_vert(T,triangle,1),_vert(T,triangle,3),_vert(T,triangle,2))
-        key=_gmsh_triangle_key(T,triangle);trace.triangles[key]=nodes
-        trace.elements[key]=_gmsh_surface_trace_next_element!(trace)
+        trace.triangles[triangle]=nodes
+        trace.elements[triangle]=_gmsh_surface_trace_next_element!(trace)
         a,b,c=nodes
         # buildMeshGenerationDataStructures uses this decimal literal for the
         # initial queue; inserted MTri3 cells use ONE_THIRD instead.
         lc=0.3333333333*(sizes[a]+sizes[b]+sizes[c])
         bg=0.3333333333*(background[a]+background[b]+background[c])
-        trace.radii[key]=_gmsh_surface_trace_radius(trace,T,nodes,extend ? min(lc,bg) : bg)
+        trace.radii[triangle]=_gmsh_surface_trace_radius(trace,T,nodes,extend ? min(lc,bg) : bg)
     end
     return trace
 end
@@ -100,15 +112,36 @@ end
 @inline _gmsh_sorted_key(a,b,c)=_gmsh_sorted_key(Int32(a),Int32(b),Int32(c))
 function _gmsh_surface_trace_children!(trace,T,cavity,boundary,vid,gsizes,lc1,bg)
     trace===nothing && return nothing
+    empty!(trace.child_triangles);empty!(trace.child_elements)
+    empty!(trace.child_radii)
     length(cavity)>1 && length(boundary)==length(cavity)+2 || return nothing
     for (a,b,_) in boundary
-        nodes=(b,a,vid);key=_gmsh_sorted_key(b,a,vid)
-        trace.triangles[key]=nodes
-        trace.elements[key]=_gmsh_surface_trace_next_element!(trace)
+        nodes=(b,a,vid)
+        push!(trace.child_triangles,nodes)
+        push!(trace.child_elements,_gmsh_surface_trace_next_element!(trace))
         lc=(gsizes.vsize[b]+gsizes.vsize[a]+lc1)*(1.0/3.0)
         background=(gsizes.vbgm[b]+gsizes.vbgm[a]+bg)*(1.0/3.0)
-        trace.radii[key]=_gmsh_surface_trace_radius(trace,T,nodes,
-            trace.extend_boundary ? min(lc,background) : background)
+        push!(trace.child_radii,_gmsh_surface_trace_radius(trace,T,nodes,
+            trace.extend_boundary ? min(lc,background) : background))
+    end
+    return nothing
+end
+
+# The kernel created one cell per shell edge of the accepted candidate, in
+# shell order: `slots[i]` holds the i-th child registered above.
+_gmsh_surface_trace_bind!(trace,slots)=nothing
+function _gmsh_surface_trace_bind!(trace::_GmshSurfaceTrace,slots::Vector{Int32})
+    length(slots)==length(trace.child_triangles) || throw(ErrorException(
+        "native Surface trace: new cells do not match the accepted shell"))
+    highest=maximum(slots;init=Int32(0))
+    if highest>length(trace.triangles)
+        resize!(trace.triangles,highest);resize!(trace.elements,highest)
+        resize!(trace.radii,highest)
+    end
+    @inbounds for (index,slot) in enumerate(slots)
+        trace.triangles[slot]=trace.child_triangles[index]
+        trace.elements[slot]=trace.child_elements[index]
+        trace.radii[slot]=trace.child_radii[index]
     end
     return nothing
 end
