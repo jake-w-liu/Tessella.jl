@@ -219,7 +219,7 @@ function _model_native_line_grade_params(m::GeoModel,curve::Int,
     # are certified with — `_model_curve_point` carries the rational-exact
     # Line evaluation the surface's retained-boundary check reads, not the
     # native placement kernel's Float64 interpolation.
-    cert_gamma=u->_model_curve_point(m,curve,u,caller)
+    cert_gamma=_model_curve_point_evaluator(m,Int(curve),caller)
     size_context=_model_curve_size_context(m,curve)
     runopts=options
     scale=1.0
@@ -331,7 +331,7 @@ function _model_occ_line_grade_params(m::GeoModel,curve::Int,occ,
     force_odd=m.meshing.recombine_algo!=0 && m.meshing.recombine_all
     odd_nodes=m.meshing.recombine_algo!=0 && (m.meshing.recombine_all ||
         any(face->haskey(m.meshing.recombine,(2,face)),_model_curve_faces(m,curve)))
-    cert_gamma=u->_model_curve_point(m,curve,u,caller)
+    cert_gamma=_model_curve_point_evaluator(m,Int(curve),caller)
     size_context=_model_curve_size_context(m,curve)
     runopts=options
     scale=1.0

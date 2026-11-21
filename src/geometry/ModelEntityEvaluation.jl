@@ -1125,6 +1125,34 @@ function _ruled_curve_parameters(m::GeoModel,tag::Int,curve_tag::Int,
                             info,caller,old_ruled)
 end
 
+# `_model_curve_point` for one built-in curve with its geometry read once, for
+# any number of evaluations on an unchanged model: the same values.
+#
+# Asked point by point, a spline collects its control points into a new list
+# and an arc rebuilds its frame at every evaluation. The 1-D mesher asks
+# hundreds of points of each curve (the length pre-pass alone takes 129
+# samples, each a difference of two points): on the helices of Gmsh's
+# examples/simple_geo/indheat.geo, splines of up to 23 control points, the
+# list was 30% of generate(1).
+function _model_curve_point_evaluator(m::GeoModel,tag::Int,
+                                      caller::AbstractString)
+    generic=(u::Float64)->_model_curve_point(m,tag,u,caller)
+    # In `_model_curve_point`'s own order: whatever is not a built-in spline
+    # or arc keeps the general path.
+    haskey(m.discrete,(1,tag)) && return generic
+    kind=_curve_type(m,tag)
+    kind===:boundary_layer && return generic
+    _occ_geometry_checked(m,tag,caller)===nothing || return generic
+    kind==:line && return generic
+    kind in _SPLINE_CURVE_TYPES && return _model_curve_point_resolved(
+        _spline_point,_spline_geometry(m,tag,caller))
+    return _model_curve_point_resolved(_arc_point,_arc_geometry(m,tag,caller))
+end
+
+# Past the lookups, specialized on the geometry record.
+_model_curve_point_resolved(point::P,geometry::G) where {P,G}=
+    (u::Float64)->point(geometry,u)
+
 # Single-parameter curve evaluation shared by `model_value` and
 # `model_reparametrize_on_surface`: OCC records evaluate on their own
 # parameter range (`:circle`/`:degenerate`/`:line`), built-in lines on the

@@ -106,6 +106,41 @@ end
     end
 end
 
+# Every built-in curve kind the 1-D mesher asks points of.
+const _CURVES = """
+Point(1) = {0, 0, 0}; Point(2) = {1, 0, 0}; Point(3) = {0, 1, 0}; Point(4) = {-1, 0, 0};
+Point(5) = {2, 0.5, 0.1}; Point(6) = {3, -0.5, 0.3}; Point(7) = {4, 0.2, 0}; Point(8) = {5, 0, 0.4};
+Point(9) = {2, 0, 0}; Point(10) = {0, 0.5, 0};
+Line(1) = {1, 2};
+Circle(2) = {2, 1, 3};
+Ellipse(3) = {9, 1, 9, 10};
+Spline(4) = {2, 5, 6, 7, 8};
+BSpline(5) = {2, 5, 6, 7, 8};
+Bezier(6) = {2, 5, 6, 7, 8};
+"""
+
+@testset "A curve resolved once gives the points it gives one by one" begin
+    _with_geo(_CURVES) do
+        A._with_model() do m
+            for tag in 1:6
+                point = M._model_curve_point_evaluator(m, tag, "test")
+                t0, t1 = M._model_curve_param_bounds(m, tag, "test")
+                @test all(point(t0 + k * (t1 - t0) / 16) === M._model_curve_point(m, tag, t0 + k * (t1 - t0) / 16, "test")
+                          for k in 0:16)
+            end
+            if Base.JLOptions().compile_enabled == 1
+                # A spline asked point by point collects its control points each time.
+                probe(f) = @allocated f(0.37)
+                resolved = M._model_curve_point_evaluator(m, 4, "test")
+                general = u -> M._model_curve_point(m, 4, u, "test")
+                probe(resolved); probe(general)
+                @test probe(resolved) == 0
+                @test probe(general) > 0
+            end
+        end
+    end
+end
+
 @testset "An arc that ends beside its last point bounds a meshable surface" begin
     _with_geo(_LOOSE_ARC) do
         tag = only(tag for (_, tag) in A.model.get_entities(2))

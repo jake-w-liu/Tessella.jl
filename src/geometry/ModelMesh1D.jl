@@ -1085,7 +1085,7 @@ end
 function _model_curve_grade_params_general(m::GeoModel,curve::Integer,t0::Float64,t1::Float64,
         options::_ModelMesh1DOptions,caller::AbstractString;
         _native_producer,_point_store,_l1_bounds,_skip_filter)
-    γ=u->_model_curve_point(m,curve,u,caller)
+    γ=_model_curve_point_evaluator(m,Int(curve),caller)
     a,b=m.curves[curve]
     closed=a==b
     # Upstream `meshGEdge` switches its integrand to `F_Lc_aniso` when
@@ -1550,7 +1550,7 @@ function _model_curve_transfinite_mass(m::GeoModel,curve::Int,spec,
     endpoints=native_line ?
         (m.points[first(m.curves[curve])],m.points[last(m.curves[curve])]) :
         ((0.0,0.0,0.0),(0.0,0.0,0.0))
-    gamma=u->_model_curve_point(m,curve,u,caller)
+    gamma=_model_curve_point_evaluator(m,Int(curve),caller)
     speed=t->native_line ?
         _transfinite_native_line_speed(endpoints[1],endpoints[2],t) :
         _length_point(gamma,nothing,t,t0,t1,caller).xp
@@ -1841,7 +1841,7 @@ end
 # `meshGEdge`'s `F_One` prepass: the integral of |γ′| over the Curve.
 function _model_curve_prepass_length(m::GeoModel,curve::Integer,t0::Float64,
         t1::Float64,options::_ModelMesh1DOptions,caller::AbstractString)
-    γ=u->_model_curve_point(m,curve,u,caller)
+    γ=_model_curve_point_evaluator(m,Int(curve),caller)
     return curve_length(γ;t0=t0,t1=t1,
         integration_precision=options.integration_precision*options.ctx_lc)
 end
