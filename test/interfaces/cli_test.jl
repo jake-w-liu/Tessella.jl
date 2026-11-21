@@ -317,6 +317,11 @@ Physical Volume("domain", 72) = {1};
         @test embedded_volume.physical_names==Dict(
             (0,51)=>"sheet points",(1,52)=>"sheet curves",
             (2,53)=>"sheet",(3,54)=>"domain")
+        # Open parity item, failing on purpose: Gmsh 4.15.2 keeps the embedded
+        # Curve 104 as one line through the embedded Point 106 lying on it
+        # (7 line elements, 984 tetrahedra, 316 nodes); Tessella's surface
+        # pass writes it back split at Point 106 (8 lines), and the volume
+        # then has 917 tetrahedra on 307 nodes.
         @test mixed_crc(embedded_volume).sha==
               "c52d01fa89b0c87b3ca9ad41f9877e6e7e35c2b47afd46831df5c8675eed26f2"
 
