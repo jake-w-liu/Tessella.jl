@@ -131,12 +131,10 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
             # ∬v=∮(uv dv−v² du)/3 — GL8 per B-spline span. A mixed
             # convention (say ∮u dv here) leaves each such edge's boundary
             # term (u1v1−u0v0)/2 uncancelled inside a closed wire.
-            knots=pc.spl2d[1]
-            cuts=Float64[t0]
-            for k in knots
-                (k>t0 && k<t1) && push!(cuts,k)
-            end
-            push!(cuts,t1)
+            # panels end at the knots in either direction of traversal: a
+            # wire running the edge backwards (t0 > t1) got one panel
+            # across every knot, which left its area good to five digits
+            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
             for k in 1:length(cuts)-1
                 a0=cuts[k]; h=(cuts[k+1]-a0)/2; mid=a0+h
                 for i in 1:4,s in (-1,1)
@@ -736,7 +734,67 @@ function _model_occ_trimmed_face_measure(kernel,id)
     end
     A>_OCC_CONFUSION || throw(ErrorException(
         "OCC.get_mass: trimmed face has zero area"))
-    return A,_occ3_scale(M,1.0/A)
+    centroid=_occ3_scale(M,1.0/A)
+    if occ===:cone
+        # the area has an exact boundary form; the centroid keeps the rule
+        exact=_model_occ_cone_face_integrals(kernel,id)
+        exact===nothing || (A=exact[1])
+    end
+    return A,centroid
+end
+
+# ---- cone patches ----------------------------------------------------
+#
+# A trimmed cone face p(u,v)=C+z·a+ρ·e(u), z=v·cos γ, ρ=r1+k·z (v the slant
+# length, k the slope, γ=atan k) has dA=ρ·du·dv exactly and
+#   p·(p_u×p_v) = ρ·cos γ·[C·e(u) + r1 − k·(C·a)]
+# for a right-handed frame, so its area and its divergence volume are the
+# boundary integrals ∮−W(v)du and ∮−cos γ·W(v)·g(u)du with W=r1·v+k·cos γ·v²/2
+# — exact to the boundary quadrature, where the triangulated-domain rule
+# left a box cut by a cone 1e-5 off. Returns (area, ∬p·(p_u×p_v)/3) for the
+# right-handed normal, or `nothing` for a wire that winds around the axis
+# without a seam or lacks a pcurve.
+function _model_occ_cone_face_integrals(kernel,fid)
+    shape=kernel.shapes[fid]; rec=shape.geometry.geometry
+    haskey(rec,:pcurves) || return nothing
+    k=(rec.r2-rec.r1)/rec.height
+    cγ=1/sqrt(1+k*k)
+    Yc=_occ_frame_y(rec)
+    Cx=_dot3(rec.center,rec.X);Cy=_dot3(rec.center,Yc)
+    c0=rec.r1-k*_dot3(rec.center,rec.axis)
+    area=0.0;vol=0.0
+    for (wi,wire_id) in enumerate(shape.children)
+        uses=kernel.shapes[wire_id].geometry.uses
+        a=0.0;w3=0.0;turn=0.0
+        for (eid,rev) in uses
+            entry=get(rec.pcurves,kernel.shape_tags[eid][2],nothing)
+            entry===nothing && return nothing
+            eg=kernel.shapes[eid].geometry.geometry
+            pc=rev && entry.rev!==nothing ? entry.rev : entry.fwd
+            pc===nothing && return nothing
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            for j in 1:length(cuts)-1
+                lo=cuts[j];h=(cuts[j+1]-lo)/2;mid=lo+h
+                for i in 1:4, sgn in (-1,1)
+                    t=mid+sgn*h*_OCC_GL_T[i]
+                    (u,v),(du,_)=_occ_pcurve_d1(pc,t)
+                    w=_OCC_GL_W[i]*h*du
+                    su,cu=_gm_sincos(u)
+                    W=v*(rec.r1+k*cγ*v/2)
+                    turn+=w
+                    a-=w*W
+                    w3-=w*cγ*W*(Cx*cu+Cy*su+c0)
+                end
+            end
+        end
+        abs(turn)>1.0 && return nothing
+        # outer wire positive, holes negative, whichever way each winds
+        sgn=(wi==1 ? 1.0 : -1.0)*(a>=0 ? 1.0 : -1.0)
+        area+=sgn*a;vol+=sgn*w3
+    end
+    area>0 || return nothing
+    return area,vol/3
 end
 
 # ---- sphere patches --------------------------------------------------
@@ -1346,10 +1404,12 @@ function _model_occ_torus_face_div(kernel,id)
                 _OCC_TWO_PI*round((v_prev-vs0)/_OCC_TWO_PI)
             uv_first===nothing &&
                 (uv_first=(us+ushift,vs0+vshift))
-            panels=max(1,ceil(Int,abs(t1-t0)/(π/2)))
-            span=(t1-t0)/panels
-            for k in 0:panels-1
-                a=t0+k*span; h=span/2; mid=a+h
+            # panels end at the trace's knots: a fitted section trace is
+            # only C1 there, and quarter-turn panels across hundreds of
+            # knots left the volume of a torus piece good to five digits
+            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            for k in 1:length(cuts)-1
+                a=cuts[k]; h=(cuts[k+1]-a)/2; mid=a+h
                 for i in 1:4, s in (-1,1)
                     t=mid+s*h*_OCC_GL_T[i]; w=_OCC_GL_W[i]*h
                     (u,v),(du,dv)=_occ_pcurve_d1(pc,t)
@@ -1664,6 +1724,15 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
                 Vp,Mp=_model_occ_sphere_face_div(rec,J)
                 V+=σ*h*Vp
                 want_centroid && (M=_occ3_add(M,_occ3_scale(Mp,σ*h)))
+                continue
+            end
+        end
+        if occ===:cone && haskey(rec,:pcurves) && !want_centroid
+            exact=_model_occ_cone_face_integrals(kernel,fid)
+            if exact!==nothing
+                h=_dot3(_occ_cross(rec.X,_occ_frame_y(rec)),rec.axis)>=0 ?
+                    1.0 : -1.0
+                V+=σ*h*exact[2]
                 continue
             end
         end

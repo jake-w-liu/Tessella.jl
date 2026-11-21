@@ -1986,9 +1986,231 @@ function _brep_sec_plane_cone(pl,cn,plane_is_a,caller)
                  pcA=plane_is_a ? pc_pl : pc_cn,
                  pcB=plane_is_a ? pc_cn : pc_pl)]
     end
-    # non-axial section — a conic the analytic path can't emit; the
-    # generic level-set section traces it on the cone domain
+    # non-axial section — a conic, parametrized in closed form on the cone
+    # chart; the level-set tracer remains the fallback
+    exact=_brep_sec_cone_conic(pl,cn,plane_is_a,caller)
+    exact===nothing || return exact
     return _brep_sec_msq(cn,pl,!plane_is_a,caller)
+end
+
+# ── plane sections with a closed-form parametrization ──────────────────────
+#
+# A plane meets a cone in a conic and a torus, when it is parallel to the
+# axis, in a spiric section. Neither is a circle or an ellipse in general,
+# but both have a closed-form parametrization on the curved face's chart:
+# `sample(θ)` returns the exact chart point and its exact derivative. The
+# section is built from those: both pcurves are C1 cubics through exact
+# points with exact velocities, their nodes placed by bisection until each
+# lifts onto the exact curve within 1e-10·scale, and the 3-D curve is the
+# plane's own lift of its pcurve — exactly coplanar, where the level-set
+# tracer's curve rode the curved face and left the plane by its 1e-7 fit
+# ("Point[N] is not coplanar with Surface[M]" when the plane face was
+# meshed). `nothing` when the sampler fails or the fit does not converge;
+# the caller then falls back to the tracer.
+function _brep_sec_exact_trace(pl,sg,plane_is_a,sample,a,b,closed)
+    fld_sg,_=_brep_partner_field(sg)
+    fld_pl,_=_brep_partner_field(pl)
+    function node(θ)
+        smp=sample(θ)
+        smp===nothing && return nothing
+        uv,duv=smp
+        (isfinite(uv[1]) && isfinite(uv[2]) && isfinite(duv[1]) &&
+         isfinite(duv[2])) || return nothing
+        P,bu,bv=_occ_surface_d1(sg,uv[1],uv[2])
+        V=(fma(duv[1],bu[1],duv[2]*bv[1]),fma(duv[1],bu[2],duv[2]*bv[2]),
+           fma(duv[1],bu[3],duv[2]*bv[3]))
+        st=_brep_plane_uv(pl,P)
+        st1=_brep_plane_uv(pl,_b3add(P,V))
+        return (θ,uv,duv,st,(st1[1]-st[1],st1[2]-st[2]),P)
+    end
+    # cubic Hermite point between two nodes for the value/derivative pair
+    # stored at tuple positions (k,k+1)
+    function hermite(n0,n1,θ,k)
+        h=n1[1]-n0[1];t=(θ-n0[1])/h
+        h00=(1+2t)*(1-t)^2;h10=t*(1-t)^2;h01=t*t*(3-2t);h11=t*t*(t-1)
+        p0=n0[k];m0=n0[k+1];p1=n1[k];m1=n1[k+1]
+        return (h00*p0[1]+h10*h*m0[1]+h01*p1[1]+h11*h*m1[1],
+                h00*p0[2]+h10*h*m0[2]+h01*p1[2]+h11*h*m1[2])
+    end
+    nodes=Any[]
+    for i in 0:16
+        nd=node(fma(b-a,i/16,a))
+        nd===nothing && return nothing
+        push!(nodes,nd)
+    end
+    scale=1.0
+    for nd in nodes
+        scale=max(scale,abs(nd[6][1]),abs(nd[6][2]),abs(nd[6][3]))
+    end
+    tolfit=1e-10*scale
+    i=1
+    while i<length(nodes)
+        n0=nodes[i];n1=nodes[i+1]
+        worst=0.0
+        for frac in (0.25,0.5,0.75)
+            θ=fma(n1[1]-n0[1],frac,n0[1])
+            exact=node(θ)
+            exact===nothing && return nothing
+            uv=hermite(n0,n1,θ,2);st=hermite(n0,n1,θ,4)
+            worst=max(worst,
+                _b3dist(_brep_surface_eval(sg,uv[1],uv[2]),exact[6]),
+                _b3dist(_brep_surface_eval(pl,st[1],st[2]),exact[6]))
+        end
+        if worst<=tolfit
+            i+=1
+            continue
+        end
+        (n1[1]-n0[1]<1e-7*(b-a) || length(nodes)>4096) && return nothing
+        nd=node((n0[1]+n1[1])/2)
+        nd===nothing && return nothing
+        insert!(nodes,i+1,nd)
+    end
+    ts=Float64[nd[1] for nd in nodes]
+    knotsS,degS,cpsS=_hermite_bspline_2d(ts,
+        NTuple{2,Float64}[nd[2] for nd in nodes],
+        NTuple{2,Float64}[nd[3] for nd in nodes])
+    knotsP,degP,cpsP=_hermite_bspline_2d(ts,
+        NTuple{2,Float64}[nd[4] for nd in nodes],
+        NTuple{2,Float64}[nd[5] for nd in nodes])
+    pc_sg=(spl2d=(knotsS,degS,cpsS),
+           lvl2d=(uv->fld_pl(_brep_surface_eval(sg,uv[1],uv[2]))))
+    pc_pl=(spl2d=(knotsP,degP,cpsP),
+           lvl2d=(uv->fld_sg(_brep_surface_eval(pl,uv[1],uv[2]))))
+    pknots=Float64[ts[1],ts[1]]
+    append!(pknots,ts[2:end-1])
+    push!(pknots,ts[end],ts[end])
+    poly=NURBS.NURBSCurve(1,pknots,NTuple{3,Float64}[nd[6] for nd in nodes])
+    ev=_ModelOCCSectionCurve(:bspline,pl,(spl2d=(knotsP,degP,cpsP),),poly)
+    curve=(kind=:bspline,curve=ev,
+           g=(occ=:copied_curve,curve=ev),ctype=:copied_curve)
+    return (curve=curve,closed=closed,
+            pcA=plane_is_a ? pc_pl : pc_sg,pcB=plane_is_a ? pc_sg : pc_pl)
+end
+
+# Spiric sections: a plane parallel to a torus's axis at distance `d` from
+# it. In the chart, with α the angle from the plane's normal direction,
+# the curve is (R + r·cos v)·cos α = d.
+#   d between R−r and R+r — one closed oval around the outer equator
+#     (α,v)=(0,0). The region it bounds is star-shaped about that point, so
+#     the oval is r(θ) along rays from it; r solves a monotone scalar
+#     equation and its derivative follows by implicit differentiation.
+#   d below R−r — two closed curves around the tube, α = ±acos(d/ρ(v)).
+function _brep_sec_spiric(pl,to,plane_is_a,caller)
+    R=to.r1;r=to.r2
+    Yt=hasproperty(to,:Y) ? to.Y : _b3cross(to.axis,to.X)
+    d=_b3dot(_b3(pl.center,to.center),pl.axis)
+    e=d>=0 ? pl.axis : _b3mul(pl.axis,-1.0)
+    d=abs(d)
+    φ=atan(_b3dot(e,Yt),_b3dot(e,to.X))
+    out=NamedTuple[]
+    d>R+r+_BREP_TOL && return out
+    (abs(d-(R+r))<=_BREP_TOL || abs(d-(R-r))<=_BREP_TOL) &&
+        throw(ArgumentError(
+            "$caller: tangent plane×torus contact is unsupported"))
+    if d>R-r
+        function oval(θ)
+            sθ,cθ=_gm_sincos(θ)
+            lo=0.0
+            hi=min(abs(cθ)>1e-12 ? (π/2)/abs(cθ) : Inf,
+                   abs(sθ)>1e-12 ? π/abs(sθ) : Inf)
+            G(s)=(R+r*cos(s*sθ))*cos(s*cθ)-d
+            for _ in 1:200
+                mid=(lo+hi)/2
+                (mid==lo || mid==hi) && break
+                G(mid)>0 ? (lo=mid) : (hi=mid)
+            end
+            s=(lo+hi)/2
+            α=s*cθ;v=s*sθ
+            sv,cv=_gm_sincos(v);sα,cα=_gm_sincos(α)
+            ρ=R+r*cv
+            Gs=-r*sv*sθ*cα-ρ*sα*cθ
+            Gθ=-r*sv*s*cθ*cα+ρ*sα*s*sθ
+            abs(Gs)>1e-14 || return nothing
+            ds=-Gθ/Gs
+            return ((φ+α,v),(ds*cθ-s*sθ,ds*sθ+s*cθ))
+        end
+        sec=_brep_sec_exact_trace(pl,to,plane_is_a,oval,0.0,_OCC_TWO_PI,true)
+        sec===nothing && return nothing
+        push!(out,sec)
+    else
+        for sgn in (1.0,-1.0)
+            function loop(v)
+                sv,cv=_gm_sincos(v)
+                ρ=R+r*cv
+                x=d/ρ
+                return ((φ+sgn*acos(x),v),
+                        (-sgn*(d*r*sv/(ρ*ρ))/sqrt(1-x*x),1.0))
+            end
+            sec=_brep_sec_exact_trace(pl,to,plane_is_a,loop,0.0,
+                                      _OCC_TWO_PI,true)
+            sec===nothing && return nothing
+            push!(out,sec)
+        end
+    end
+    return out
+end
+
+# Plane × cone away from the axial position: a conic. Along a ruling at
+# chart angle u the plane's equation is linear in the height z, so the
+# section is the graph z(u) = −(c0 + r1·g(u)) / (n·a + k·g(u)) with
+# g(u) = n·e(u): the whole turn for an ellipse, and for a hyperbola or a
+# parabola the u-intervals on which the graph stays between the cone's two
+# rims (their ends are closed-form too).
+function _brep_sec_cone_conic(pl,cn,plane_is_a,caller)
+    k=(cn.r2-cn.r1)/cn.height
+    _,ca=_gm_sincos(_gm_atan(k))
+    Yc=hasproperty(cn,:Y) ? cn.Y : _b3cross(cn.axis,cn.X)
+    nX=_b3dot(pl.axis,cn.X);nY=_b3dot(pl.axis,Yc)
+    na=_b3dot(pl.axis,cn.axis)
+    c0=_b3dot(_b3(cn.center,pl.center),pl.axis)
+    amp=hypot(nX,nY)
+    amp>_BREP_TOL || return nothing
+    φ0=atan(nY,nX)
+    g(u)=nX*cos(u)+nY*sin(u)
+    dg(u)=-nX*sin(u)+nY*cos(u)
+    z(u)=-(c0+cn.r1*g(u))/(na+k*g(u))
+    breaks=Float64[]
+    function crossings!(rhs)
+        abs(rhs)<amp || return
+        δ=acos(clamp(rhs/amp,-1.0,1.0))
+        push!(breaks,mod(φ0-δ,_OCC_TWO_PI),mod(φ0+δ,_OCC_TWO_PI))
+    end
+    for zs in (0.0,cn.height)
+        rad=cn.r1+zs*k
+        rad>_BREP_TOL && crossings!(-(c0+zs*na)/rad)
+    end
+    abs(k)>_BREP_TOL && crossings!(-na/k)
+    function graph(u)
+        den=na+k*g(u)
+        abs(den)>1e-14 || return nothing
+        num=-(c0+cn.r1*g(u))
+        dz=-dg(u)*(cn.r1*den+k*num)/(den*den)
+        return ((u,num/den/ca),(1.0,dz/ca))
+    end
+    inside(u)=(den=na+k*g(u);abs(den)>1e-12 &&
+               (zz=z(u);zz>_BREP_TOL && zz<cn.height-_BREP_TOL))
+    out=NamedTuple[]
+    if isempty(breaks)
+        inside(0.0) || return out
+        sec=_brep_sec_exact_trace(pl,cn,plane_is_a,graph,0.0,_OCC_TWO_PI,true)
+        sec===nothing && return nothing
+        return push!(out,sec)
+    end
+    sort!(breaks)
+    uniq=Float64[]
+    for u in breaks
+        (isempty(uniq) || u-uniq[end]>1e-9) && push!(uniq,u)
+    end
+    length(uniq)>1 && uniq[1]+_OCC_TWO_PI-uniq[end]<=1e-9 && pop!(uniq)
+    for (i,ua) in enumerate(uniq)
+        ub=i<length(uniq) ? uniq[i+1] : uniq[1]+_OCC_TWO_PI
+        ub-ua>1e-9 || continue
+        inside((ua+ub)/2) || continue
+        sec=_brep_sec_exact_trace(pl,cn,plane_is_a,graph,ua,ub,false)
+        sec===nothing && return nothing
+        push!(out,sec)
+    end
+    return out
 end
 
 # Plane × torus. Two positions of the plane give circles, exact in space and
@@ -2032,6 +2254,10 @@ function _brep_sec_plane_torus(pl,to,plane_is_a,caller)
                  (lin2d=((u,0.0),(0.0,1.0)),))
         end
         return out
+    end
+    if abs(dot)<_BREP_TOL
+        exact=_brep_sec_spiric(pl,to,plane_is_a,caller)
+        exact===nothing || return exact
     end
     return _brep_sec_msq(to,pl,!plane_is_a,caller)
 end
