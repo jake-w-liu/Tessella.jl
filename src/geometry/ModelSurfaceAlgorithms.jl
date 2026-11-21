@@ -517,7 +517,18 @@ function _surface_ruled_trace_carrier(m,options,size_field,lift,T,t,caller,
                 Mesh2D._gmsh_dot3(du,dv),
                 Mesh2D._gmsh_dot3(dv,dv))
     end
-    return Mesh2D._GmshSurfaceMetricCarrier(world,lift,metric,ground)
+    # A scalar size on a warped patch is measured on the surface, as Gmsh
+    # measures it: the queue radius is the circumradius of the lifted
+    # triangle over its size (`MTri3`, radiusNorm 2), the frontal point
+    # sits the world length `min(rho*sqrt(3)/2, q)` from its edge
+    # (`optimalPointFrontalB`) and the close-point bounds are world
+    # distances. The metric-normalized forms, which stay for a tensor
+    # background, read every length through the tensor at one point of a
+    # cell and put the points of a sphere octant a third too close: 152
+    # triangles on the eight-patch sphere of examples/simple_geo/sphere.geo
+    # where Gmsh has 112 and this rule 110.
+    return Mesh2D._GmshSurfaceMetricCarrier(world,lift,metric,ground,
+                                            !(raw isa AbstractAnisoField))
 end
 
 # `setLcs` analogue on the warped patch: incident edge lengths are the world
