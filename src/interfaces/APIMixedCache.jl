@@ -5,6 +5,35 @@ import ..Elements
 
 include("APIMixedP2Certification.jl")
 
+# The same copy for a mesh with entity metadata and nothing else attached
+# (no periodic links, sections or partitions), which is what a generation
+# returns. The general route below copies every array three times (grouping,
+# metadata constructor, mesh constructor) and checks the structure twice;
+# here each array is copied once, into the grouped layout, and the result is
+# checked once.
+function _canonical_mixed_plain_copy(mesh::MixedMesh,order,groups)
+    data=mesh.entity_data
+    joined(parts,indices)=length(indices)==1 ? copy(parts[indices[1]]) :
+        reduce(vcat,(parts[index] for index in indices))
+    blocks=Elements.MixedElementBlock[];elementary=Vector{Int32}[]
+    block_owners=Vector{Int32}[];external_tags=Vector{UInt64}[]
+    for msh in order
+        indices=groups[msh]
+        nodes=length(indices)==1 ? copy(mesh.blocks[indices[1]].nodes) :
+            reduce(hcat,(mesh.blocks[index].nodes for index in indices))
+        tags=length(indices)==1 ? copy(mesh.blocks[indices[1]].tags) :
+            reduce(vcat,(mesh.blocks[index].tags for index in indices))
+        push!(blocks,ElementBlock(Elements._TRUSTED_MIXED_STORAGE,msh,nodes,tags))
+        push!(elementary,joined(mesh.elementary_entities,indices))
+        push!(block_owners,joined(data.block_entities,indices))
+        push!(external_tags,joined(data.external_element_tags,indices))
+    end
+    return Elements._detached_mixed_mesh(copy(mesh.coords),blocks,mesh.physical_names,
+        data.entities,copy(data.node_entities),
+        Elements._detached_mixed_parameters(data.node_parametric),
+        copy(data.external_node_tags),block_owners,external_tags,elementary,true)
+end
+
 function _canonical_mixed_copy(mesh::MixedMesh)
     order=Int[]
     groups=Dict{Int,Vector{Int}}()
@@ -13,6 +42,12 @@ function _canonical_mixed_copy(mesh::MixedMesh)
             "API: native mixed caches require fixed-connectivity elements"))
         haskey(groups,block.msh) || push!(order,block.msh)
         push!(get!(()->Int[],groups,block.msh),bi)
+    end
+    if mesh.entity_data!==nothing && mesh.elementary_entities!==nothing &&
+            mesh.partition_data===nothing && isempty(mesh.periodic_links) &&
+            isempty(mesh.ancillary_sections) && isempty(mesh.data_sections) &&
+            length(mesh.elementary_entities)==length(mesh.blocks)
+        return _canonical_mixed_plain_copy(mesh,order,groups)
     end
     blocks=ElementBlock[]
     elementary=mesh.elementary_entities===nothing ? nothing : Vector{Int32}[]

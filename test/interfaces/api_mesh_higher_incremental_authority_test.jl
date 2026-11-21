@@ -265,4 +265,70 @@ same_record(a,b)=all(isequal(getfield(a,name),getfield(b,name)) for name in fiel
         A.finalize()
     end
 end
+
+# `generate` returns a detached copy of the mesh with its blocks grouped by
+# element type. For a mesh with entity metadata and nothing else attached the
+# copy is made once per array; it must be the mesh the public constructors
+# build from the grouped arrays, also when a type occurs in separated blocks.
+function same_content(a,b)
+    typeof(a)==typeof(b) || return false
+    a isa AbstractDict && return Set(keys(a))==Set(keys(b)) &&
+        all(same_content(a[key],b[key]) for key in keys(a))
+    a isa AbstractArray && return size(a)==size(b) &&
+        all(same_content(x,y) for (x,y) in zip(a,b))
+    a isa Tuple && return length(a)==length(b) &&
+        all(same_content(x,y) for (x,y) in zip(a,b))
+    (isstructtype(typeof(a)) && !(a isa Union{Number,AbstractString,Symbol})) || return isequal(a,b)
+    return all(same_content(getfield(a,name),getfield(b,name)) for name in fieldnames(typeof(a)))
+end
+
+@testset "the returned mesh copy is the grouped mesh" begin
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        plane_grid(2)
+        A.option("Mesh.MeshSizeMin",0.4);A.option("Mesh.MeshSizeMax",0.4)
+        A.mesh.generate(2)
+        source=A.CURRENT[].meshing.mesh_authority.mesh
+        plain=A._copy_mesh(source)
+        @test same_content(plain,source)
+        @test plain.coords!==source.coords
+        @test plain.entity_data.external_node_tags!==source.entity_data.external_node_tags
+        # Split the triangles into two blocks around the other blocks.
+        data=source.entity_data
+        triangles=findfirst(block->block.msh==2,source.blocks)
+        block=source.blocks[triangles];half=size(block.nodes,2)÷2
+        @test half>=1
+        others=[index for index in eachindex(source.blocks) if index!=triangles]
+        part(values,range)=values[range]
+        first_half=1:half;second_half=half+1:size(block.nodes,2)
+        blocks=vcat([Tessella.ElementBlock(2,block.nodes[:,first_half],block.tags[first_half])],
+            [source.blocks[index] for index in others],
+            [Tessella.ElementBlock(2,block.nodes[:,second_half],block.tags[second_half])])
+        split(values)=vcat([part(values[triangles],first_half)],[values[index] for index in others],
+            [part(values[triangles],second_half)])
+        separated=Tessella.MixedMesh(source.coords,blocks;physical_names=source.physical_names,
+            entity_data=Tessella.Elements._native_mixed_entity_data(data.entities;
+                node_entities=data.node_entities,node_parametric=data.node_parametric,
+                external_node_tags=data.external_node_tags,
+                block_entities=split(data.block_entities),
+                external_element_tags=split(data.external_element_tags)),
+            elementary_entities=split(source.elementary_entities))
+        copied=A._canonical_mixed_copy(separated)
+        @test [block.msh for block in copied.blocks]==vcat([2],[source.blocks[index].msh for index in others])
+        grouped(values)=vcat([values[triangles]],[values[index] for index in others])
+        expected=Tessella.MixedMesh(source.coords,
+            vcat([block],[source.blocks[index] for index in others]);
+            physical_names=source.physical_names,
+            entity_data=Tessella.Elements._native_mixed_entity_data(data.entities;
+                node_entities=data.node_entities,node_parametric=data.node_parametric,
+                external_node_tags=data.external_node_tags,
+                block_entities=grouped(data.block_entities),
+                external_element_tags=grouped(data.external_element_tags)),
+            elementary_entities=grouped(source.elementary_entities))
+        @test same_content(copied,expected)
+    finally
+        A.finalize()
+    end
+end
 end
