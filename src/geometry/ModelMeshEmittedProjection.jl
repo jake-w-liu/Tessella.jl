@@ -2,13 +2,177 @@
 # Publish a fresh receipt after the final authority and emitted parts exist.
 # Each later authority replacement needs a new receipt; an old receipt cannot
 # authenticate a rebuilt/reclassified/current generation by shape alone.
+#
+# A receipt is published by every generation and read only when a detached
+# part comes back for projection, so publishing it has to be cheap. Two things
+# in it were not. The owner of every carrier cell was kept in one table keyed
+# by `(msh, rows)` with rows of any length: an untyped key, boxed for each
+# cell and hashed through dynamic dispatch, twice per cell. The tables below
+# are one per cell arity, so their keys are plain bits. And the state of the
+# actual mesh was kept as a deep copy of all of it (a vector per node for the
+# parametric coordinates alone) only to be compared with the live mesh later;
+# a fingerprint of every word of that state answers the same question.
+const _EmittedOwner=Tuple{Int,Int32}
+
+struct _EmittedCellOwners
+    two::Dict{Tuple{Int,NTuple{2,Int32}},_EmittedOwner}
+    three::Dict{Tuple{Int,NTuple{3,Int32}},_EmittedOwner}
+    four::Dict{Tuple{Int,NTuple{4,Int32}},_EmittedOwner}
+    five::Dict{Tuple{Int,NTuple{5,Int32}},_EmittedOwner}
+    six::Dict{Tuple{Int,NTuple{6,Int32}},_EmittedOwner}
+    eight::Dict{Tuple{Int,NTuple{8,Int32}},_EmittedOwner}
+    other::Dict{Tuple{Int,Tuple},_EmittedOwner}
+end
+
+_EmittedCellOwners()=_EmittedCellOwners(
+    Dict{Tuple{Int,NTuple{2,Int32}},_EmittedOwner}(),Dict{Tuple{Int,NTuple{3,Int32}},_EmittedOwner}(),
+    Dict{Tuple{Int,NTuple{4,Int32}},_EmittedOwner}(),Dict{Tuple{Int,NTuple{5,Int32}},_EmittedOwner}(),
+    Dict{Tuple{Int,NTuple{6,Int32}},_EmittedOwner}(),Dict{Tuple{Int,NTuple{8,Int32}},_EmittedOwner}(),
+    Dict{Tuple{Int,Tuple},_EmittedOwner}())
+
+Base.length(owners::_EmittedCellOwners)=length(owners.two)+length(owners.three)+
+    length(owners.four)+length(owners.five)+length(owners.six)+length(owners.eight)+
+    length(owners.other)
+
+# Every `(msh, rows)` key, untyped: for the rare whole-set comparison only.
+function _emitted_owner_keys(owners::_EmittedCellOwners)
+    result=Set{Tuple{Int,Tuple}}()
+    for table in (owners.two,owners.three,owners.four,owners.five,owners.six,owners.eight,owners.other)
+        for key in keys(table)
+            push!(result,(key[1],Tuple(key[2])))
+        end
+    end
+    return result
+end
+
+@inline _emitted_rows(cells::AbstractMatrix,column::Int,::Val{N}) where {N}=
+    ntuple(slot->Int32(cells[slot,column]),Val(N))
+@inline _emitted_rows(cells::AbstractMatrix,column::Int,rows,::Val{N}) where {N}=
+    ntuple(slot->Int32(rows[cells[slot,column]]),Val(N))
+
+# The owner of carrier cell `column` of `cells`, or `nothing`.
+function _emitted_owner(owners::_EmittedCellOwners,msh::Int,cells::AbstractMatrix,column::Int)
+    arity=size(cells,1)
+    arity==4 && return get(owners.four,(msh,_emitted_rows(cells,column,Val(4))),nothing)
+    arity==3 && return get(owners.three,(msh,_emitted_rows(cells,column,Val(3))),nothing)
+    arity==2 && return get(owners.two,(msh,_emitted_rows(cells,column,Val(2))),nothing)
+    arity==8 && return get(owners.eight,(msh,_emitted_rows(cells,column,Val(8))),nothing)
+    arity==6 && return get(owners.six,(msh,_emitted_rows(cells,column,Val(6))),nothing)
+    arity==5 && return get(owners.five,(msh,_emitted_rows(cells,column,Val(5))),nothing)
+    return get(owners.other,(msh,Tuple(Int32(cells[slot,column]) for slot in 1:arity)),nothing)
+end
+
+# Record `owner` for part cell `column`, its rows translated through `rows`.
+# `false` when that carrier cell already has an owner.
+@inline function _emitted_owner_insert!(table::Dict{K,_EmittedOwner},key::K,owner::_EmittedOwner) where {K}
+    before=length(table)
+    get!(table,key,owner)
+    return length(table)>before
+end
+function _emitted_owner_insert!(owners::_EmittedCellOwners,msh::Int,cells::AbstractMatrix,
+                                column::Int,rows,owner::_EmittedOwner)
+    arity=size(cells,1)
+    arity==4 && return _emitted_owner_insert!(owners.four,(msh,_emitted_rows(cells,column,rows,Val(4))),owner)
+    arity==3 && return _emitted_owner_insert!(owners.three,(msh,_emitted_rows(cells,column,rows,Val(3))),owner)
+    arity==2 && return _emitted_owner_insert!(owners.two,(msh,_emitted_rows(cells,column,rows,Val(2))),owner)
+    arity==8 && return _emitted_owner_insert!(owners.eight,(msh,_emitted_rows(cells,column,rows,Val(8))),owner)
+    arity==6 && return _emitted_owner_insert!(owners.six,(msh,_emitted_rows(cells,column,rows,Val(6))),owner)
+    arity==5 && return _emitted_owner_insert!(owners.five,(msh,_emitted_rows(cells,column,rows,Val(5))),owner)
+    key=(msh,Tuple(Int32(rows[cells[slot,column]]) for slot in 1:arity))
+    return _emitted_owner_insert!(owners.other,key,owner)
+end
+
+# Fingerprint of the native state that authenticates row and cell identity:
+# two independent 64-bit mixes of every word, in order. Tables whose order is
+# not part of their meaning (the entity table) add up the fingerprints of
+# their entries. Values are mixed as `isequal` compares them: by value for
+# integers, by bits for floating point.
+struct _EmittedStateStamp
+    nodes::Int
+    cells::Int
+    first::UInt64
+    second::UInt64
+end
+
+const _EmittedMix=NTuple{2,UInt64}
+const _EMITTED_MIX_SEED=(0xcbf29ce484222325,0x9e3779b97f4a7c15)
+@inline function _emitted_mix(state::_EmittedMix,word::UInt64)
+    second=(state[2]+word)*0xff51afd7ed558ccd
+    return ((state[1]⊻word)*0x00000100000001b3,second⊻(second>>31))
+end
+_emitted_mix(state::_EmittedMix,value::Bool)=_emitted_mix(state,UInt64(value))
+_emitted_mix(state::_EmittedMix,value::Integer)=_emitted_mix(state,value%UInt64)
+_emitted_mix(state::_EmittedMix,value::Float64)=_emitted_mix(state,reinterpret(UInt64,value))
+_emitted_mix(state::_EmittedMix,value::AbstractFloat)=_emitted_mix(state,Float64(value))
+_emitted_mix(state::_EmittedMix,::Nothing)=_emitted_mix(state,0x6e6f7468696e6721)
+_emitted_mix(state::_EmittedMix,value::Symbol)=_emitted_mix(state,String(value))
+function _emitted_mix(state::_EmittedMix,value::AbstractString)
+    state=_emitted_mix(state,UInt64(ncodeunits(value)))
+    for unit in codeunits(value)
+        state=_emitted_mix(state,UInt64(unit))
+    end
+    return state
+end
+function _emitted_mix(state::_EmittedMix,value::Union{Tuple,NamedTuple})
+    state=_emitted_mix(state,UInt64(length(value)))
+    for item in value
+        state=_emitted_mix(state,item)
+    end
+    return state
+end
+function _emitted_mix(state::_EmittedMix,value::AbstractArray)
+    state=_emitted_mix(state,UInt64(length(value)))
+    for item in value
+        state=_emitted_mix(state,item)
+    end
+    return state
+end
+function _emitted_mix(state::_EmittedMix,value::Array{T}) where {T<:Union{Int32,Int64,UInt64,Float64}}
+    state=_emitted_mix(state,UInt64(length(value)))
+    @inbounds for index in eachindex(value)
+        state=_emitted_mix(state,value[index])
+    end
+    return state
+end
+function _emitted_mix(state::_EmittedMix,value::Union{AbstractDict,AbstractSet})
+    first=UInt64(0);second=UInt64(0)
+    for item in value
+        entry=_emitted_mix(_EMITTED_MIX_SEED,item isa Pair ? (item.first,item.second) : item)
+        first+=entry[1];second+=entry[2]
+    end
+    return _emitted_mix(_emitted_mix(_emitted_mix(state,UInt64(length(value))),first),second)
+end
+# The two record types of a mesh's native state, field by field.
+function _emitted_mix(state::_EmittedMix,entity::MixedEntity)
+    state=_emitted_mix(state,entity.dim);state=_emitted_mix(state,entity.tag)
+    state=_emitted_mix(state,entity.bbox);state=_emitted_mix(state,entity.physical_tags)
+    state=_emitted_mix(state,entity.boundaries);state=_emitted_mix(state,entity.embedded_curves)
+    state=_emitted_mix(state,entity.partitions)
+    return _emitted_mix(state,entity.parent)
+end
+function _emitted_mix(state::_EmittedMix,link::MixedPeriodicLink)
+    state=_emitted_mix(state,link.dim);state=_emitted_mix(state,link.slave_entity)
+    state=_emitted_mix(state,link.master_entity);state=_emitted_mix(state,link.affine)
+    state=_emitted_mix(state,link.slave_nodes)
+    return _emitted_mix(state,link.master_nodes)
+end
+# Any other value is its fields, in order.
+function _emitted_mix(state::_EmittedMix,value::T) where {T}
+    isstructtype(T) && fieldcount(T)>0 || throw(ArgumentError(
+        "emitted receipt: no fingerprint for a value of type $T"))
+    for field in 1:fieldcount(T)
+        state=_emitted_mix(state,getfield(value,field))
+    end
+    return state
+end
+
 struct _ModelMeshEmittedReceipt
     actual::MixedMesh
     carrier::Union{Mesh,MixedMesh}
     parts::Dict{Tuple{Int,Int32},Tuple{Union{Mesh,MixedMesh},Vector{Int32}}}
-    cell_owners::Dict{Tuple{Int,Tuple},Tuple{Int,Int32}}
+    cell_owners::_EmittedCellOwners
     carrier_rows::Vector{Int32}
-    native_state::NamedTuple
+    native_state::_EmittedStateStamp
 end
 
 _emitted_projection_blocks(mesh::Mesh)=((1,mesh.segs,mesh.seg_tag),
@@ -16,32 +180,13 @@ _emitted_projection_blocks(mesh::Mesh)=((1,mesh.segs,mesh.seg_tag),
 _emitted_projection_blocks(mesh::MixedMesh)=
     ((Int(block.msh),block.nodes,block.tags) for block in mesh.blocks)
 
-# Typed carrier cell key `(msh, rows)` of one column, with the rows optionally
-# translated through `rows`. The common arities build their tuple directly;
-# slicing the column and splatting it allocates twice per cell.
-@inline function _emitted_cell_key(msh::Int,cells::AbstractMatrix,column::Int,rows)
-    arity=size(cells,1)
-    arity==4 && return (msh,(rows[cells[1,column]],rows[cells[2,column]],
-                             rows[cells[3,column]],rows[cells[4,column]]))
-    arity==3 && return (msh,(rows[cells[1,column]],rows[cells[2,column]],rows[cells[3,column]]))
-    arity==2 && return (msh,(rows[cells[1,column]],rows[cells[2,column]]))
-    return (msh,Tuple(rows[cells[:,column]]))
-end
-@inline function _emitted_cell_key(msh::Int,cells::AbstractMatrix,column::Int)
-    arity=size(cells,1)
-    arity==4 && return (msh,(cells[1,column],cells[2,column],cells[3,column],cells[4,column]))
-    arity==3 && return (msh,(cells[1,column],cells[2,column],cells[3,column]))
-    arity==2 && return (msh,(cells[1,column],cells[2,column]))
-    return (msh,Tuple(cells[:,column]))
-end
-
 function _model_mesh_emitted_receipt(authority,parts,part_rows,caller)
     authority.mesh!==nothing && authority.carrier!==nothing || throw(ArgumentError(
         "$caller: emitted receipt requires an actual authority and its carrier"))
     length(parts)==length(part_rows) || throw(ArgumentError(
         "$caller: emitted constructor parts do not align with their row bindings"))
     bound=Dict{Tuple{Int,Int32},Tuple{Union{Mesh,MixedMesh},Vector{Int32}}}()
-    owners=Dict{Tuple{Int,Tuple},Tuple{Int,Int32}}()
+    owners=_EmittedCellOwners()
     for ((dimension,tag,part),rows) in zip(parts,part_rows)
         owner=(dimension,Int32(tag))
         haskey(authority.products,owner) && !haskey(bound,owner) || throw(ArgumentError(
@@ -62,9 +207,8 @@ function _model_mesh_emitted_receipt(authority,parts,part_rows,caller)
                 0<cells[slot,column]<=bound_rows || throw(ArgumentError(
                     "$caller: emitted constructor cell references an absent bound vertex"))
             end
-            key=_emitted_cell_key(msh,cells,column,rows)
-            haskey(owners,key) && throw(ArgumentError("$caller: emitted constructors repeat a typed carrier cell"))
-            owners[key]=owner
+            _emitted_owner_insert!(owners,msh,cells,column,rows,owner) || throw(ArgumentError(
+                "$caller: emitted constructors repeat a typed carrier cell"))
         end
         bound[owner]=(deepcopy(part),Int32.(rows))
     end
@@ -76,50 +220,49 @@ function _model_mesh_emitted_receipt(authority,parts,part_rows,caller)
         carrier_count+=size(cells,2)
         covered || continue
         for column in axes(cells,2)
-            if !haskey(owners,_emitted_cell_key(msh,cells,column))
+            if _emitted_owner(owners,msh,cells,column)===nothing
                 covered=false
                 break
             end
         end
     end
     if !(covered && carrier_count==length(owners))
-        carrier_keys=Set((msh,Tuple(cells[:,column])) for (msh,cells,tags) in
+        carrier_keys=Set{Tuple{Int,Tuple}}((msh,Tuple(Int32.(cells[:,column]))) for (msh,cells,tags) in
             _emitted_projection_blocks(authority.carrier) for column in axes(cells,2))
-        Set(keys(owners))==carrier_keys || throw(ArgumentError(
+        _emitted_owner_keys(owners)==carrier_keys || throw(ArgumentError(
             "$caller: emitted constructors do not partition the current carrier"))
     end
     return _ModelMeshEmittedReceipt(authority.mesh,authority.carrier,bound,owners,
         copy(authority.carrier_rows),_model_mesh_emitted_state(authority.mesh))
 end
 
-# Snapshot only native state that authenticates row/cell identity. Coordinate
+# Fingerprint only native state that authenticates row/cell identity. Coordinate
 # arithmetic of an emitted view never rewrites this actual state.
 function _model_mesh_emitted_state(mesh)
     data=mesh.entity_data
-    return (coords=copy(mesh.coords),node_entities=copy(data.node_entities),
-        node_parametric=deepcopy(data.node_parametric),node_tags=copy(data.external_node_tags),
-        entities=deepcopy(data.entities),links=deepcopy(mesh.periodic_links),
-        cells=[(Int(block.msh),copy(block.nodes),copy(block.tags),copy(owners),copy(tags))
-            for (block,owners,tags) in zip(mesh.blocks,data.block_entities,data.external_element_tags)])
+    state=_EMITTED_MIX_SEED
+    state=_emitted_mix(state,mesh.coords)
+    state=_emitted_mix(state,data.node_entities)
+    state=_emitted_mix(state,data.node_parametric)
+    state=_emitted_mix(state,data.external_node_tags)
+    state=_emitted_mix(state,data.entities)
+    state=_emitted_mix(state,mesh.periodic_links)
+    cells=0
+    state=_emitted_mix(state,UInt64(length(mesh.blocks)))
+    for (block,owners,tags) in zip(mesh.blocks,data.block_entities,data.external_element_tags)
+        cells+=size(block.nodes,2)
+        state=_emitted_mix(state,Int(block.msh))
+        state=_emitted_mix(state,UInt64(size(block.nodes,1)))
+        state=_emitted_mix(state,block.nodes)
+        state=_emitted_mix(state,block.tags)
+        state=_emitted_mix(state,owners)
+        state=_emitted_mix(state,tags)
+    end
+    return _EmittedStateStamp(size(mesh.coords,2),cells,state[1],state[2])
 end
 
-function _model_mesh_emitted_state_matches(mesh,state)
-    data=mesh.entity_data
-    isequal(mesh.coords,state.coords) && isequal(data.node_entities,state.node_entities) &&
-        isequal(data.node_parametric,state.node_parametric) &&
-        isequal(data.external_node_tags,state.node_tags) &&
-        Set(keys(data.entities))==Set(keys(state.entities)) || return false
-    for (owner,entity) in data.entities,field in fieldnames(MixedEntity)
-        isequal(getfield(entity,field),getfield(state.entities[owner],field)) || return false
-    end
-    length(mesh.periodic_links)==length(state.links) || return false
-    for (left,right) in zip(mesh.periodic_links,state.links),field in fieldnames(MixedPeriodicLink)
-        isequal(getfield(left,field),getfield(right,field)) || return false
-    end
-    current=[(Int(block.msh),block.nodes,block.tags,owners,tags)
-        for (block,owners,tags) in zip(mesh.blocks,data.block_entities,data.external_element_tags)]
-    return isequal(current,state.cells)
-end
+_model_mesh_emitted_state_matches(mesh,state::_EmittedStateStamp)=
+    _model_mesh_emitted_state(mesh)==state
 
 function _model_mesh_with_emitted_receipt(authority,parts,rows;caller="emitted geometry")
     receipt=_model_mesh_emitted_receipt(authority,parts,rows,caller)
@@ -193,8 +336,7 @@ function _model_mesh_emitted_projection(m,mesh,dimension,tag,receipt,caller)
         length(uids)==size(cells,2) || throw(ArgumentError(
             "$caller: emitted carrier cell columns lack their actual constructor events"))
         for column in axes(cells,2)
-            key=(msh,Tuple(cells[:,column]))
-            cell_owner=get(receipt.cell_owners,key,nothing)
+            cell_owner=_emitted_owner(receipt.cell_owners,msh,cells,column)
             cell_owner!==nothing || throw(ArgumentError("$caller: carrier cell lacks its emitted constructor owner"))
             cell_owner in closure || continue
             uid=uids[column]

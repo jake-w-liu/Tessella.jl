@@ -2069,13 +2069,18 @@ end
 # A lower-dimensional actual cell certifies a stronger support than an
 # incident higher-dimensional cell. Same-dimension ties remain unresolved
 # until all lower-dimensional cells have been visited.
+# Nearly every call finds either no entry or the entry it would write (an edge
+# of a cell is shared by the cells around it), so the table is probed once:
+# `get!` returns what is stored or stores `owner`. A key that was absent
+# cannot be in `conflicts`, which only ever holds keys of the table.
 function _api_support_insert!(owners::Dict{K,Tuple{Int,Int32}},
                               conflicts::Set{K},key::K,owner) where K
-    previous=get(owners,key,(4,Int32(0)))
-    if owner[1]<previous[1]
-        owners[key]=owner
-        delete!(conflicts,key)
-    elseif owner[1]==previous[1] && owner!=previous
+    candidate=(Int(owner[1]),Int32(owner[2]))
+    previous=get!(owners,key,candidate)
+    if candidate[1]<previous[1]
+        owners[key]=candidate
+        isempty(conflicts) || delete!(conflicts,key)
+    elseif candidate[1]==previous[1] && candidate!=previous
         push!(conflicts,key)
     end
     return nothing
