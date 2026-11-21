@@ -14,6 +14,14 @@
 # Entities outside dims 1:3 follow upstream: the switch
 # never fires, so the empty GProp reports mass 0 and centre (0,0,0).
 
+# `GProp`'s `EPS_DIM`: a length, area or volume below it is no measure, and
+# its centre is reported at the origin. The measures used
+# `Precision::Confusion` (1e-7, a length) for this, so a box with 1e-6
+# edges — faces of 1e-12, volume 1e-18 — had "zero area". Gmsh 4.15.2
+# reports that box's mass, centre and face areas, and only below 1e-20
+# (edges of 2e-7) puts the centre at the origin.
+const _OCC_EPS_DIM=1e-20
+
 # 8-point Gauss-Legendre abscissae/weights on [-1,1] — exact for
 # polynomials through degree 15. Natural NURBS faces select higher orders
 # and bounded refinement below according to their degree and weights.
@@ -269,7 +277,7 @@ function _model_occ_plane_boundary_moments(kernel,rec,wires)
     for (index,uses) in enumerate(wires)
         raw=_model_occ_plane_wire_moments(kernel,rec,uses)
         area=raw[(0,0)]
-        abs(area)<=_OCC_CONFUSION && continue
+        abs(area)<=_OCC_EPS_DIM && continue
         sgn=area>=0 ? 1.0 : -1.0
         weight=(index==1 ? 1.0 : -1.0)*sgn
         A+=(index==1 ? 1.0 : -1.0)*abs(area)
@@ -356,12 +364,12 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
         area=abs(wire.raw[1])
         A+=index==1 ? area : -area
     end
-    A>_OCC_CONFUSION || throw(ErrorException(
+    A>_OCC_EPS_DIM || throw(ErrorException(
         "OCC.get_mass: plane face has zero area"))
     cu=cv=0.0
     for (index,wire) in enumerate(raw_per_wire)
         area=abs(wire.raw[1])
-        area>_OCC_CONFUSION || continue
+        area>_OCC_EPS_DIM || continue
         w=(index==1 ? area : -area)/A
         # the wire's own centroid is moment over area with their common
         # winding sign — dividing by |area| negated it for a wire wound
@@ -376,7 +384,7 @@ function _model_occ_plane_stats(kernel,id;want_tensor=false,
     if curved
         wires=[wire.uses for wire in raw_per_wire]
         _,raw=_model_occ_plane_boundary_moments(kernel,rec,wires)
-        raw[(0,0)]>_OCC_CONFUSION || throw(ErrorException(
+        raw[(0,0)]>_OCC_EPS_DIM || throw(ErrorException(
             "OCC.get_mass: plane face has zero area"))
         cu_b=raw[(1,0)]/raw[(0,0)];cv_b=raw[(0,1)]/raw[(0,0)]
         if centered
@@ -689,7 +697,7 @@ function _model_occ_trimmed_face_measure(kernel,id)
         s=I1>=0.0 ? 1.0 : -1.0
         I1*=s; Ic*=s; Is*=s; Iv*=s
         A=rec.radius*I1
-        A>_OCC_CONFUSION || throw(ErrorException(
+        A>_OCC_EPS_DIM || throw(ErrorException(
             "OCC.get_mass: trimmed cylinder face has zero area"))
         X,Y,Z,C=rec.X,rec.Y,rec.axis,rec.center
         M=_occ3_scale(
@@ -732,7 +740,7 @@ function _model_occ_trimmed_face_measure(kernel,id)
             end
         end
     end
-    A>_OCC_CONFUSION || throw(ErrorException(
+    A>_OCC_EPS_DIM || throw(ErrorException(
         "OCC.get_mass: trimmed face has zero area"))
     centroid=_occ3_scale(M,1.0/A)
     if occ===:cone
@@ -1329,7 +1337,7 @@ function _occ_sector_stats(rec)
     V,M,Q=rec.occ===:sphere ? _occ_sector_stats_sph(rec,U0,Uv,UE) :
         _occ_sector_stats_axis(rec,U0,Uv,UE)
     c=rec.center
-    abs(V)>_OCC_CONFUSION || return V,(0.0,0.0,0.0),Q
+    abs(V)>_OCC_EPS_DIM || return V,(0.0,0.0,0.0),Q
     local_centroid=_occ3_scale(M,1.0/V)
     # Q is about the local frame origin at the geometry center c; shift the
     # centroidal tensor only by the (bounded) local centroid offset.
@@ -1769,7 +1777,7 @@ function _model_occ_solid_measure(kernel,id;want_centroid=true)
     end
     # Upstream reports the signed divergence sum (inward-wound shells go
     # negative); a degenerate one leaves the empty-GProp centroid.
-    abs(V)>_OCC_CONFUSION || return V,(0.0,0.0,0.0)
+    abs(V)>_OCC_EPS_DIM || return V,(0.0,0.0,0.0)
     return V,_occ3_scale(M,0.25/V)
 end
 
@@ -1868,12 +1876,12 @@ function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
     for (index,wire) in enumerate(raw_per_wire)
         A+=index==1 ? abs(wire.raw[1]) : -abs(wire.raw[1])
     end
-    A>_OCC_CONFUSION || throw(ErrorException(
+    A>_OCC_EPS_DIM || throw(ErrorException(
         "OCC.get_matrix_of_inertia: plane face has zero area"))
     cu=cv=0.0
     for (index,wire) in enumerate(raw_per_wire)
         area=abs(wire.raw[1])
-        area>_OCC_CONFUSION || continue
+        area>_OCC_EPS_DIM || continue
         w=(index==1 ? area : -area)/A
         # the wire's own centroid is moment over area with their common
         # winding sign — dividing by |area| negated it for a wire wound
@@ -1884,7 +1892,7 @@ function _model_occ_plane_moment3(kernel,id;center=(0.0,0.0,0.0))
     if _model_occ_plane_curved(kernel,shape,rec)
         wires=[kernel.shapes[w].geometry.uses for w in shape.children]
         _,raw=_model_occ_plane_boundary_moments(kernel,rec,wires)
-        raw[(0,0)]>_OCC_CONFUSION || throw(ErrorException(
+        raw[(0,0)]>_OCC_EPS_DIM || throw(ErrorException(
             "OCC.get_matrix_of_inertia: plane face has zero area"))
         cu_b=raw[(1,0)]/raw[(0,0)];cv_b=raw[(0,1)]/raw[(0,0)]
         mc=_model_occ_centered_plane_moments(raw,cu_b,cv_b)
@@ -2089,7 +2097,7 @@ function _occ_torus_sector_moment2(rec,win)
     U2y=φ/2-(s21-s20)/4
     UV=(s1*s1-s0*s0)/2
     V=φ*π*R*r*r
-    V>_OCC_CONFUSION || return zeros(3,3)
+    V>_OCC_EPS_DIM || return zeros(3,3)
     # ∫ρ(R+ρcosv)³ dρdv (the x²/y² weight) and the z² weight.
     qcoef=π*R*r*r*(R*R+3r*r/4)
     qzz=π*φ*R*r^4/4
@@ -2205,7 +2213,7 @@ function _model_occ_solid_moment2(kernel,id)
     all(face_ok,uses) || throw(ErrorException(
         "OCC.get_matrix_of_inertia: unsupported solid boundary"))
     V,centroid=_model_occ_solid_measure(kernel,id)
-    abs(V)>_OCC_CONFUSION || return m
+    abs(V)>_OCC_EPS_DIM || return m
     for (fid,rev) in uses
         rec=kernel.shapes[fid].geometry.geometry
         σ=rev ? -1.0 : 1.0

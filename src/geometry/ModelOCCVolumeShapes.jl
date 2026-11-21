@@ -422,6 +422,11 @@ function _model_occ_add_box!(m::GeoModel,x,y,z,dx,dy,dz;tag=-1)
     # negative extents simply place P2 below P1 on that axis.
     lo=ntuple(i->min(corner[i],corner[i]+ext[i]),3)
     hi=ntuple(i->max(corner[i],corner[i]+ext[i]),3)
+    # OpenCASCADE's wedge builder refuses spans up to `Precision::Confusion`
+    # (Gmsh 4.15.2: a box with 1e-7 edges is an error, 1.5e-7 is a box), as
+    # `add_box!` does for the GEO Box
+    all(i->hi[i]-lo[i]>_OCC_CONFUSION,1:3) ||
+        throw(ArgumentError("$caller: Degenerate box"))
     # The entity layout is OpenCASCADE's `BRepPrimAPI_MakeBox`, as Gmsh
     # 4.15.2 numbers it — scripts address a box's faces and edges by tag:
     # points run x outermost, z innermost with zmax first; curves 1–4 lie on

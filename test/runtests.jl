@@ -296,6 +296,7 @@ include("functional/fixtures.jl")
         "meshing/mesh2d_refine_incremental_test.jl",
         "interfaces/api_occ_boolean_torus_seams_test.jl",
         "interfaces/api_occ_boolean_plane_sections_test.jl",
+        "interfaces/api_occ_tiny_box_measures_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
