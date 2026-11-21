@@ -4088,17 +4088,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         end
         if source_rows_existing_only && swept===nothing
             class===nothing && throw(ArgumentError("$(assembly.caller): actual TF Volume lacks its shell classification"))
-            for row in eachindex(source_rows)
-                if source_row_retained[row]
-                    actual=get(assembly.node_positions,source_rows[row],Int32(0))
-                    actual>0 || throw(ArgumentError("$(assembly.caller): TF boundary source node is absent"))
-                    class.node_entities[row]=assembly.nodes[actual].owner
-                else
-                    # Logical interior events belong to the Region even when
-                    # a compact prism stores a point on an aliased diagonal.
-                    class.node_entities[row]=(3,Int32(tag))
-                end
-            end
+            _higher_transfinite_node_owners!(class.node_entities,source_rows,
+                source_row_retained,assembly,tag)
         end
         mapping=_higher_append_part!(assembly,m,mesh,class,3,tag,discarded;
             emitted,source_nodes,geometry_cells,source_emission,source_row_tags=source_rows,
@@ -4278,6 +4269,26 @@ function _higher_bound_rows_check(authority,mesh,rows,tag,caller)
         end
     end
     return nothing
+end
+
+# Owners of a transfinite Region's rows: a retained boundary row keeps its
+# lower record's owner; a logical interior event belongs to the Region even
+# when a compact prism stores a point on an aliased diagonal. (A function of
+# its own: in the volume phase `source_rows` and `class` have no single type,
+# and the loop there boxed an owner tuple per row.)
+function _higher_transfinite_node_owners!(owners::Vector{Tuple{Int,Int32}},source_rows,
+                                          retained,assembly,tag)
+    region=(3,Int32(tag))
+    for row in eachindex(source_rows)
+        if retained[row]
+            actual=get(assembly.node_positions,source_rows[row],Int32(0))
+            actual>0 || throw(ArgumentError("$(assembly.caller): TF boundary source node is absent"))
+            owners[row]=assembly.nodes[actual].owner
+        else
+            owners[row]=region
+        end
+    end
+    return owners
 end
 
 function _higher_rows_cover_product(product,rows)
@@ -4544,6 +4555,16 @@ function _higher_live_cell_tags(live,cells::Vector{_Dim01Cell},block,caller)
     return tags
 end
 
+# Column `column` of `coords` against a point, as `coords[:,column]==collect(point)`
+# and `isequal(coords[:,column],collect(point))` decide, without the two
+# vectors per vertex those expressions allocate.
+_higher_column_equals(coords,column,point)=
+    size(coords,1)==3 && coords[1,column]==point[1] && coords[2,column]==point[2] &&
+    coords[3,column]==point[3]
+_higher_column_isequal(coords,column,point)=
+    size(coords,1)==3 && isequal(coords[1,column],point[1]) &&
+    isequal(coords[2,column],point[2]) && isequal(coords[3,column],point[3])
+
 function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
                                   geometry_merge=nothing,geometry_cells,geometry_birth=nothing)
     isempty(parts) && return nothing,Int32[],Vector{UInt64}[],nothing,nothing
@@ -4565,7 +4586,7 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
             expected=geometry_birth===nothing ? source :
                 get(geometry_birth.nodes,source.tag,source)
             expected.owner==source.owner || (expected=source)
-            coords[:,position]==collect(expected.point) || (needs=true;break)
+            _higher_column_equals(coords,position,expected.point) || (needs=true;break)
         end
         if needs
             new_coords=copy(coords)
@@ -4574,7 +4595,7 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
                 expected=geometry_birth===nothing ? source :
                     get(geometry_birth.nodes,source.tag,source)
                 expected.owner==source.owner || (expected=source)
-                new_coords[:,position]=collect(expected.point)
+                for axis in 1:3; new_coords[axis,position]=expected.point[axis]; end
             end
             new_mesh=if mesh isa Mesh
                 Mesh(new_coords;segs=mesh.segs,tris=mesh.tris,tets=mesh.tets,
@@ -4641,7 +4662,7 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
             expected=geometry_birth===nothing ? source :
                 get(geometry_birth.nodes,source.tag,source)
             expected.owner==source.owner || (expected=source)
-            isequal(carrier.coords[:,merged_row],collect(expected.point)) ||
+            _higher_column_isequal(carrier.coords,merged_row,expected.point) ||
                 throw(ArgumentError("$caller: produced geometry lacks its explicit birth value"))
         end
     end

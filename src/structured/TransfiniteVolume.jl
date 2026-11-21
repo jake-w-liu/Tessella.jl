@@ -438,7 +438,12 @@ function _warped_face(raw, slot::Int, nu::Int, nv::Int, nw::Int)
         "for $ntri triangles"))
     converted_tags = Vector{Int32}(undef, ntri)
     @inbounds for index in 1:ntri
-        converted_tags[index] = _tag(tags[index], "faces[$slot] tag $index")
+        value = tags[index]
+        # The message names the tag only when it is rejected: building it
+        # for every face cell allocated a string per cell.
+        converted_tags[index] = value isa Integer && !(value isa Bool) &&
+            0 <= value <= typemax(Int32) ? Int32(value) :
+            _tag(value, "faces[$slot] tag $index")
     end
     return _WarpedFace(converted, converted_tris, converted_tags)
 end
