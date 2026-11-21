@@ -865,7 +865,10 @@ function _view_write(tag,filename,append=false)
                     "with MSH $(msh_version): using MSH 2.2")
             end
             bytes=_native_list_view_payload(view,extension,caller;name)
-            Sys.iswindows() && (bytes=Vector{UInt8}(codeunits(replace(String(bytes),"\n"=>"\r\n"))))
+            # `Post.write_pos` already ends its lines with the platform's text-mode
+            # terminator; converting them again wrote "\r\r\n" on Windows.
+            Sys.iswindows() && extension!=".pos" &&
+                (bytes=Vector{UInt8}(codeunits(replace(String(bytes),"\n"=>"\r\n"))))
             _native_diagnostic_emit_locked(:info,"Writing '$filename'...")
             if !iszero(get(OPTIONS,"PostProcessing.Binary",0.0))
                 message=extension==".pos" ? "Only parsed .pos files can be exported for this view type" :

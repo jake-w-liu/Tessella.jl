@@ -305,6 +305,7 @@ include("functional/fixtures.jl")
         "interfaces/api_occ_boolean_tangent_sphere_test.jl",
         "interfaces/api_occ_transform_owned_vertex_test.jl",
         "interfaces/api_refine_clear_regenerate_test.jl",
+        "interfaces/api_view_pos_line_ends_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)
