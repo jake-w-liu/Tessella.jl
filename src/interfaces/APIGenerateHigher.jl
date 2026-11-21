@@ -261,7 +261,13 @@ function _higher_assembly_authority(assembly,m,done;ranks=nothing,carrier=nothin
         selected=groups[msh]
         nodes=Matrix{Int32}(undef,Elements.msh_num_nodes(msh),length(selected))
         for (column,position) in enumerate(selected)
-            nodes[:,column]=mapping[assembly.cells[position].nodes]
+            # Row by row: `mapping[cell.nodes]` is a new list for every cell.
+            cell_nodes=assembly.cells[position].nodes
+            length(cell_nodes)==size(nodes,1) || throw(DimensionMismatch(
+                "$(assembly.caller): a cell of MSH type $msh has $(length(cell_nodes)) nodes"))
+            for slot in eachindex(cell_nodes)
+                nodes[slot,column]=mapping[cell_nodes[slot]]
+            end
         end
         push!(blocks,ElementBlock(Elements._TRUSTED_MIXED_STORAGE,msh,nodes,
             Int32[assembly.cells[i].physical for i in selected]))
