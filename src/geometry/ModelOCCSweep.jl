@@ -729,12 +729,27 @@ function _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,
     haskey(sw.emap,src_id) && return sw.emap[src_id]
     source=kernel.shapes[src_id]
     g=source.geometry.geometry
-    g.occ===:line || throw(ArgumentError(
+    spline=_model_occ_revol_spline_profile(g)
+    g.occ===:line || spline || throw(ArgumentError(
         "$caller: revolve of OCC curve kind $(g.occ) is not yet " *
         "supported"))
     a_id,b_id=source.children
     a=_model_occ_revol_vertex!(sw,kernel,a_id,p,n,Ma,loca,spec)
     b=_model_occ_revol_vertex!(sw,kernel,b_id,p,n,Ma,loca,spec)
+    if spline
+        # a rotation acts on a rational curve through its poles
+        curve=g.curve.curve
+        poles=NTuple{3,Float64}[_occ_xform_pnt(Ma,loca,q) for q in curve.controls]
+        id=_model_occ_sweep_id!(sw,kernel)
+        tag=_model_occ_sweep_tag!(sw,kernel,1)
+        _model_occ_sweep_bind!(sw,1,tag,id,
+            _ModelOCCShape(1,merge(source.geometry,(geometry=merge(g,
+                (curve=_ModelOCCNURBSCurve(g.curve.family,NURBS.NURBSCurve(
+                    curve.degree,curve.knots,poles,curve.weights)),)),)),
+                UInt64[a,b]))
+        sw.emap[src_id]=id
+        return id
+    end
     if a==a_id && b==b_id
         # an edge on the revolution axis sweeps to itself: the rotated
         # wall is bounded by the profile's own edge, not by a coincident
@@ -944,6 +959,98 @@ function _model_occ_revol_meridian!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     return face_id
 end
 
+# A profile the sweep can revolve as it is: a polynomial or rational
+# B-spline curve (`addSpline`, `addBSpline`, `addBezier`).
+_model_occ_revol_spline_profile(g)=get(g,:occ,nothing)===:copied_curve &&
+    haskey(g,:curve) && g.curve isa _ModelOCCNURBSCurve
+
+# Surface of revolution of a spline profile. Revolving a rational curve
+# about an axis is exact as a tensor product: every pole of the profile
+# sweeps the rational quadratic circle of its own radius, so the surface is
+# the circle's pole ring (degree 2 in u) through each profile pole, with the
+# profile's knots in v and the two weights multiplied. u is the circle's
+# rational parameter, equal to the angle at the knots; v is the profile's
+# own parameter. Edge layout and face orientation are OpenCASCADE's
+# (`BRepPrimAPI_MakeRevol`): start-vertex rim, the profile at u = a, the
+# end-vertex rim reversed, the profile reversed at u = 0; the normal
+# Su x Sv points away from the axis where the profile runs along it.
+function _model_occ_revol_spline!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
+    haskey(sw.fmap,src_id) && return sw.fmap[src_id]
+    source=kernel.shapes[src_id]
+    g=source.geometry.geometry
+    profile=g.curve.curve
+    a_id,b_id=source.children
+    full=a==_OCC_TWO_PI
+    vals,qs,ws,U,urep=_occ_nurbs_conic_axis(0.0,a)
+    nu,nv=length(vals),length(profile.controls)
+    controls=Matrix{NTuple{3,Float64}}(undef,nu,nv)
+    W=Matrix{Float64}(undef,nu,nv)
+    for j in 1:nv
+        _,h,radial=_model_occ_revol_rh(profile.controls[j],p,n)
+        on_axis=_occ3_add(p,_occ3_scale(n,h))
+        side=_occ_cross(n,radial)
+        for i in 1:nu
+            sn,cs=_gm_sincos(vals[i])
+            controls[i,j]=ntuple(k->fma(qs[i]*cs,radial[k],
+                fma(qs[i]*sn,side[k],on_axis[k])),3)
+            W[i,j]=ws[i]*profile.weights[j]
+        end
+    end
+    patch=_ModelNURBSSurface(:bspline,NURBS.NURBSSurface(
+        2,profile.degree,U,copy(profile.knots),controls,W))
+    seam_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
+    pcurves=Dict{Int,NamedTuple}()
+    geometry=(occ=:tensor_bspline,patch=patch,pcurves=pcurves,
+              vertex_uv=Dict{Int,NTuple{2,Float64}}(),reversed=false)
+    # Tags in OpenCASCADE's order: the edge swept by the start vertex, the
+    # one swept by the end vertex (a rim, or the collapsed parallel of a
+    # vertex on the axis), then the rotated copy of the profile.
+    rims=UInt64[]
+    for (vid,v) in ((a_id,g.t0),(b_id,g.t1))
+        rho,_,_=_model_occ_revol_rh(kernel.shapes[vid].geometry.point,p,n)
+        if rho<=_OCC_CONFUSION
+            # the collapsed parallel of a profile end on the axis
+            eid=_model_occ_revol_apex!(sw,kernel,vid,geometry,a,caller)
+            pcurves[_model_occ_sweep_tag_of(sw,kernel,eid,caller)]=
+                (fwd=(lin2d=((0.0,v),(1.0,0.0)),),
+                 rev=(lin2d=((0.0,v),(1.0,0.0)),))
+        else
+            # a rim circle runs in its angle, the patch in the rational
+            # parameter of its pole ring
+            eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
+            trace=(brep_conversion2d=((lin2d=((0.0,v),(1.0,0.0)),),nothing,
+                                      (u=urep,v=nothing)),)
+            pcurves[_model_occ_sweep_tag_of(sw,kernel,eid,caller)]=
+                (fwd=trace,rev=trace)
+        end
+        push!(rims,eid)
+    end
+    rot_id=full ? src_id :
+        _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,caller)
+    at_start=(lin2d=((0.0,0.0),(0.0,1.0)),)
+    at_end=(lin2d=((a,0.0),(0.0,1.0)),)
+    if full
+        pcurves[seam_tag]=(fwd=at_end,rev=at_start)
+    else
+        pcurves[seam_tag]=(fwd=at_start,rev=at_start)
+        pcurves[_model_occ_sweep_tag_of(sw,kernel,rot_id,caller)]=
+            (fwd=at_end,rev=at_end)
+    end
+    wire=Tuple{UInt64,Bool}[(rims[1],false),(rot_id,false),(rims[2],true),
+                            (src_id,true)]
+    wire_id=_model_occ_sweep_id!(sw,kernel)
+    wire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+    _model_occ_sweep_bind!(sw,-1,wire_tag,wire_id,
+        _ModelOCCShape(-1,(uses=wire,),UInt64[u[1] for u in wire]))
+    face_id=_model_occ_sweep_id!(sw,kernel)
+    face_tag=_model_occ_sweep_tag!(sw,kernel,2)
+    _model_occ_sweep_bind!(sw,2,face_tag,face_id,
+        _ModelOCCShape(2,(kind=:tensor_bspline,geometry=geometry),
+                       UInt64[wire_id]))
+    sw.fmap[src_id]=face_id
+    return face_id
+end
+
 # Annulus (or disk) plane face swept by a radial profile edge at axial
 # coordinate h — two concentric circles for a full turn, one open
 # sector wire (outer arc, rotated radial leg, inner arc, source radial
@@ -1032,8 +1139,12 @@ function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     ra,_,_=_model_occ_revol_rh(pa,p,n)
     rb,_,_=_model_occ_revol_rh(pb,p,n)
     full=a==_OCC_TWO_PI
-    _model_occ_revol_edge_order!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
-    if kind===:annulus
+    kind===:spline || _model_occ_revol_edge_order!(
+        sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
+    if kind===:spline
+        face_id=_model_occ_revol_spline!(
+            sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
+    elseif kind===:annulus
         # Standalone swept-face normal follows the profile's radial
         # direction (upstream's sweep convention): outward radial
         # profile -> +n, inward -> -n.
@@ -1051,6 +1162,8 @@ function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     laterals=Int[]
     for vid in (a_id,b_id)
         eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
+        # Gmsh also lists the collapsed parallel of a vertex on the axis
+        eid==0 && kind===:spline && (eid=get(sw.lmap,vid,zero(UInt64)))
         eid!=0 && push!(laterals,
             _model_occ_sweep_tag_of(sw,kernel,eid,caller))
     end
@@ -1382,9 +1495,30 @@ end
 function _model_occ_revol_check_line(kernel,src_id,p,n,caller)
     source=kernel.shapes[src_id]
     g=source.geometry
+    if _model_occ_revol_spline_profile(g.geometry)
+        # The tensor surface needs the profile off the axis except at its
+        # ends, where the parallel collapses to a point.
+        curve=g.geometry.curve
+        t0,t1=g.geometry.t0,g.geometry.t1
+        samples=16*max(1,length(curve.curve.controls)-curve.curve.degree)
+        before=nothing
+        for i in 1:samples-1
+            point,_,_=_model_occ_curve_d2(curve,t0+(t1-t0)*i/samples)
+            rho,_,radial=_model_occ_revol_rh(point,p,n)
+            # on the axis, or through it since the last sample (the
+            # radial direction turned over)
+            rho>_OCC_CONFUSION &&
+                (before===nothing || _dot3(before,radial)>0) ||
+                throw(ArgumentError(
+                    "$caller: cannot revolve a spline that meets the " *
+                    "revolution axis between its ends"))
+            before=radial
+        end
+        return :spline
+    end
     g.kind===:line || throw(ArgumentError(
         "$caller: revolution of a $(g.kind) profile is not yet " *
-        "supported — only line curves are"))
+        "supported — only line and spline curves are"))
     a_id,b_id=source.children
     pa=kernel.shapes[a_id].geometry.point
     pb=kernel.shapes[b_id].geometry.point
