@@ -386,7 +386,9 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
     diagnostic=validate(cached;reject_duplicate_point_cells=false)
     diagnostic.ok || throw(ArgumentError("$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
     linear_nodes || _mixed_require_linear_cad(m,stored_class,caller)
-    m=Model._model_mesh_transaction_copy(m)
+    # The staged model shares the mesh authority with its source: nothing
+    # edits an authority in place, and copying it was most of this copy.
+    m=_dim01_transaction_copy(m)
     class=stored_class===nothing ? _mixed_refine_unclassified(cached) : stored_class
     if !isempty(m.meshing.periodic_uid_history)
         cached,class=_periodic_uid_history_source(m,cached,class,caller)
