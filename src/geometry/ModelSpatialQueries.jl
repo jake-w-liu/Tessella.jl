@@ -723,7 +723,20 @@ function _dist_curve_project(m::GeoModel,tag::Int,q::NTuple{3,Float64},
     if occ!==nothing
         proj=_occ_curve_project(m,occ,tag,q,caller)
         t,pt=proj===nothing ? _occ_curve_closest(m,occ,tag,q,caller) : proj
-        return _sqdist(q,pt),pt
+        best=_sqdist(q,pt)
+        if proj===nothing
+            # No foot of a perpendicular inside the edge. The search then
+            # stops next to the nearer end, not on it: the corner of a box
+            # came back 8.4e-10 inside its edge, and the distance from the
+            # box to (3,3,3) 4.8e-10 above sqrt(6.75). An end that is at
+            # least as near is the answer, exactly.
+            for bound in _dist_curve_bounds(m,tag,caller)
+                at_end=_model_curve_point(m,tag,bound,caller)
+                reach=_sqdist(q,at_end)
+                reach<=best && (best=reach;pt=at_end)
+            end
+        end
+        return best,pt
     end
     kind=_curve_type(m,tag)
     if kind==:line
