@@ -670,6 +670,8 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
         points=Dict{Tuple{Int,Int32},Dict{NTuple{3,Float64},Vector{Int32}}}()
         ranges=Dict{Tuple{Int,Int32},Union{Nothing,Tuple{Int,Vector{Float64},Vector{Int32}}}}()
         mapping=Vector{Int32}(undef,nnodes(mesh))
+        # One parametrizer per owner: the entity's geometry is resolved once.
+        parametrizers=Dict{Tuple{Int,Int32},Any}()
         for position in (native===nothing ?
             source_row_order===nothing ? axes(mesh.coords,2) : source_row_order : native.rows)
             owner=class.node_entities[position]
@@ -713,7 +715,9 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
                 continue
             end
             if parameter===nothing && owner[1] in (1,2)
-                parameter=Model.model_parametrization(m,owner[1],Int(owner[2]),collect(point))
+                parametrize=get!(()->Model._model_point_parametrizer(m,owner[1],Int(owner[2])),
+                    parametrizers,owner)
+                parameter=parametrize(point)
             end
             matches=Int32[]
             if owner[1]<dimension || owner in emitted

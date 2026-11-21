@@ -487,6 +487,48 @@ function _ruled_qua_point(m::GeoModel,gens,S,u::Float64,v::Float64,
     return point
 end
 
+# `InterpolateExtrudedSurface` (`Geometry.ExactExtrusion`, on by default):
+# a surface swept by a rigid `Extrude` evaluates its source curve and applies
+# `ExtrudeParams::Extrude(t)` instead of blending its four generatrices,
+# before any ruled or sphere-patch logic. The slot of the source among the
+# generatrices picks the `(u,v)` roles. Upstream applies the formula even to
+# a surface moved after its extrusion ("this WILL fail"); here a surface whose
+# corners no longer sit where the formula puts them keeps the blend.
+function _ruled_exact_extrusion(m::GeoModel,tag::Int,gens::Vector{Int},
+                                caller::AbstractString)
+    3<=length(gens)<=4 || return nothing
+    link=get(m.meshing.extrude_sources,(2,tag),nothing)
+    spec=get(m.meshing.extrude_specs,(2,tag),nothing)
+    (link===nothing || spec===nothing || link[1]!=1) && return nothing
+    spec.type in (:translate,:rotate,:translate_rotate) || return nothing
+    _occ_surface_entity(m,tag) && return nothing
+    source=Int(link[2])
+    slot=findfirst(==(source),gens)
+    slot===nothing && return nothing
+    corner(i)=begin
+        signed=gens[i]
+        endpoints=m.curves[abs(signed)]
+        m.points[signed>0 ? endpoints[1] : endpoints[2]]
+    end
+    uvs=length(gens)==4 ? ((0.0,0.0),(1.0,0.0),(1.0,1.0),(0.0,1.0)) :
+        ((0.0,0.0),(1.0,0.0),(1.0,1.0))
+    for (i,(u,v)) in enumerate(uvs)
+        p=_ruled_exact_extrusion_point(m,spec,source,slot,u,v,caller)
+        q=corner(i)
+        tolerance=1e-9*max(1.0,maximum(abs,q))
+        maximum(abs(p[a]-q[a]) for a in 1:3)<=tolerance || return nothing
+    end
+    return (spec=spec,source=source,slot=slot)
+end
+
+function _ruled_exact_extrusion_point(m::GeoModel,spec,source::Int,slot::Int,
+                                      u::Float64,v::Float64,
+                                      caller::AbstractString)
+    t,s=slot==1 ? (u,v) : slot==2 ? (v,1.0-u) : slot==3 ? (1.0-u,1.0-v) :
+        (1.0-v,u)
+    return _extrude_at(spec,_ruled_curve_point(m,source,t,caller),s,caller)
+end
+
 function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
                               caller::AbstractString,old_ruled::Bool=false)
     gens=m.loops[first(m.surfaces[tag])]
@@ -497,22 +539,12 @@ function _ruled_surface_point(m::GeoModel,tag::Int,u::Float64,v::Float64,
         endpoints=m.curves[abs(signed)]
         m.points[signed>0 ? endpoints[1] : endpoints[2]]
     end
+    exact=_ruled_cached(()->_ruled_exact_extrusion(m,tag,gens,caller),:exact,tag)
+    exact===nothing ||
+        return _ruled_exact_extrusion_point(m,exact.spec,exact.source,exact.slot,u,v,caller)
     center=_ruled_cached(()->_ruled_sphere_center(m,tag,gens,caller),:sphere,tag)
     if length(gens)>=4
         S=(corner(1),corner(2),corner(3),corner(4))
-        link=get(m.meshing.extrude_sources,(2,tag),nothing)
-        spec=get(m.meshing.extrude_specs,(2,tag),nothing)
-        # A bound translated Line lateral evaluates its source and sweep
-        # directly. Blending the four straight boundary curves introduces
-        # cancellation that changes its native inverse parameters.
-        if length(gens)==4 && center===nothing && link!==nothing &&
-                link[1]==1 && link[2]==gens[1] && spec!==nothing &&
-                spec.type===:translate && !_occ_surface_entity(m,tag) &&
-                all(curve->_curve_type(m,abs(curve))===:line,gens) &&
-                _extrude_at(spec,S[1],1.0,caller)==S[4] &&
-                _extrude_at(spec,S[2],1.0,caller)==S[3]
-            return _extrude_at(spec,_ruled_curve_point(m,gens[1],u,caller),v,caller)
-        end
         return _ruled_qua_point(m,gens,S,u,v,center,caller)
     end
     S=(corner(1),corner(2),corner(3))
@@ -624,12 +656,36 @@ end
 # Independent two-sided Jacobi factorization for a square 3x3 matrix. A square
 # matrix needs no rectangular QR reduction. Track both orthogonal factors and
 # divide each left singular vector before the final ordered scalar product.
+# The buffers of one inversion; a Newton loop reuses them for every step.
+struct _RuledInverseWork
+    mat::Matrix{Float64}
+    work::Matrix{Float64}
+    left::Matrix{Float64}
+    right::Matrix{Float64}
+    divided::Matrix{Float64}
+    inverse::Matrix{Float64}
+    values::Vector{Float64}
+    order::Vector{Int}
+end
+_RuledInverseWork()=_RuledInverseWork((zeros(3,3) for _ in 1:6)...,zeros(3),zeros(Int,3))
+
 function _invert_singular3x3(mat::Matrix{Float64})
+    ws=_RuledInverseWork()
+    copyto!(ws.mat,mat)
+    return copy(_invert_singular3x3!(ws))
+end
+
+# In place on `ws.mat`; returns `ws.inverse`, valid until the next call.
+function _invert_singular3x3!(ws::_RuledInverseWork)
+    mat=ws.mat
     size(mat)==(3,3) && all(isfinite,mat) || throw(ArgumentError("ruled inverse requires a finite 3x3 matrix"))
-    scale=maximum(abs,mat);scale==0.0 && return zeros(3,3)
-    work=mat./scale
-    left=[i==j ? 1.0 : 0.0 for i in 1:3,j in 1:3]
-    right=copy(left)
+    inverse=ws.inverse
+    scale=maximum(abs,mat);scale==0.0 && return fill!(inverse,0.0)
+    work=ws.work;left=ws.left;right=ws.right
+    for j in 1:3,i in 1:3
+        work[i,j]=mat[i,j]/scale
+        left[i,j]=right[i,j]=i==j ? 1.0 : 0.0
+    end
     maximum_diagonal=maximum(abs(work[i,i]) for i in 1:3)
     converged=false
     for sweep in 1:100
@@ -683,21 +739,33 @@ function _invert_singular3x3(mat::Matrix{Float64})
         if !changed;converged=true;break;end
     end
     converged || throw(ArgumentError("ruled square Jacobi iteration did not converge"))
-    values=Float64[abs(work[i,i])*scale for i in 1:3]
+    values=ws.values;order=ws.order
+    for i in 1:3
+        values[i]=abs(work[i,i])*scale
+        order[i]=i
+    end
     for col in 1:3
         if work[col,col]<0.0
             for row in 1:3;left[row,col]=-left[row,col];end
         end
     end
-    order=sortperm(values;rev=true,alg=Base.Sort.MergeSort)
-    values=values[order];left=left[:,order];right=right[:,order]
-    divided=zeros(3,3)
-    for i in 1:3,j in 1:3
-        abs(values[i])>1.e-16 && (divided[i,j]+=left[j,i]/values[i])
+    # A stable descending sort of the three singular values (the merge sort
+    # of `sortperm(...; rev=true)`: ties keep their column order).
+    for i in 2:3
+        j=i
+        while j>1 && values[order[j-1]]<values[order[j]]
+            order[j-1],order[j]=order[j],order[j-1]
+            j-=1
+        end
     end
-    inverse=zeros(3,3)
+    divided=fill!(ws.divided,0.0)
+    for i in 1:3,j in 1:3
+        value=values[order[i]]
+        abs(value)>1.e-16 && (divided[i,j]+=left[j,order[i]]/value)
+    end
+    fill!(inverse,0.0)
     for i in 1:3,j in 1:3,k in 1:3
-        inverse[i,j]+=right[i,k]*divided[k,j]
+        inverse[i,j]+=right[i,order[k]]*divided[k,j]
     end
     return inverse
 end
@@ -716,15 +784,46 @@ function _ruled_xyz_to_uv(m::GeoModel,tag::Int,target::NTuple{3,Float64},
                           relax::Float64,lc::Float64,test_xyz::Bool,warn,info,
                           caller::AbstractString,old_ruled::Bool=false;
                           on_surface::Bool=true)
+    return _ruled_inverter(m,tag,caller,old_ruled)(target,relax,lc,test_xyz,
+                                                   warn,info;on_surface)
+end
+
+# `_ruled_xyz_to_uv` with the surface resolved once: a function of
+# `(target, relax, lc, test_xyz, warn, info; on_surface)` for any number of
+# inversions on an unchanged model.
+function _ruled_inverter(m::GeoModel,tag::Int,caller::AbstractString,
+                         old_ruled::Bool=false)
+    gens=m.loops[first(m.surfaces[tag])]
+    exact=_ruled_exact_extrusion(m,tag,gens,caller)
+    ws=_RuledInverseWork()
+    if exact!==nothing
+        # The swept surface's point is the source curve's point moved by the
+        # sweep: resolve both once, so the Newton loop specializes on them
+        # instead of looking them up at every evaluation.
+        curve=_ruled_curve_evaluator(m,exact.source,caller)
+        spec=exact.spec;slot=exact.slot
+        surface=(u,v)->begin
+            t,s=slot==1 ? (u,v) : slot==2 ? (v,1.0-u) :
+                slot==3 ? (1.0-u,1.0-v) : (1.0-v,u)
+            _extrude_at(spec,curve(t),s,caller)
+        end
+        return (target,relax,lc,test_xyz,warn,info;on_surface::Bool=true)->
+            _ruled_newton(surface,ws,tag,target,relax,lc,test_xyz,warn,info,
+                          on_surface)
+    end
     # One inversion evaluates the surface thousands of times on an unchanged
     # model: keep each generatrix's geometry adapter and the sphere-patch
-    # test for the duration of the call (same objects, same results).
-    haskey(task_local_storage(),:_ruled_eval_cache) &&
-        return _ruled_xyz_to_uv_newton(m,tag,target,relax,lc,test_xyz,warn,
-                                       info,caller,old_ruled;on_surface)
-    return task_local_storage(:_ruled_eval_cache,Dict{Tuple{Symbol,Int},Any}()) do
-        _ruled_xyz_to_uv_newton(m,tag,target,relax,lc,test_xyz,warn,info,
-                                caller,old_ruled;on_surface)
+    # test while the inverter lives (same objects, same results).
+    blend=(u,v)->_ruled_surface_point(m,tag,u,v,caller,old_ruled)
+    cache=Dict{Tuple{Symbol,Int},Any}()
+    return (target,relax,lc,test_xyz,warn,info;on_surface::Bool=true)->begin
+        haskey(task_local_storage(),:_ruled_eval_cache) &&
+            return _ruled_newton(blend,ws,tag,target,relax,lc,test_xyz,warn,
+                                 info,on_surface)
+        task_local_storage(:_ruled_eval_cache,cache) do
+            _ruled_newton(blend,ws,tag,target,relax,lc,test_xyz,warn,info,
+                          on_surface)
+        end
     end
 end
 
@@ -736,28 +835,69 @@ function _ruled_cached(builder,kind::Symbol,tag::Int)
     return get!(builder,cache::Dict{Tuple{Symbol,Int},Any},(kind,tag))
 end
 
-function _ruled_xyz_to_uv_newton(m::GeoModel,tag::Int,target::NTuple{3,Float64},
-                          relax::Float64,lc::Float64,test_xyz::Bool,warn,info,
-                          caller::AbstractString,old_ruled::Bool=false;
-                          on_surface::Bool=true)
+# `_ruled_curve_point` for one signed generatrix with its type and geometry
+# looked up once.
+function _ruled_curve_evaluator(m::GeoModel,signed::Int,caller::AbstractString)
+    tag=abs(signed)
+    kind=_curve_type(m,tag)
+    if kind===:line
+        endpoints=m.curves[tag]
+        first=m.points[endpoints[1]];last=m.points[endpoints[2]]
+        return t->begin
+            parameter=signed>0 ? t : 1.0-t
+            (first[1]+parameter*(last[1]-first[1]),
+             first[2]+parameter*(last[2]-first[2]),
+             first[3]+parameter*(last[3]-first[3]))
+        end
+    elseif kind!==:boundary_layer
+        adapter=_model_high_order_curve_geometry(m,tag,caller)
+        if adapter!==nothing && adapter.kind in (:arc,:spline)
+            return t->_model_high_order_curve_point(adapter,
+                                                    signed>0 ? t : 1.0-t,caller)
+        end
+    end
+    return t->_ruled_curve_point(m,signed,t,caller)
+end
+
+# `InterpolateSurface(der=1)` on a point function `surface(u,v)`, given the
+# value `here` at `(u,v)`: the one-sided difference `_ruled_surface_d1` takes.
+@inline function _ruled_fd_d1(surface,here,u::Float64,v::Float64,dir::Int)
+    eps=_RU_SURF_FD_EPS
+    if dir==1
+        a,b=u-eps<0.0 ? (here,surface(u+eps,v)) : (surface(u-eps,v),here)
+    else
+        a,b=v-eps<0.0 ? (here,surface(u,v+eps)) : (surface(u,v-eps),here)
+    end
+    return ((b[1]-a[1])*_RU_SURF_INV_FD_EPS,
+            (b[2]-a[2])*_RU_SURF_INV_FD_EPS,
+            (b[3]-a[3])*_RU_SURF_INV_FD_EPS)
+end
+
+function _ruled_newton(surface::F,ws::_RuledInverseWork,tag::Int,
+                       target::NTuple{3,Float64},relax::Float64,lc::Float64,
+                       test_xyz::Bool,warn,info,on_surface::Bool) where {F}
     guesses=(0.5,0.6,0.4,0.7,0.3,0.8,0.2,1.0,0.0)
     umin=vmin=0.0;umax=vmax=1.0
     tol=(on_surface ? 1e-8 : 1e-3)*((umax-umin)^2+(vmax-vmin)^2)
     max_iter=on_surface ? 25 : 10
     U=V=Unew=Vnew=0.0
+    mat=ws.mat
     for (i,initu) in pairs(guesses), (j,initv) in pairs(guesses)
         U=umin+initu*(umax-umin);V=vmin+initv*(vmax-vmin)
         err=1.0;iter=1
-        point=_ruled_surface_point(m,tag,U,V,caller,old_ruled)
+        point=surface(U,V)
         err2=sqrt((target[1]-point[1])^2+(target[2]-point[2])^2+
                   (target[3]-point[3])^2)
         err2<1e-8*lc && return (U,V)
         while err>tol && iter<max_iter
-            point=_ruled_surface_point(m,tag,U,V,caller,old_ruled)
-            du=_ruled_surface_d1(m,tag,U,V,1,caller,old_ruled)
-            dv=_ruled_surface_d1(m,tag,U,V,2,caller,old_ruled)
-            jac=_invert_singular3x3(
-                [du[1] du[2] du[3];dv[1] dv[2] dv[3];0.0 0.0 0.0])
+            # The point at (U,V) is the one the previous step ended on, or
+            # the guess just evaluated: the surface is a pure function.
+            du=_ruled_fd_d1(surface,point,U,V,1)
+            dv=_ruled_fd_d1(surface,point,U,V,2)
+            for axis in 1:3
+                mat[1,axis]=du[axis];mat[2,axis]=dv[axis];mat[3,axis]=0.0
+            end
+            jac=_invert_singular3x3!(ws)
             rx=target[1]-point[1];ry=target[2]-point[2];rz=target[3]-point[3]
             Unew=U+relax*(jac[1,1]*rx+jac[2,1]*ry+jac[3,1]*rz)
             Vnew=V+relax*(jac[1,2]*rx+jac[2,2]*ry+jac[3,2]*rz)
@@ -767,6 +907,7 @@ function _ruled_xyz_to_uv_newton(m::GeoModel,tag::Int,target::NTuple{3,Float64},
             err2=sqrt((target[1]-point[1])^2+(target[2]-point[2])^2+
                       (target[3]-point[3])^2)
             iter+=1;U=Unew;V=Vnew
+            point=surface(U,V)
         end
         if iter<max_iter && err<=tol &&
             umin<=Unew<=umax && vmin<=Vnew<=vmax
@@ -790,8 +931,8 @@ function _ruled_xyz_to_uv_newton(m::GeoModel,tag::Int,target::NTuple{3,Float64},
     end
     info(@sprintf("Point %g %g %g: Relaxation factor = %g",
                   target[1],target[2],target[3],0.75*relax))
-    return _ruled_xyz_to_uv(m,tag,target,0.75*relax,lc,test_xyz,warn,
-                            info,caller,old_ruled;on_surface=on_surface)
+    return _ruled_newton(surface,ws,tag,target,0.75*relax,lc,test_xyz,warn,
+                         info,on_surface)
 end
 
 # `gmshVertex::reparamOnFace` — the generatrix-corner map for ruled surfaces;
@@ -1483,22 +1624,28 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
     end
     output=Float64[]
     sizehint!(output,dimension*(length(values)÷3))
-    occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
-    line=nothing;arc=nothing;spline=nothing;bl_row=nothing
-    if dimension==1 && occ===nothing
-        kind=_curve_type(m,entity_tag)
-        if kind==:line
-            line=_model_line_geometry(m,entity_tag,caller)
-        elseif kind in _SPLINE_CURVE_TYPES
-            spline=_spline_geometry(m,entity_tag,caller)
-        elseif kind===:boundary_layer
-            # `GEdge::parFromPoint` declines `BoundaryLayerCurve` upstream —
-            # the mesh-only chapeau's only geometry is its emitted top row.
-            bl_row=_bl_curve_polyline(m,entity_tag,caller)
-        else
-            arc=_arc_geometry(m,entity_tag,caller)
-        end
+    parametrize=_model_parametrizer(m,dimension,entity_tag,old_ruled_surface,caller)
+    for index in 1:3:length(values)
+        parametrize(output,(values[index],values[index+1],values[index+2]),
+                    (index+2)÷3)
     end
+    return output
+end
+
+# The per-entity part of `model_parametrization`, done once: the returned
+# `(output, coordinate, point_index)` function appends one point's parameters.
+function _model_parametrizer(m::GeoModel,dimension::Int,entity_tag::Int,
+                             old_ruled_surface::Bool,caller::AbstractString)
+    occ=dimension==1 ? _occ_geometry_checked(m,entity_tag,caller) : nothing
+    kind=dimension==1 && occ===nothing ? _curve_type(m,entity_tag) : nothing
+    line=kind===:line ? _model_line_geometry(m,entity_tag,caller) : nothing
+    spline=kind!==nothing && kind in _SPLINE_CURVE_TYPES ?
+        _spline_geometry(m,entity_tag,caller) : nothing
+    # `GEdge::parFromPoint` declines `BoundaryLayerCurve` upstream — the
+    # mesh-only chapeau's only geometry is its emitted top row.
+    bl_row=kind===:boundary_layer ? _bl_curve_polyline(m,entity_tag,caller) : nothing
+    arc=kind===nothing || kind===:line || kind===:boundary_layer ||
+        kind in _SPLINE_CURVE_TYPES ? nothing : _arc_geometry(m,entity_tag,caller)
     surface_geometry=dimension==2 ?
         get(m.surface_geometry,entity_tag,nothing) : nothing
     occ_surface=surface_geometry!==nothing &&
@@ -1523,8 +1670,9 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
     lc=(arc!==nothing || spline!==nothing || occ!==nothing || occ_surface ||
         ruled_surface) ?
         _model_lc(m) : 0.0
-    for index in 1:3:length(values)
-        coordinate=(values[index],values[index+1],values[index+2])
+    ruled_inverse=ruled_surface ?
+        _ruled_inverter(m,entity_tag,caller,old_ruled_surface) : nothing
+    return (output,coordinate,point)->begin
         bl_source=bl_sources===nothing ? nothing :
             _bl_surface_source_point(bl_sources,coordinate)
         if dimension==1
@@ -1540,7 +1688,7 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
             elseif line!==nothing
                 parameter,_=_model_line_parameter_exact(line,coordinate)
                 push!(output,_model_rational_float(
-                    parameter,caller,"Line parameter for point $((index+2)÷3)"))
+                    parameter,caller,"Line parameter for point $point"))
             elseif spline!==nothing
                 # `GEdge::parFromPoint` → `XYZToU` — multi-seed damped
                 # Newton on the `InterpolateCurve` finite difference over
@@ -1575,15 +1723,40 @@ function model_parametrization(m::GeoModel,dim,tag,coordinates;
             # `GFace::XYZtoUV`. `model::getParametrization` requires both
             # on-surface and XYZ convergence tests, independent of the
             # transfinite mesher's looser inverse variant.
-            append!(output,_ruled_xyz_to_uv(m,entity_tag,coordinate,1.0,lc,
-                true,_model_evaluation_silent,_model_evaluation_silent,
-                caller,old_ruled_surface))
+            append!(output,ruled_inverse(coordinate,1.0,lc,true,
+                _model_evaluation_silent,_model_evaluation_silent))
         else
             append!(output,_model_plane_parameters(
-                plane,coordinate,caller,(index+2)÷3))
+                plane,coordinate,caller,point))
         end
+        output
     end
-    return output
+end
+
+"""
+    _model_point_parametrizer(model, dim, tag; old_ruled_surface=false)
+
+A function of one 3-D coordinate returning what
+`model_parametrization(model, dim, tag, coordinate)` returns, with the
+entity's geometry resolved once for all the points a caller asks about. The
+model must not change while the function is in use.
+"""
+function _model_point_parametrizer(m::GeoModel,dim,tag;old_ruled_surface::Bool=false)
+    caller="model_parametrization"
+    dimension,entity_tag=_model_evaluation_entity(m,dim,tag,(0,1,2),caller)
+    (dimension==0 || haskey(m.discrete,(dimension,entity_tag))) &&
+        return coordinate->model_parametrization(m,dimension,entity_tag,
+            collect(coordinate);old_ruled_surface)
+    parametrize=_model_parametrizer(m,dimension,entity_tag,old_ruled_surface,caller)
+    return coordinate->begin
+        length(coordinate)==3 && all(isfinite,coordinate) ||
+            return model_parametrization(m,dimension,entity_tag,
+                collect(coordinate);old_ruled_surface)
+        output=Float64[]
+        sizehint!(output,dimension)
+        parametrize(output,(Float64(coordinate[1]),Float64(coordinate[2]),
+                            Float64(coordinate[3])),1)
+    end
 end
 
 _model_evaluation_silent(::AbstractString)=nothing
