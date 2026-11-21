@@ -34,7 +34,9 @@ end
         _MESH_JACOBIAN_API.initialize()
         @test_throws ArgumentError _MESH_JACOBIAN_API.mesh.get_jacobians(
             4,[0,0,0])
-        @test_throws ArgumentError _MESH_JACOBIAN_API.mesh.get_jacobian(
+        # A tag that names no element is Gmsh's own diagnostic, raised under the
+        # API default General.AbortOnError=2 (Gmsh 4.15.2: "Unknown element 1").
+        @test_throws ErrorException("Unknown element 1") _MESH_JACOBIAN_API.mesh.get_jacobian(
             1,[0,0,0])
 
         fixture=_mesh_jacobian_api_fixture()
@@ -119,11 +121,14 @@ end
             ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0],-1,0,0),
             ()->_MESH_JACOBIAN_API.mesh.get_jacobians(4,[0,0,0],-1,true,1),
             ()->_MESH_JACOBIAN_API.mesh.get_jacobian(true,[0,0,0]),
-            ()->_MESH_JACOBIAN_API.mesh.get_jacobian(0,[0,0,0]),
-            ()->_MESH_JACOBIAN_API.mesh.get_jacobian(5,[0,0,0]),
             ()->_MESH_JACOBIAN_API.mesh.get_jacobian(1,[Inf,0,0]),
         )
             @test_throws ArgumentError call()
+            @test mesh_crc(_MESH_JACOBIAN_API.mesh.get())==fixture_crc
+        end
+        for unknown in (0,5)
+            @test_throws ErrorException("Unknown element $unknown") _MESH_JACOBIAN_API.mesh.get_jacobian(
+                unknown,[0,0,0])
             @test mesh_crc(_MESH_JACOBIAN_API.mesh.get())==fixture_crc
         end
 
@@ -147,7 +152,9 @@ end
         @test _MESH_JACOBIAN_API.mesh.clear()===nothing
         @test_throws ArgumentError _MESH_JACOBIAN_API.mesh.get_jacobians(
             4,[0,0,0])
-        @test_throws ArgumentError _MESH_JACOBIAN_API.mesh.get_jacobian(
+        # A tag that names no element is Gmsh's own diagnostic, raised under the
+        # API default General.AbortOnError=2 (Gmsh 4.15.2: "Unknown element 1").
+        @test_throws ErrorException("Unknown element 1") _MESH_JACOBIAN_API.mesh.get_jacobian(
             1,[0,0,0])
 
     finally

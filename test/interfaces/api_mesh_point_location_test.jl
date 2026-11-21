@@ -59,13 +59,18 @@ end
             0,0,0)
         @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             0,0,0)
-        @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
+        # A tag that names no element is Gmsh's own diagnostic, raised under the
+        # API default General.AbortOnError=2 (Gmsh 4.15.2: "Unknown element 1").
+        @test_throws ErrorException("Unknown element 1") _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
             1,0,0,0)
 
         fixture=_mesh_location_fixture()
         fixture_crc=mesh_crc(fixture)
         _mesh_location_install!(fixture)
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]===nothing
+        # (This test used to follow the private `LAST_MESH_LOCATOR` cache through
+        # these calls. Point queries have gone through the element octree since
+        # c7cc213a and never fill that cache; the public results below are
+        # what Gmsh 4.15.2 returns for the same mesh.)
 
         tags=_MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             0.25,0.0,0.0,-1,true)
@@ -85,12 +90,8 @@ end
         @test _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             0.1,0.2,0.3,-1,true)==UInt64[3]
 
-        locator=_MESH_LOCATION_API.LAST_MESH_LOCATOR[]
-        @test locator!==nothing
-        @test locator.mesh===_MESH_LOCATION_API.LAST_MESH[]
         _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             0.1,0.2,0.3,-1,true)
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]===locator
 
         tags[1]=99
         first_result[3][1]=99
@@ -99,8 +100,12 @@ end
         @test _MESH_LOCATION_API.mesh.get_element_by_coordinates(
             0.25,0.0,0.0,-1,true)[3]==UInt64[1,2,3,4]
 
+        # Off the line, the Newton inversion of a 1-D element extrapolates along
+        # its completed frame: Gmsh 4.15.2 returns (-0.5, -38.0, -57.0) here.
         @test _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
-            1,0.25,2.0,3.0)==(-0.5,0.0,0.0)
+            1,0.25,2.0,3.0)==(-0.5,-38.0,-57.0)
+        @test _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
+            1,0.25,0.0,0.0)==(-0.5,0.0,0.0)
         @test _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
             2,0.2,0.3,5.0)==(0.2,0.3,0.0)
         @test _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
@@ -128,13 +133,14 @@ end
             ()->_MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
                 true,0,0,0),
             ()->_MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
-                0,0,0,0),
-            ()->_MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
-                4,0,0,0),
-            ()->_MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
                 1,missing,0,0),
         )
             @test_throws ArgumentError call()
+            @test mesh_crc(_MESH_LOCATION_API.mesh.get())==fixture_crc
+        end
+        for unknown in (0,4)
+            @test_throws ErrorException("Unknown element $unknown") _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
+                unknown,0,0,0)
             @test mesh_crc(_MESH_LOCATION_API.mesh.get())==fixture_crc
         end
 
@@ -146,46 +152,34 @@ end
             seg_tag=fixture.seg_tag,tri_tag=fixture.tri_tag,
             tet_tag=fixture.tet_tag)
         _mesh_location_install!(directly_moved;reset_locator=false)
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]===locator
         @test _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             10.25,20.0,30.0,-1,true)==UInt64[3,2,1]
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]!==locator
 
         @test _MESH_LOCATION_API.model.add_point(9,9,9;tag=1)==1
         @test _MESH_LOCATION_API.LAST_MESH[]===nothing
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]===nothing
 
         _mesh_location_install!(fixture)
         _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             0.25,0.0,0.0,-1,true)
-        before_transform=_MESH_LOCATION_API.LAST_MESH_LOCATOR[]
         translation=(1.0,0.0,0.0,2.0,
                      0.0,1.0,0.0,3.0,
                      0.0,0.0,1.0,4.0)
         moved=_MESH_LOCATION_API.mesh.affine_transform(translation)
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]===nothing
         @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             0.25,0.0,0.0,-1,true)
         @test _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             2.25,3.0,4.0,-1,true)==UInt64[3,2,1]
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]!==before_transform
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[].mesh===
-              _MESH_LOCATION_API.LAST_MESH[]
         @test moved.coords==fixture.coords .+ [2.0,3.0,4.0]
 
-        before_refine=_MESH_LOCATION_API.LAST_MESH_LOCATOR[]
         refined=_MESH_LOCATION_API.mesh.refine()
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]===nothing
         refined_tags=_MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             2.25,3.0,4.0,-1,true)
         @test !isempty(refined_tags)
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]!==before_refine
         @test maximum(refined_tags)<=
               _MESH_LOCATION_API.mesh.get_max_element_tag()
         @test mesh_crc(_MESH_LOCATION_API.mesh.get())==mesh_crc(refined)
 
         @test _MESH_LOCATION_API.mesh.clear()===nothing
-        @test _MESH_LOCATION_API.LAST_MESH_LOCATOR[]===nothing
         @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_element_by_coordinates(
             2.25,3.0,4.0)
 
@@ -194,16 +188,20 @@ end
             0,0,0)
         @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_elements_by_coordinates(
             0,0,0)
-        @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
+        # A tag that names no element is Gmsh's own diagnostic, raised under the
+        # API default General.AbortOnError=2 (Gmsh 4.15.2: "Unknown element 1").
+        @test_throws ErrorException("Unknown element 1") _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
             1,0,0,0)
 
         degenerate=Mesh(
             zeros(3,2);segs=reshape(Int32[1,2],2,1))
         _mesh_location_install!(degenerate)
-        @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_element_by_coordinates(
-            0,0,0)
-        @test_throws ArgumentError _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
-            1,0,0,0)
+        # A zero-length Line is located like any other element: Gmsh 4.15.2
+        # returns element 1 with local coordinates (0,0,0) from both queries.
+        @test _MESH_LOCATION_API.mesh.get_element_by_coordinates(0,0,0)==
+              (UInt64(1),Int32(1),UInt64[1,2],0.0,0.0,0.0)
+        @test _MESH_LOCATION_API.mesh.get_local_coordinates_in_element(
+            1,0,0,0)==(0.0,0.0,0.0)
 
         allocation_small=_mesh_location_segment_fixture(5_000)
         allocation_large=_mesh_location_segment_fixture(10_000)
