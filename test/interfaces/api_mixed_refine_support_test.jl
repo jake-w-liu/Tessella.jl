@@ -121,7 +121,10 @@ end
 
 function _mrs_point_owner(api,target,expected)
     nodes=api.mesh.get_nodes()[1]
-    selected=[node for node in nodes if Tuple(api.mesh.get_node(node)[1])==target]
+    # Gmsh 4.15.2 places these nodes at its curve parameters, e.g. x =
+    # 1.499999999998621 and 1.2499999999994142 on Curve 101, as Tessella
+    # does; the targets are their exact values.
+    selected=[node for node in nodes if all(isapprox.(Tuple(api.mesh.get_node(node)[1]),target;atol=1e-9))]
     @test length(selected)==1
     isempty(selected) && return
     @test api.mesh.get_node(only(selected))[3:4]==expected
