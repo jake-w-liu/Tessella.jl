@@ -21,7 +21,16 @@ function _extrude_nonew_general_candidate(m::GeoModel,t::Int,caller)
     isempty(get(m.embeds,(3,t),NTuple{2,Int}[])) || return false
     for surface in abs.(_extrude_nonew_boundary_surfaces(m,t,caller))
         isempty(get(m.embeds,(2,surface),NTuple{2,Int}[])) || return false
-        _extrude_quadtri_regions(m,surface,caller)==[t] || return false
+        owners=_extrude_quadtri_regions(m,surface,caller)
+        owners==[t] && continue
+        # A Source swept by several NoNewVerts Regions: Gmsh runs QuadToTri
+        # on each Region alone (the Source's cells are never edited), as two
+        # sweeps of one Source mesh show (both Regions = the lone result).
+        surface==source && all(owners) do owner
+            entry=_extrude_entity_params(m,3,owner,caller)
+            entry!==nothing && _extrude_is_nonew(entry[1]) &&
+                entry[3][1]==2 && abs(entry[3][2])==source
+        end || return false
     end
     _extrude_nonew_unmerged_b4_incidence(m,t,caller) && return false
     return true

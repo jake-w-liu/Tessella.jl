@@ -4767,6 +4767,12 @@ function _model_periodic_point_node(m::GeoModel,mesh,point::Int,
         m,mesh,point,atol,caller))
 end
 
+# The structural audit of a mesh handed to `model_to_mixed`. Flat tetrahedra
+# are admitted: Gmsh emits them where a sweep stays in its source's plane
+# (an Extrude rotating a surface about its own normal).
+_model_input_diagnostic(mesh::Mesh)=validate(mesh;allow_flat_tets=true)
+_model_input_diagnostic(mesh::MixedMesh)=validate(mesh)
+
 """
     model_to_mixed(model, mesh, surface_tag) -> MixedMesh
 
@@ -4796,7 +4802,7 @@ function model_to_mixed(m::GeoModel,mesh::Union{Mesh,MixedMesh},
     surface=_tag(surface_tag,caller,2)
     haskey(m.surfaces,surface) || throw(ArgumentError(
         "$caller: unknown Surface[$surface]"))
-    diagnostic=validate(mesh)
+    diagnostic=_model_input_diagnostic(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
     actual=_model_mesh_actual_projection(m,mesh,2,surface,caller)
@@ -7378,12 +7384,13 @@ function _volume_projection_contract(mesh::MixedMesh,caller::AbstractString)
         all(iszero,block.tags) || throw(ArgumentError(
             "$caller: input volume cell tags must be zero; physical " *
             "ownership comes from the model"))
+        # Flat cells pass (`_model_input_diagnostic`); inverted ones do not.
         @inbounds for cell in axes(block.nodes,2)
             _volume_cell_signed_volume(
-                mesh.coords,block.nodes,cell,Int(block.msh))>0 ||
+                mesh.coords,block.nodes,cell,Int(block.msh))>=0 ||
                 throw(ArgumentError(
                     "$caller: MSH $(block.msh) cell $cell has invalid " *
-                    "cell topology or winding (inverted or degenerate)"))
+                    "cell topology or winding (inverted)"))
         end
         cell_count+=size(block.nodes,2)
     end
@@ -7397,7 +7404,7 @@ function _model_volume_to_mixed(m::GeoModel,mesh,volume::Int;
     caller="model_to_mixed"
     haskey(m.volumes,volume) || throw(ArgumentError(
         "$caller: unknown Volume[$volume]"))
-    diagnostic=validate(mesh)
+    diagnostic=_model_input_diagnostic(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: input mesh is invalid — "*join(diagnostic.messages,"; ")))
     actual=_model_mesh_actual_projection(m,mesh,3,volume,caller)
@@ -10141,9 +10148,14 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     1<=max_periodic_passes<=64 || throw(ArgumentError(
         "$caller: max_periodic_passes must be in 1:64"))
     npasses=Int(max_periodic_passes)
-    planned=_extrude_nonew_surface_mesh(m,t,caller;scope=_extrude_scope,
-        min_angle_deg=min_angle_deg,max_periodic_passes=npasses,
-        size_field=size_field,_mesh_input=_mesh_input)
+    # `meshGFace::operator()` tries `MeshTransfiniteSurface` before
+    # `MeshExtrudedSurface`: a `Transfinite Surface` on a swept cap or lateral
+    # keeps its transfinite mesh, which the QuadTri region then has to follow.
+    planned=haskey(m.meshing.transfinite_surfaces,t) &&
+        haskey(m.meshing.extrude_sources,(2,t)) ? nothing :
+        _extrude_nonew_surface_mesh(m,t,caller;scope=_extrude_scope,
+            min_angle_deg=min_angle_deg,max_periodic_passes=npasses,
+            size_field=size_field,_mesh_input=_mesh_input)
     planned===nothing || return _recombine3d_fold_surface_part(m,t,planned)
     # A periodic curve relation whose far endpoint lives on a surface paired
     # with this one by a dim-2 relation needs no local synchronization — the

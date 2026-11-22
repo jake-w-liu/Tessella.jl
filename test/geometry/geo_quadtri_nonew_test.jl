@@ -331,15 +331,10 @@ end
             @test validate(execution.mesh).ok
             volume=geo_entity_mesh(execution,3,1;geometry=true)
             observed=(nnodes(execution.mesh),_QTNN.counts(volume))
-            if name===:hinged
-                @test observed in gmsh_realizations[name]
-            else
-                # The Region planner meshes Gmsh's own source to Gmsh's cells
-                # (quadtotri_general_test.jl); this source differs: the NoNew
-                # scope meshes it with mesh_model_surface, 32 nodes and 21
-                # quadrangles where the surface pass and Gmsh give 31 and 20.
-                @test_broken observed in gmsh_realizations[name]
-            end
+            # The NoNew scope meshes the Source with the surface pass's own
+            # producer (Gmsh's 7 triangles and 20 quadrangles), and the Region
+            # planner meshes it to Gmsh's cells (quadtotri_general_test.jl).
+            @test observed in gmsh_realizations[name]
         end
         geometry=_QTNN.execute(triangles;dim=0)
         @test nnodes(mesh_model_volume(geometry.model,1))==36

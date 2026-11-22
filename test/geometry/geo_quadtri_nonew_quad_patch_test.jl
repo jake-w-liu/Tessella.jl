@@ -216,7 +216,8 @@ end
                 @test _QPC.Quad.surface_faces([(2,0,surface_product)],volume)==Set(keys(cert.boundary))
                 actual=api.mesh.generate(3)
                 @test _QPC.Quad.typed_signature(actual)==_QPC.Quad.typed_signature(volume)
-                @test isempty(api.mesh.get_elements(2)[1]) # Existing API3 actual-cell cache contract.
+                # Gmsh keeps the bounding Surfaces' cells after generate(3).
+                @test !isempty(api.mesh.get_elements(2)[1])
                 @test _QPC.certify(actual,fixture,source).total==cert.total
                 payload=api.mesh.get_nodes(3,Int(opened.lists["sweep"][2]),true)
                 @test length(payload[1])==nnodes(actual)
@@ -304,31 +305,59 @@ end
         @test_throws r"nonpositive whole P1 reference map" _QPC.certify(damaged,f,src)
     end
 
-    @testset "Unsupported inputs reject before publishing operation state" begin
+    @testset "Inputs beyond the 2-by-2 catalog mesh as Gmsh does" begin
+        # Gmsh 4.15.2, 20 fresh processes each, all alike: nodes and the
+        # surface and volume cells by type. Gmsh meshes the 6/7-node sides
+        # (unstructured Source), the unrecombined Source, the oblique
+        # translation and the rotation; it stops on a partial final layer
+        # ("Could not find extruded node"), on a transfinite cap whose
+        # diagonals the region cannot follow ("Extruded hexahedron needs
+        # subdivision ...") and on layers collapsed by rounding ("bad number
+        # of degenerate corners"); Tessella stops on the same three.
+        gmsh=Dict(
+            (:sides,false)=>(124,Dict(2=>132,3=>20,4=>236,5=>2,6=>7,7=>77)),
+            (:sides,true)=>(124,Dict(2=>54,3=>59,4=>75,5=>40,6=>14,7=>33)),
+            (:unrecombined,false)=>(36,Dict(2=>64,4=>72)),
+            (:unrecombined,true)=>(36,Dict(2=>16,3=>24,6=>24)),
+            (:oblique,false)=>(36,Dict(2=>56,3=>4,4=>64,7=>4)),
+            (:oblique,true)=>(36,Dict(2=>8,3=>28,5=>8,7=>12)),
+            (:rotation,false)=>(38,Dict(2=>56,3=>4,4=>64,7=>4)),
+            (:rotation,true)=>(38,Dict(2=>8,3=>28,4=>16,7=>28)))
         for laterals in (false,true)
             fixture=_QPC.fixture("guard";laterals,layers=:three)
-            invalid=(replace(fixture.source,"Transfinite Curve{1,2,3,4}=3"=>
+            meshed=(
+                :sides=>replace(fixture.source,"Transfinite Curve{1,2,3,4}=3"=>
                     "Transfinite Curve{1,3}=2; Transfinite Curve{2}=6; Transfinite Curve{4}=7"),
-                replace(fixture.source,"Recombine Surface{1};"=>""),
-                replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.25,0.0,1.0}"),
-                replace(fixture.source,"Layers{3}"=>"Layers{{1},{0.5}}"),
-                replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,1,0},{-1,0,0},Pi/6}"),
-                fixture.source*"Transfinite Surface{sweep[0]};\n")
-            for text in invalid
-                _qpc_atomic(text,r"QuadTriNoNewVerts")
+                :unrecombined=>replace(fixture.source,"Recombine Surface{1};"=>""),
+                :oblique=>replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.25,0.0,1.0}"),
+                :rotation=>replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,1,0},{-1,0,0},Pi/6}"))
+            for (name,text) in meshed
+                mesh=_QPC.execute(text).mesh
+                @test Tessella.validate(mesh).ok
+                counts=Dict{Int,Int}()
+                for block in _QPC.blocks(mesh)
+                    msh_dimension(block.msh) in (2,3) || continue
+                    counts[Int(block.msh)]=get(counts,Int(block.msh),0)+size(block.nodes,2)
+                end
+                @test (nnodes(mesh),counts)==gmsh[(name,laterals)]
             end
+            _qpc_atomic(replace(fixture.source,"Layers{3}"=>"Layers{{1},{0.5}}"),
+                r"normalized final layer height")
+            _qpc_atomic(fixture.source*"Transfinite Surface{sweep[0]};\n",
+                r"do not exactly cover the typed volume boundary")
+            collapsed=_QPC.fixture("collapsed";laterals,layers=:four,offset=(0.,0.,2.0^50))
+            _qpc_atomic(replace(collapsed.source,"Layers{4}"=>"Layers{8}"),r"QuadTriNoNewVerts")
+            # A later Transfinite Curve change does not remesh, as in Gmsh.
             _qpc_api(fixture.source,(api,geometry)->begin
-                api.mesh.generate(3);api.mesh.set_order(2)
+                api.mesh.generate(3)
                 for (position,curve) in pairs(fixture.curve_tags)
                     api.mesh.set_transfinite_curve(curve,
                         position in (1,3) ? 2 : (position==4 ? 7 : 6))
                 end
-                before=_qpc_api_snapshot(api)
-                @test_throws r"QuadTriNoNewVerts" api.mesh.generate(3)
-                _qpc_api_unchanged(api,before)
+                nodes=api.mesh.get_nodes()
+                api.mesh.generate(3)
+                @test api.mesh.get_nodes()==nodes
             end)
-            collapsed=_QPC.fixture("collapsed";laterals,layers=:four,offset=(0.,0.,2.0^50))
-            _qpc_atomic(replace(collapsed.source,"Layers{4}"=>"Layers{8}"),r"QuadTriNoNewVerts")
         end
     end
 end

@@ -2236,6 +2236,23 @@ function _model_point_mesh_parts(m::GeoModel,caller::AbstractString;
     return parts
 end
 
+# The generatrix parameter behind the parameter `u` of a reversed top copy.
+# The copy stores `t1 - s + u_min` for each generatrix node `s`; inverting that
+# in floating point can land an ulp off `s`, and `copyMesh` places the node at
+# the generatrix vertex itself (Gmsh: x = 0.4999999999986921 exactly where the
+# inverted parameter gave 0.49999999999869216). So a stored node maps back to
+# its own `s`; any other `u` (an inverse probe) takes the formula.
+function _extrude_reversed_source_parameter(params,t1::Float64,u_min::Float64,u::Float64)
+    guess=t1+u_min-u
+    params isa AbstractVector{Float64} || return guess
+    i=searchsortedfirst(params,guess)
+    for j in max(firstindex(params),i-2):min(lastindex(params),i+2)
+        s=params[j]
+        t1-s+u_min==u && return s
+    end
+    return guess
+end
+
 # Evaluate a stored curve parameter for element emission. Every kind goes
 # through `_periodic_curve_point` — the same affine evaluator the surface
 # PSLG uses — so curve-part nodes deduplicate bitwise against the boundary
@@ -2279,7 +2296,8 @@ function _model_curve_part_point(m::GeoModel,curve::Integer,u::Float64,
                 if src[2]<0
                     _,t1=_model_curve_param_bounds(m,curve,caller)
                     u_min=_model_curve_param_bounds(m,gen,caller)[1]
-                    usrc=t1+u_min-u
+                    usrc=_extrude_reversed_source_parameter(
+                        get(_parameter_source,gen,nothing),t1,u_min,u)
                 end
                 # Inverse-parametrization probes iterate past the copy's own
                 # bounds; a boundary-layer copy has no extrapolatable source

@@ -2546,7 +2546,8 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     # vertex-link certificate is taken Region by Region, and the union is held
     # to the incidence it must keep: no face of more than two tetrahedra.
     volume_parts=count(part->ntets(part[2])>0,parts)
-    diag=validate(merged;require_positive_tets=require_positive_tets,
+    # Flat tetrahedra stay: Gmsh emits them for a sweep in its source's plane.
+    diag=validate(merged;require_positive_tets=require_positive_tets,allow_flat_tets=true,
                   tri_owners=tri_owners,require_tet_topology=volume_parts<=1)
     diag.ok || throw(ErrorException(
         "$caller: merged mesh is invalid — "*join(diag.messages,"; ")))

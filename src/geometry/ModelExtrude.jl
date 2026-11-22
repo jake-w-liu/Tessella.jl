@@ -2514,9 +2514,11 @@ function _extrude_make_positive!(coords::Matrix{Float64},
     (a1,b1),(a2,b2)=_EXTRUDE_REVERSE_SWAPS[msh]
     @inbounds for cell in axes(nodes,2)
         volume=_extrude_cell_signed_volume(coords,nodes,cell,msh)
-        isfinite(volume) && volume!=0 || throw(ArgumentError(
-            "extruded mesh: degenerate or nonfinite volume in element type $msh"))
-        volume>0 && continue
+        isfinite(volume) || throw(ArgumentError(
+            "extruded mesh: nonfinite volume in element type $msh"))
+        # A sweep that stays in its source's plane (a rotation about the
+        # plane's normal) gives flat cells; Gmsh emits them as built.
+        volume>=0 && continue
         nodes[a1,cell],nodes[b1,cell]=nodes[b1,cell],nodes[a1,cell]
         a2==0 && continue
         nodes[a2,cell],nodes[b2,cell]=nodes[b2,cell],nodes[a2,cell]

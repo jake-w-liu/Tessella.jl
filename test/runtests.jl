@@ -391,6 +391,7 @@ end
         "geometry/geo_occ_boolean_native_operand_test.jl",
         "geometry/tetgen_br_region_test.jl",
         "geometry/geo_rotation_degenerate_side_test.jl",
+        "structured/quadtri_nonew_gmsh_inputs_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

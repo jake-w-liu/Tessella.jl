@@ -652,17 +652,27 @@ end
         end
     end
 
-    @testset "malformed products and unsupported constraints reject atomically" begin
+    @testset "inputs beyond the two-triangle catalog mesh as Gmsh does" begin
         fixture=_QTT.fixture("guard";laterals=true)
-        # Unsupported higher grids, cap overrides and non-normal translation
-        # must be diagnosed before grading or publishing any output.
-        invalid=(
-            (replace(fixture.source,"Transfinite Curve{1,2,3,4}=2"=>"Transfinite Curve{1,2,3,4}=3"),r"multiple source cells require the boundary-category planner"),
-            (replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.25,0,1}"),r"two-triangle source requires exactly one nonzero translation component"),
-            (replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,0,1},{-1,0,0},Pi/6}"),r"QuadTriNoNewVerts.*translation"),
-            (fixture.source*"Transfinite Surface{sweep[0]};\n",r"transfinite cap/lateral overrides"))
-        for (source,diagnostic) in invalid
-            _qtt_model_failure(source,diagnostic)
+        # Gmsh 4.15.2, 20 fresh processes each, all alike (nodes; surface and
+        # volume cells by type): the finer grid, the oblique translation, the
+        # rotation about z (flat prisms in the Source's plane; the circle
+        # centre is an extra Point node) and the transfinite cap all mesh.
+        meshed=(
+            (replace(fixture.source,"Transfinite Curve{1,2,3,4}=2"=>"Transfinite Curve{1,2,3,4}=3"),(36,Dict(2=>16,3=>24,6=>24))),
+            (replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.25,0,1}"),(16,Dict(2=>4,3=>12,6=>6))),
+            (replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,0,1},{-1,0,0},Pi/6}"),(17,Dict(2=>4,3=>12,6=>6))),
+            (fixture.source*"Transfinite Surface{sweep[0]};\n",(16,Dict(2=>4,3=>12,6=>6))),
+            (fixture.source*"next[]=Extrude{0,0,1}{Surface{sweep[0]};Layers{1};Recombine;QuadTriNoNewVerts;};\n",
+                (20,Dict(2=>14,3=>12,4=>6,6=>6))))
+        for (source,gmsh) in meshed
+            mesh=_QTT.execute(source).mesh
+            counts=Dict{Int,Int}()
+            for block in _QTT.blocks(mesh)
+                msh_dimension(block.msh) in (2,3) || continue
+                counts[Int(block.msh)]=get(counts,Int(block.msh),0)+size(block.nodes,2)
+            end
+            @test (nnodes(mesh),counts)==gmsh
         end
         # The literal CAD construction remains valid. A finite caller edit
         # makes this source concave before the planner is invoked.
@@ -673,39 +683,19 @@ end
         # Edit the existing shell to preserve its distinct CAD identities.
         rounded=_QTT.fixture("rounded_guard";laterals=true,offset=(0.,0.,1.))
         _qtt_model_failure(rounded.source,r"actual normal planes collapse or reverse after rounding";
-            geo_diagnostic=r"Line\[16\] has coincident endpoints",mutate=model->begin
+            mutate=model->begin
             for (tag,p) in collect(model.points)
                 p[3]>1. && (model.points[tag]=(p[1],p[2],1.0 + 2.0^-54))
             end
             for (key,spec) in collect(model.meshing.extrude_specs)
                 spec.type===:translate && (model.meshing.extrude_specs[key]=(type=:translate,T=(0.,0.,2.0^-54)))
             end
-            # The GEO frontend generates the actual lower Curve products
-            # first. This edited vertical Curve has two distinct CAD tags
-            # with identical Float64 endpoints and is rejected at that stage.
+            # This edited vertical Curve has two distinct CAD tags with
+            # identical Float64 endpoints; both entrypoints stop at the sweep.
             endpoints=model.curves[16]
             @test endpoints[1]!=endpoints[2]
             @test model.points[endpoints[1]]==model.points[endpoints[2]]
         end)
-        # A real stacked extrusion has a copied source and a shared cap.
-        # These are different unsupported contracts, and each entrypoint
-        # reports the first applicable one before it publishes grading.
-        chained=fixture.source*"""
-        next[]=Extrude{0,0,1}{Surface{sweep[0]};Layers{1};Recombine;QuadTriNoNewVerts;};
-        """
-        geometry=_QTT.execute(chained;dim=0)
-        second_volume=Int(geometry.lists["next"][2])
-        before=repr(geometry.model);params=deepcopy(geometry.model.curve_params)
-        @test_throws r"copied or chained sources require the dependency planner" mesh_model_volume(geometry.model,second_volume)
-        @test repr(geometry.model)==before && geometry.model.curve_params==params
-        context=Tessella.IO._GeoNumericContext()
-        sentinel=Mesh(zeros(3,1));push!(context.mesh_parts,(0,777,sentinel))
-        parts=context.mesh_parts;options=deepcopy(context.option_numbers)
-        @test_throws r"shared surfaces require the neighboring-region planner" Tessella.GeoExec._geo_mesh_model(geometry.model,3,context)
-        @test repr(geometry.model)==before && geometry.model.curve_params==params
-        @test context.mesh_parts===parts && only(parts)[3]===sentinel
-        @test context.option_numbers==options
-
         # The catalog consumes the actual source topology. A malformed or
         # mixed source cannot be silently padded into the bounded product.
         geometry=_QTT.execute(fixture.source;dim=0)
@@ -725,9 +715,10 @@ end
         _qtt_api(fixture.source,(api,_)->begin
             api.mesh.generate(3)
             for curve in 1:4;api.mesh.set_transfinite_curve(curve,3);end
-            before=_qtt_snapshot(api)
-            @test_throws r"multiple source cells require the boundary-category planner" api.mesh.generate(3)
-            _qtt_unchanged(api,before)
+            # Gmsh 4.15.2 keeps the meshed curves: generate(3) changes nothing.
+            nodes=api.mesh.get_nodes()
+            api.mesh.generate(3)
+            @test api.mesh.get_nodes()==nodes
         end)
     end
 end

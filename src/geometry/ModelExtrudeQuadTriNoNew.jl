@@ -730,7 +730,10 @@ end
 # to the general QuadToTri planner (ModelExtrudeNoNewGeneral.jl).
 const _EXTRUDE_NONEW_GENERAL_REFUSALS=("boundary-category planner",
     "requires an isolated","degenerate-cell planner","requires one cell",
-    "does not match its boundary category","one finite nonzero translation component")
+    "does not match its boundary category","one finite nonzero translation component",
+    # The 2-by-2 and two-triangle catalogs sweep axis-normal translations
+    # only; Gmsh's QuadToTri takes any rigid sweep.
+    "requires axis-normal translation","exactly one nonzero translation component")
 
 function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,

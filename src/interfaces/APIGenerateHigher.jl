@@ -859,7 +859,7 @@ end
 function _higher_ordinary_sweep_classification(assembly,m,production,input,dimension,tag,caller;
                                                primary_existing=false,planned_laterals=nothing)
     mesh=production.mesh
-    diagnostic=validate(mesh)
+    diagnostic=Model._model_input_diagnostic(mesh)
     diagnostic.ok || throw(ArgumentError(
         "$caller: ordinary Layers producer is invalid — "*join(diagnostic.messages,"; ")))
     params=Model._extrude_gate(m,dimension,tag)

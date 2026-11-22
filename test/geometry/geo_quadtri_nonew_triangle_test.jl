@@ -192,10 +192,11 @@ end
             @test api.mesh.get_nodes()==nodes
         end)
         # Gmsh 4.15.2 meshes all five sources (6 runs each, all alike: nodes,
-        # triangles, tetrahedra). Tessella meshes the multi-cell source and the
-        # chained sweep as Gmsh does; it still refuses the in-plane rotation
-        # (Gmsh emits six flat tetrahedra), the transfinite cap override and
-        # the source shared by two Regions, recorded as broken.
+        # triangles, tetrahedra; 20 more runs of the last three alike), and so
+        # does Tessella: the in-plane rotation keeps Gmsh's six flat
+        # tetrahedra, the transfinite cap is meshed transfinite before the
+        # sweep (meshGFace's order) and a Source shared by two Regions is
+        # swept on each side.
         sources=(
             (replace(fixture.source,"Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),(24,Dict(2=>44,4=>36))),
             (replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,0,1},{0,0,0},Pi/6}"),(9,Dict(2=>14,4=>6))),
@@ -208,8 +209,9 @@ end
         for (index,(source,gmsh)) in enumerate(sources)
             observed=try
                 execution=_QTNTQ.execute(source)
-                @test validate(execution.mesh).ok
                 mesh=execution.mesh
+                @test (mesh isa Tessella.MeshTypes.Mesh ?
+                    validate(mesh;allow_flat_tets=true) : validate(mesh)).ok
                 counts=if mesh isa Tessella.MeshTypes.Mesh
                     Dict(2=>size(mesh.tris,2),4=>size(mesh.tets,2))
                 else
@@ -225,11 +227,7 @@ end
                 err isa ArgumentError || rethrow()
                 nothing
             end
-            if index in (1,5)
-                @test observed==gmsh
-            else
-                @test_broken observed==gmsh
-            end
+            @test observed==gmsh
         end
         mixed=MixedMesh(Float64[0 1 0 1;0 0 1 1;0 0 0 0],
             [ElementBlock(2,reshape(Int32[1,2,3],3,1)),ElementBlock(3,reshape(Int32[1,2,4,3],4,1))])

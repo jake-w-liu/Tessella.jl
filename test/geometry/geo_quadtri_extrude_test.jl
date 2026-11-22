@@ -137,8 +137,11 @@ end
     @testset "invalid sweeps fail explicitly" begin
         source=_qt_extrude_square(1)*"Extrude{0,0,1}{Surface{1};Layers{2};}\n"
         @test_throws r"Cannot extrude quadrangles without Recombine" _qt_extrude_execute(source)
+        # A rotation about the source's own normal stays in its plane: Gmsh
+        # 4.15.2 emits the flat cells (10 nodes, 10 tetrahedra).
         source=_qt_extrude_square(1;quad=false)*"Extrude{{0,0,1},{0,0,0},Pi/4}{Surface{1};Layers{2};}\n"
-        @test_throws r"degenerate or nonfinite volume" _qt_extrude_execute(source)
+        flat=_qt_extrude_execute(source).mesh
+        @test (nnodes(flat),ntets(flat))==(10,10)
     end
     @testset "shared laterals respect neighboring volume cells" begin
         for neighbor in (:quadtri,:recombined,:tetrahedral)

@@ -78,10 +78,6 @@ function _extrude_nonew_scope_contract(m::GeoModel,t::Int,
     curves=Set{Int}()
     points=Set{Int}()
     for surface in surfaces
-        surface==source || !haskey(m.meshing.transfinite_surfaces,surface) ||
-            throw(ArgumentError(
-                "$caller: QuadTriNoNewVerts transfinite cap/lateral overrides " *
-                "require the constrained-boundary planner"))
         # A mesh-level `Reverse Surface` flag only flips the published cell
         # windings — the scope mirrors a reversed Source through its Source
         # mesh (the surface pass already flipped it) and flips each emitted
@@ -406,6 +402,11 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         if actual_cap!==nothing && any(block->!isempty(block.nodes),actual_cap.blocks)
             surfaces[plan.top_tag]=actual_cap
         end
+    elseif haskey(working.meshing.transfinite_surfaces,plan.top_tag)
+        # Without lower products, a transfinite cap is still meshed first
+        # (`meshGFace`'s order), and the Region must follow it.
+        surfaces[plan.top_tag]=mesh_model_surface(working,plan.top_tag;
+            min_angle_deg,max_periodic_passes,size_field)
     end
     two_tri=plan.catalog isa _ExtrudeNoNewTwoTriCatalog
     multi_cell=plan.catalog isa _ExtrudeNoNewMultiCellCatalog
@@ -654,6 +655,19 @@ function _extrude_nonew_shared_validate(m::GeoModel,t::Int,s::Int,
     entry!==nothing || _extrude_nonew_shared_planner_error(caller,s)
     params,spec,link=entry
     link[1]==2 || _extrude_nonew_shared_planner_error(caller,s)
+    if s_link===nothing
+        # One Source swept by several NoNewVerts Regions (Extrude{0,0,1} and
+        # Extrude{0,0,-1} of the same Surface): Gmsh meshes the Source once
+        # and each Region sweeps it on its own side; QuadToTri never edits a
+        # Source's cells, so the Regions plan independently.
+        for owner in adjacent
+            o_entry=_extrude_entity_params(m,3,owner,caller)
+            o_entry===nothing && _extrude_nonew_shared_planner_error(caller,s)
+            _extrude_is_nonew(o_entry[1]) && o_entry[3][1]==2 &&
+                abs(o_entry[3][2])==s || _extrude_nonew_shared_planner_error(caller,s)
+        end
+        return adjacent
+    end
     if s_link!==nothing && s_link[1]==2
         # Shared copied cap: exactly the top owner (whose Source the cap
         # records) and the Source owner (whose literal Source it is).
@@ -1321,7 +1335,10 @@ function _extrude_nonew_scope_selected(m::GeoModel,caller::AbstractString,
         parts=nothing
         if edges!==nothing
             for (s,owners) in edges
-                s_link=working.meshing.extrude_sources[(2,s)]
+                s_link=get(working.meshing.extrude_sources,(2,s),nothing)
+                # A shared Source carries no contract either: each Region
+                # sweeps the one Source mesh on its own side.
+                s_link===nothing && continue
                 # Copied caps carry no lateral contract — the Source
                 # owner's plan consumes the top owner's emitted cap
                 # bitwise. Walls shared with a recombined ordinary partner
