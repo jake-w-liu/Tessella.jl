@@ -1,14 +1,23 @@
+include("api_nonew_gmsh_carriers.jl")
 using Tessella.Elements:msh_dimension,msh_spec,msh_type
 
 # Match one independently certified volume to its classified boundary. This
 # correspondence preserves public node identity; it is never used to weld
 # coordinates across independent, coincident entities.
-function free_actual_carriers(carriers;source=nothing,volume=nothing,projected=nothing,public_tags=nothing)
+function free_actual_carriers(carriers;source=nothing,volume=nothing,projected=nothing,public_tags=nothing,
+        primary_only=false)
     model=API.CURRENT[]
     source===nothing && (source=Tessella.Model.mesh_model_surface(model,carriers.source))
     volume===nothing && (volume=Tessella.Model.mesh_model_volume(model,carriers.volume))
     projected===nothing && (projected=Tessella.Model.model_to_mixed(model,volume,3,carriers.volume))
     tags,xyz,_=API.mesh.get_nodes(3,carriers.volume,true)
+    if primary_only
+        # After set_order(2) the primary nodes carry new labels, as in Gmsh
+        # 4.15.2 (setOrder renumbers); keep the nodes at primary positions.
+        corners=Set(Tuple(projected.coords[:,i]) for i in axes(projected.coords,2))
+        keep=[i for i in eachindex(tags) if Tuple(xyz[3i-2:3i]) in corners]
+        tags=tags[keep];xyz=reduce(vcat,(xyz[3i-2:3i] for i in keep))
+    end
     remap=if public_tags===nothing
         positions=Dict(Tuple(p)=>tag for (tag,p) in zip(tags,eachcol(reshape(xyz,3,:))))
         @test length(positions)==length(tags)
@@ -129,6 +138,11 @@ function free_check_typed_faces(volume,expected)
 end
 
 function free_check_actual_p2(carriers,f,expected;certify_geometry=true)
+    # Ownership is read on the current order-two labels, by Gmsh's rule: the
+    # lowest-dimensional element having the edge or face owns its node.
+    expected=free_actual_carriers(carriers;source=expected.source,projected=expected.projected,primary_only=true)
+    edges,quads=gmsh_carriers(API,carriers.volume)
+    expected=merge(expected,(;edges,quads))
     supports=free_public_support_nodes(carriers.volume)
     alltags=Set(API.mesh.get_nodes(3,carriers.volume,true)[1])
     @test Set(keys(supports))==setdiff(alltags,expected.primary)

@@ -112,14 +112,9 @@ function check_lower_regeneration(entity,old,current,order,old_primary,new_prima
     @test Set(Tuple(p) for p in eachcol(uv))==Set(Tuple(p) for p in eachcol(olduv))
     signature(a,b,ids,selected)=Set((Tuple(reinterpret(UInt64,a[:,i])),Tuple(b[:,i]))
         for i in eachindex(ids) if ids[i] in selected)
-    @test signature(points,uv,tags,new_primary)==signature(oldpoints,olduv,oldtags,old_primary)
-    if order==2
-        # The generation prepass retains primary sampling, then recreates
-        # requested quadratic Curve supports by evaluating native CAD.
-        @test xyz==API.model.get_value(entity[1],entity[2],params)
-    else
-        @test signature(points,uv,tags,Set(tags))==signature(oldpoints,olduv,oldtags,Set(oldtags))
-    end
+    # Gmsh 4.15.2 keeps every Point and Curve node where it was, at order one
+    # and at order two, and so does Tessella; labels may be renumbered.
+    @test signature(points,uv,tags,Set(tags))==signature(oldpoints,olduv,oldtags,Set(oldtags))
 end
 
 # Supported public attached records are an independent API elevation route.
@@ -192,8 +187,9 @@ function native_record_cases()
     API.initialize()
     try
         text="Point(1)={.4,.3,.5,1};\nPoint(2)={.5,.4,.5,1};\nPoint(3)={.6,.3,.5,1};\nPoint(4)={.5,.2,.5,1};\nSpline(10)={1,2,3,4,1};\n"
-        mktemp() do path,io
-            write(io,text);close(io);API.open_geo!(path;mesh_dim=0)
+        mktempdir() do directory
+            path=joinpath(directory,"closed_spline.geo");write(path,text)
+            API.open_geo!(path;mesh_dim=0)
         end
         API.mesh.add_nodes(0,1,[50001],[.4,.3,.5])
         @test API.model.get_boundary([(1,10)],false,false,false)==[(0,1),(0,1)]

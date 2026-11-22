@@ -40,35 +40,12 @@ function unchanged(before)
     @test (API.NODE_TAG_MAX[],API.ELEMENT_TAG_MAX[])==before.history
 end
 
+include("api_nonew_gmsh_carriers.jl")
+
 function actual_carriers(carriers)
     model=API.CURRENT[]
     source=Tessella.Model.mesh_model_surface(model,carriers.source)
-    volume=Tessella.Model.mesh_model_volume(model,carriers.volume)
-    projected=Tessella.Model.model_to_mixed(model,volume,3,carriers.volume)
-    tags,xyz,_=API.mesh.get_nodes(3,carriers.volume,true)
-    points=reshape(xyz,3,:)
-    positions=Dict(Tuple(p)=>tag for (tag,p) in zip(tags,eachcol(points)))
-    @test length(positions)==length(tags)
-    remap=[positions[Tuple(projected.coords[:,i])] for i in axes(projected.coords,2)]
-    edges=Dict{Tuple,Tuple{Int,Int}}();quads=Dict{Tuple,Tuple{Int,Int}}()
-    for (index,block) in enumerate(projected.blocks)
-        dim=msh_dimension(block.msh);dim in (1,2) || continue
-        owners=projected.elementary_entities[index]
-        for (column,cell) in enumerate(eachcol(block.nodes))
-            carrier=(dim,Int(owners[column]))
-            if block.msh==1
-                edges[Cert.key(remap[v] for v in cell)]=carrier
-            else
-                for i in eachindex(cell)
-                    support=Cert.key((remap[cell[i]],remap[cell[mod1(i+1,length(cell))]]))
-                    haskey(edges,support) && edges[support][1]<dim && continue
-                    @test !haskey(edges,support) || edges[support]==carrier
-                    edges[support]=carrier
-                end
-                block.msh==3 && (quads[Cert.key(remap[v] for v in cell)]=carrier)
-            end
-        end
-    end
+    edges,quads=gmsh_carriers(API,carriers.volume)
     return (;edges,quads,volume=carriers.volume,source)
 end
 
@@ -148,6 +125,10 @@ end
 
 
 function check_quadratic(carriers,f,expected)
+    # Ownership is read from the current order-two mesh: set_order renumbers
+    # the primary nodes, as Gmsh does.
+    edges,quads=gmsh_carriers(API,carriers.volume)
+    expected=merge(expected,(;edges,quads))
     a,b=f.grid;n=f.intervals;boundary=2(a+b);inside=(2a-1)*(2b-1)
     primary=(a+1)*(b+1)*(n+1)
     total=(2a+1)*(2b+1)*(2n+1)

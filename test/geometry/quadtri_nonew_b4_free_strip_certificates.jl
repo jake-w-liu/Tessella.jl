@@ -33,9 +33,11 @@ const quadratic_map_certificate=Rec.quadratic_map_certificate
 const source_complex=Rec.source_complex
 require(ok,message)=ok || throw(ArgumentError("B4 free-strip certificate: "*message))
 
-function fixture(name;laterals=false,kwargs...)
+# Coherent by default: Gmsh 4.15.2 stops a non-coherent free-lateral sweep
+# ("FindDiagonalEdgeIndices() encountered unexpected surface configuration").
+function fixture(name;laterals=false,coherent=true,kwargs...)
     require(!laterals,"requires free lateral faces")
-    return Rec.fixture(name;laterals,kwargs...)
+    return Rec.fixture(name;laterals,coherent,kwargs...)
 end
 
 

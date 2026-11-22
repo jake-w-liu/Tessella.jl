@@ -261,10 +261,10 @@ end
                 API.mesh.generate(3)
                 initial_order==2 && API.mesh.set_order(2)
                 API.mesh.refine()
-                # Exact Mixed refinement returns P1; the supported legacy
-                # simplex refinement retains its documented P2 query overlay.
+                # Gmsh 4.15.2's refine() returns order one whatever the
+                # order before it (SetOrder1, SetOrderN 2, subdivision).
                 @test API.mesh.get_element_types(3,carriers.volume)==
-                    [laterals ? 6 : initial_order==2 ? 11 : 4]
+                    [laterals ? 6 : 4]
                 API.mesh.set_order(2)
                 msh=laterals ? 13 : 11
                 @test sum(length,API.mesh.get_elements(3,carriers.volume)[2])==(laterals ? 16 : 48)
@@ -296,33 +296,43 @@ end
         Transfinite Curve{1,2,3}=2;Transfinite Surface{1};
         out[]=Extrude{0,0,1}{Surface{1};Layers{1};Recombine;QuadTriNoNewVerts;};
         """
+        # Gmsh 4.15.2: refine() returns an order-one mesh (SetOrder1, then
+        # SetOrderN 2 and subdivision): 3 tetrahedra become 24 linear ones;
+        # each lateral owns 1 node and sees 9; Curve 1 gets one node at
+        # x = 0.49999999999867184.
         with_model(source,carriers->begin
             API.mesh.generate(3);API.mesh.set_order(2);API.mesh.refine()
             @test API.LAST_MESH_CLASS[]!==nothing
-            @test API.mesh.get_element_types(3,carriers.volume)==[11]
+            @test API.mesh.get_element_types(3,carriers.volume)==[4]
             @test sum(length,API.mesh.get_elements(3,carriers.volume)[2])==24
             for surface in carriers.laterals
-                check_parameters(2,surface,false,9)
-                check_parameters(2,surface,true,25)
+                check_parameters(2,surface,false,1)
+                check_parameters(2,surface,true,9)
             end
             curve_nodes,xyz,uv=API.mesh.get_nodes(1,1,false,true)
-            @test length(curve_nodes)==3 && length(uv)==3
-            @test Set(Tuple(p) for p in eachcol(reshape(xyz,3,:)))==
-                Set(((.25,0.,0.),(.5,0.,0.),(.75,0.,0.)))
+            @test length(curve_nodes)==1 && length(uv)==1
+            if Sys.ARCH===:x86_64
+                @test xyz==[0.49999999999867184,0.,0.]
+            else
+                @test xyz≈[0.49999999999867184,0.,0.] atol=1e-12
+            end
             @test maximum(abs.(API.model.get_value(1,1,uv).-xyz))<=2e-11
         end)
     end
 
-    @testset "Unsupported source grids reject without publishing partial state" begin
+    @testset "A later transfinite change does not remesh the existing grid" begin
+        # Gmsh 4.15.2: generate(3), setOrder(2), Transfinite Curve =3, then
+        # generate(3) keeps the meshed curves and returns the order-one
+        # mesh: 16 nodes and 18 tetrahedra (6 prisms with RecombLaterals).
         for laterals in (false,true)
             with_model(fixture("Layers{3}",laterals,1),carriers->begin
                 API.mesh.generate(3);API.mesh.set_order(2)
                 for curve in 1:4;API.mesh.set_transfinite_curve(curve,3);end
-                before=snapshot()
-                err=try API.mesh.generate(3);nothing catch caught;caught end
-                @test err isa ArgumentError
-                @test occursin("QuadTriNoNewVerts",sprint(showerror,err))
-                unchanged(before)
+                API.mesh.generate(3)
+                types,tags,_=API.mesh.get_elements(3)
+                @test length(API.mesh.get_nodes()[1])==16
+                @test Dict(Int(t)=>length(e) for (t,e) in zip(types,tags))==
+                    (laterals ? Dict(6=>6) : Dict(4=>18))
             end)
         end
     end
