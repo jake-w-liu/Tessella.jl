@@ -1,6 +1,7 @@
 """Pending OCC shape operations, separate from the public geometry model."""
 module occ
 import ....Model
+import ....GeoExec
 using ...API: _with_model, OPTIONS, _native_diagnostic_emit_locked,LAST_MESH,LAST_MESH_CLASS,CURRENT
 
 # Recoverable OCC `Msg::Error` diagnostics the operation survives — e.g.
@@ -214,11 +215,37 @@ get_entities_in_bounding_box(xmin,ymin,zmin,xmax,ymax,zmax;dim=-1)=
         m,xmin,ymin,zmin,xmax,ymax,zmax,dim))
 get_curve_loops(surface_tag)=_with_model(m->Model._model_occ_get_curve_loops(m,surface_tag))
 get_surface_loops(volume_tag)=_with_model(m->Model._model_occ_get_surface_loops(m,volume_tag))
-get_mass(dim,tag)=_with_model(m->Model._model_occ_get_mass(m,dim,tag))
-get_center_of_mass(dim,tag)=
-    _with_model(m->Model._model_occ_get_center_of_mass(m,dim,tag))
-get_matrix_of_inertia(dim,tag)=
-    _with_model(m->Model._model_occ_get_matrix_of_inertia(m,dim,tag))
+# An entity a `.geo` OpenCASCADE statement left in the model only (a `Box`,
+# `Sphere`, ... the script never handed to a kernel operation) is bound the
+# way the script's own `Mass` query binds it: upstream every one of them is
+# an OpenCASCADE shape.
+function _occ_bind_for_query!(m,dim,tag)
+    d=Int(dim); t=abs(Int(tag))
+    haskey(m.occ_kernel.bindings,(d,t)) && return nothing
+    known=d==0 ? haskey(m.points,t) : d==1 ? haskey(m.curves,t) :
+        d==2 ? haskey(m.surfaces,t) : d==3 ? haskey(m.volumes,t) : false
+    known || return nothing
+    try
+        kernel=GeoExec._geo_occ_prepare_kernel!(m)
+        GeoExec._geo_occ_bind_entities!(m,[(d,t)],kernel,"OCC query")
+    catch err
+        err isa ArgumentError || rethrow()
+    end
+    return nothing
+end
+
+get_mass(dim,tag)=_with_model() do m
+    _occ_bind_for_query!(m,dim,tag)
+    Model._model_occ_get_mass(m,dim,tag)
+end
+get_center_of_mass(dim,tag)=_with_model() do m
+    _occ_bind_for_query!(m,dim,tag)
+    Model._model_occ_get_center_of_mass(m,dim,tag)
+end
+get_matrix_of_inertia(dim,tag)=_with_model() do m
+    _occ_bind_for_query!(m,dim,tag)
+    Model._model_occ_get_matrix_of_inertia(m,dim,tag)
+end
 get_closest_entities(x,y,z,dim_tags,n=1)=
     _with_model(m->Model._model_occ_get_closest_entities(m,x,y,z,dim_tags,n))
 get_distance(dim1,tag1,dim2,tag2)=

@@ -8662,6 +8662,12 @@ function _geo_allocator_statement_values(raw::AbstractString,
     # already emitted, so list-term reads stay silent here.
     mute=context.suppress_diagnostics
     context.suppress_diagnostics=true
+    # The statement already ran its `x++`/`x--`: re-evaluating must not run
+    # them again (primitives.geo's `Sphere(newv) = {x++,...}` advanced `x`
+    # by two per shape).
+    side=occursin("++",raw) || occursin("--",raw)
+    saved=side ? (copy(context.values),
+                  Dict(k=>copy(v) for (k,v) in context.lists)) : nothing
     try
         terms,total=_geo_numeric_list_terms(pieces,context,caller)
         values=Float64[];sizehint!(values,total)
@@ -8675,6 +8681,10 @@ function _geo_allocator_statement_values(raw::AbstractString,
         return values
     finally
         context.suppress_diagnostics=mute
+        if saved!==nothing
+            empty!(context.values); merge!(context.values,saved[1])
+            empty!(context.lists); merge!(context.lists,saved[2])
+        end
     end
 end
 
@@ -8852,6 +8862,7 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
         (r"^Line\s*\(\s*(.*?)\s*\)\s*=",:curve,"Line"),
         (r"^Circle\s*\(\s*(.*?)\s*\)\s*=",:curve,"Circle"),
         (r"^Ellipse\s*\(\s*(.*?)\s*\)\s*=",:curve,"Ellipse"),
+        (r"^(?:Spline|BSpline|Bezier)\s*\(\s*(.*?)\s*\)\s*=",:curve,"Spline"),
         (r"^(?:Line\s+Loop|Curve\s+Loop)\s*\(\s*(.*?)\s*\)\s*=",:curveloop,"Curve Loop"),
         (r"^Plane\s+Surface\s*\(\s*(.*?)\s*\)\s*=",:surface,"Plane Surface"),
         (r"^(?:Ruled\s+)?Surface\s*\(\s*(.*?)\s*\)\s*=",:surface,"Surface"),

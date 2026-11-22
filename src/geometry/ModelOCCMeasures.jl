@@ -113,6 +113,7 @@ end
 function _model_occ_wire_shoelace(kernel,face_rec,uses)
     area=0.0; Mx=0.0; My=0.0
     first_pt=nothing; last_pt=nothing
+    starts=NTuple{2,Float64}[]; ends=NTuple{2,Float64}[]
     for (eid,rev) in uses
         etag=kernel.shape_tags[eid][2]
         eg=kernel.shapes[eid].geometry.geometry
@@ -124,6 +125,7 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
         pt_a=_occ_pcurve_d0(pc,t0); pt_b=_occ_pcurve_d0(pc,t1)
         first_pt===nothing && (first_pt=pt_a)
         last_pt=pt_b
+        push!(starts,pt_a); push!(ends,pt_b)
         if haskey(pc,:lin2d)
             a=_occ_pcurve_d0(pc,t0); b=_occ_pcurve_d0(pc,t1)
             cr=_occ2_cross(a,b)
@@ -187,7 +189,12 @@ function _model_occ_wire_shoelace(kernel,face_rec,uses)
     # Periodic surfaces: a wire wrapping the period closes only modulo
     # 2π, so the cut-uv boundary includes the chord last→first — add its
     # shoelace term or seam-wrapping domains lose the closure wedge.
-    if first_pt!==nothing &&
+    # A wire whose edges are stored out of traversal order (OpenCASCADE's
+    # partial-cylinder side faces) still closes: every start point is some
+    # edge's end point, and no chord is missing.
+    closed=!isempty(starts) && all(p->any(q->abs(q[1]-p[1])<=1e-9 &&
+        abs(q[2]-p[2])<=1e-9,ends),starts)
+    if first_pt!==nothing && !closed &&
             (first_pt[1]!=last_pt[1] || first_pt[2]!=last_pt[2])
         cr=_occ2_cross(last_pt,first_pt)
         area+=cr/2

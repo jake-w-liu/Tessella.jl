@@ -143,9 +143,10 @@ function _model_occ_wire_samples(shape_of,uses,caller)
     pts=NTuple{3,Float64}[]
     for (id,rev) in uses
         edge=shape_of(id); g=edge.geometry.geometry
-        g.occ in (:line,:circle,:ellipse) || throw(ArgumentError(
-            "$caller: only line, circle, and ellipse OCC curves are " *
-            "supported on plane surfaces"))
+        nurbs=_model_occ_plane_nurbs_edge(g)
+        g.occ in (:line,:circle,:ellipse) || nurbs || throw(ArgumentError(
+            "$caller: only line, circle, ellipse and B-spline OCC curves " *
+            "are supported on plane surfaces"))
         a,b=edge.children
         pa=shape_of(a).geometry.point; pb=shape_of(b).geometry.point
         start=rev ? pb : pa; stop=rev ? pa : pb
@@ -162,6 +163,12 @@ function _model_occ_wire_samples(shape_of,uses,caller)
             for k in 1:3
                 fraction=rev ? (4-k)/4 : k/4
                 push!(pts,_occ_ellipse_point(g,g.t0+(g.t1-g.t0)*fraction))
+            end
+        elseif nurbs
+            for k in 1:15
+                fraction=rev ? (16-k)/16 : k/16
+                push!(pts,first(_model_occ_curve_d2(g.curve,
+                    g.t0+(g.t1-g.t0)*fraction)))
             end
         end
         _model_occ_vertices_coincide(last(pts),stop) || push!(pts,stop)
@@ -189,7 +196,25 @@ end
 # so the 2-D frame is projected (never re-crossed) and must stay
 # counterclockwise — the face axis is chosen so every boundary conic
 # agrees.
+# A B-spline or Bezier edge (`addSpline`, `addBezier`, `addBSpline`) whose
+# parameter is its knot parameter.
+_model_occ_plane_nurbs_edge(g)=get(g,:occ,nothing)===:copied_curve &&
+    hasproperty(g,:curve) && g.curve isa _ModelOCCNURBSCurve
+
 function _model_occ_plane_pcurve(g,center,X,Y)
+    if _model_occ_plane_nurbs_edge(g)
+        nc=g.curve.curve
+        uv(p)=(o=_arc_sub(p,center); (_dot3(o,X),_dot3(o,Y)))
+        if all(==(1.0),nc.weights)
+            # the plane's orthonormal projection acts on the poles: the
+            # trace is the B-spline of the projected poles, same knots
+            return (spl2d=(nc.knots,nc.degree,
+                           NTuple{2,Float64}[uv(c) for c in nc.controls]),)
+        end
+        ts=[g.t0+(g.t1-g.t0)*i/32 for i in 0:32]
+        return (spl2d=_pchip_bspline_2d(ts,
+            [uv(first(_model_occ_curve_d2(g.curve,t))) for t in ts]),)
+    end
     if g.occ===:line
         o=_arc_sub(g.origin,center)
         return (lin2d=((_dot3(o,X),_dot3(o,Y)),

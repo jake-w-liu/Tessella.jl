@@ -5762,6 +5762,19 @@ function _geo_occ_pipe_face!(m::GeoModel,tag::Int,kernel,caller)
     if g===nothing && kind===:plane
         g=_geo_occ_axis_plane_geometry(m,loops)
     end
+    if g===nothing && kind===:plane
+        # `Plane Surface` under the OpenCASCADE factory is `addPlaneSurface`:
+        # the face's plane is the one its (bound) wires lie in, whatever
+        # their curves (a Bezier side, a circular hole).
+        g=try
+            Model._model_occ_plane_face_geometry(id->kernel.shapes[id],
+                id->Model._model_occ_shape_tag(kernel,id,caller),
+                [kernel.shapes[w].geometry.uses for w in wire_ids],caller)
+        catch err
+            err isa ArgumentError || rethrow()
+            nothing
+        end
+    end
     # a built-in Plane Surface (an OCC-factory `Box` is built from them) is
     # an OpenCASCADE plane face whose natural normal follows its wire
     (g===nothing || !hasproperty(g,:occ)) && throw(ArgumentError(
