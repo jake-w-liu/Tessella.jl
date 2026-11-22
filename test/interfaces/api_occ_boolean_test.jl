@@ -294,24 +294,21 @@ end
     @test occ.fuse([],[(3,1)])==(Tuple{Int,Int}[],Vector{Tuple{Int,Int}}[])
 end
 
-@testset "occ booleans — engine rejection stays atomic" begin
+@testset "occ booleans — nested containment inside an overlapping third" begin
     occ=_occ_setup()
-    # nested containment inside an overlapping third operand — the engine
-    # does not yet materialize this fragment family; the rejection must
-    # leave the registry byte-identical
+    # the small box fills the overlap of the other two: Gmsh 4.15.2 returns
+    # three volumes, 22/36/18 entities, masses 0.125, 0.875, 0.875
     occ.add_box(0.5,0.5,0.5,0.5,0.5,0.5)
     occ.add_box(0,0,0,1,1,1)
     occ.add_box(0.5,0.5,0.5,1,1,1)
     occ.synchronize()
-    snap=occ.get_entities()
-    counts=_occ_counts()
-    err=_errtext(()->occ.fragment([(3,1),(3,2)],[(3,3)]))
-    @test occursin("Curve",err) || occursin("shell",err)
-    @test occ.get_entities()==snap
-    @test _occ_counts()==counts
-    # the model still answers afterwards
-    out,_=occ.cut([(3,2)],[(3,1)])
-    @test occ.get_mass(3,out[1][2])≈0.875
+    out,map=occ.fragment([(3,1),(3,2)],[(3,3)])
+    @test out==[(3,1),(3,2),(3,3)]
+    @test map[1]==[(3,1)] && map[3]==[(3,1),(3,3)]
+    # Gmsh lists the second operand's image as [(3,2),(3,1)]
+    @test_broken map[2]==[(3,2),(3,1)]
+    @test Tuple(length(occ.get_entities(d)) for d in 0:3)==(22,36,18,3)
+    @test [occ.get_mass(3,t) for t in 1:3]≈[0.125,0.875,0.875]
 end
 
 @testset "occ.fuse — post-sync queries and mesh" begin

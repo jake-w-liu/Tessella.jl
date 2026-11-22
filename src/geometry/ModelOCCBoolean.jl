@@ -1305,7 +1305,12 @@ end
 # operand edges that merely coincide in space, so without relabeling an
 # adjacent pair of coplanar sheets never fuses. Coincidence is judged on
 # evaluated endpoints, not params: partner rims run opposite directions.
-function _occ_shared_rim_keys(specs,tol)
+#
+# `cross=true` (fragments of volumes): every edge coincident with another
+# operand's edge relabels, however many faces of its own operand use it —
+# General Fuse shares an edge along which two solids touch (two boxes
+# meeting along an edge keep one curve there).
+function _occ_shared_rim_keys(specs,tol;cross::Bool=false)
     locs=Tuple{Int,Int,Int}[]
     # Relabeling matters for rims left dangling: a count-1 key references
     # no partner in the kept set (its coincident sibling face dropped or
@@ -1341,7 +1346,12 @@ function _occ_shared_rim_keys(specs,tol)
         a1=specs[sx].wires[wx][ax];a2=specs[sy].wires[wy][ay]
         a1.crv.kind===:degenerate && continue
         a2.crv.kind===:degenerate && continue
-        (get(counts,a1.key,0)==1 || get(counts,a2.key,0)==1) || continue
+        a1.key==a2.key && continue
+        if cross
+            get(specs[sx],:oi,0)!=get(specs[sy],:oi,0) || continue
+        else
+            (get(counts,a1.key,0)==1 || get(counts,a2.key,0)==1) || continue
+        end
         _brep_same_curve3d(a1.crv,a2.crv,tol) || continue
         p1a=_brep_vertex_eval(a1.crv,a1.vt0)
         p1b=_brep_vertex_eval(a1.crv,a1.vt1)

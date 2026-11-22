@@ -6726,6 +6726,7 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                         for sec in sections for span in sec.spans]
     contacts=_brep_vertex_face_touch!(touched,solids,coinc,tol;
         modify=!(op===:difference || op===:intersection))
+    op===:fragments && _brep_vertex_vertex_touch!(touched,solids,tol)
     # operand edges piercing other operands' faces split those edges
     esplits=[Dict{Int,Vector{Float64}}() for _ in 1:N]
     for i in 1:N
@@ -7110,7 +7111,7 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                            vt0=arcs[k].vt0,vt1=arcs[k].vt1,neg=arcs[k].neg)
                          for (k,fwd) in cycles[c] ] for c in region ]
                 spec=(sg=f.sg,stag=f.stag,wires=wires,uses=uses,
-                      sgn=uses[1][2])
+                      sgn=uses[1][2],oi=i)
                 isempty(sec_edges) ||
                     (spec=merge(spec,(sev=sec_edges,)))
                 length(regions)==1 && haskey(contacts,(i,fidx)) &&
@@ -7127,10 +7128,46 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
     # one canonical key first or the unify cannot see the shared edge and
     # each kept partner emits its own copy (a dangling curve in the shell).
     kept=_occ_shared_rim_keys(kept,tol)
+    if op===:fragments
+        # solids touching along an edge share it: both operands are rebuilt
+        # around the one curve
+        before=[Set(ar.key for w in s.wires for ar in w) for s in kept]
+        kept=_occ_shared_rim_keys(kept,tol;cross=true)
+        for (k,s) in enumerate(kept)
+            all(ar->ar.key in before[k],(ar for w in s.wires for ar in w)) &&
+                continue
+            touched[s.oi]=true
+            for w in s.wires, ar in w
+                ar.key in before[k] && continue
+                for (k2,s2) in enumerate(kept)
+                    ar.key in before[k2] && (touched[s2.oi]=true)
+                end
+            end
+        end
+    end
     op===:union && (kept=_brep_unify_union(kept,tol,caller))
     op===:intersection &&
         (kept=_brep_unify_union(kept,tol,caller;same_uses=true))
     return kept,touched
+end
+
+# Operands whose distinct vertices coincide (two boxes touching at a corner)
+# share that vertex in OpenCASCADE's result, so both are rebuilt around it
+# (Gmsh 4.15.2: 15 points, not 16). Vertices that are already one entity —
+# cells of an earlier fragment — are no contact.
+function _brep_vertex_vertex_touch!(touched,solids,tol)
+    N=length(solids)
+    for i in 1:N, j in i+1:N
+        (touched[i] && touched[j]) && continue
+        hit=false
+        for (a,p) in enumerate(solids[i].pts), (b,q) in enumerate(solids[j].pts)
+            solids[i].ptags[a]==solids[j].ptags[b] && continue
+            _b3dist(p,q)<=tol || continue
+            hit=true;break
+        end
+        hit && (touched[i]=touched[j]=true)
+    end
+    return touched
 end
 
 # ── result materialization ──────────────────────────────────────────────────

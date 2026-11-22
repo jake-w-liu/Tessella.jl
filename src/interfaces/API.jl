@@ -88,7 +88,7 @@ using ..Model: _model_entity_known, _model_fresh_element_tag,
               model_discrete_entity, model_discrete_entities, DiscreteEntity,
               classify_surfaces!, compute_homology!, create_geometry!,
               create_topology!
-using ..MeshTypes: Mesh, node, nnodes, nsegs, ntris, ntets, validate,
+using ..MeshTypes: Mesh, _tet_topology, node, nnodes, nsegs, ntris, ntets, validate,
                    boundary_edges, boundary_faces
 using ..IO: read_stl, GeoParams, GeoFieldSpec, _geo_split_list_or_argerr,
             _geo_signed_gmsh_int_value, _geo_option_store_value
@@ -2514,6 +2514,7 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     tri_count=0;tet_count=0
     total_tris=sum(ntris(mesh) for (_,mesh) in parts)
     tri_owners=Vector{Int32}(undef,total_tris)
+    tet_owners=Vector{Int32}(undef,size(tets,2))
     for (part,(_,mesh)) in enumerate(parts)
         remap=remaps[part]
         for cell in axes(mesh.tris,2),slot in 1:3
@@ -2523,6 +2524,7 @@ function _merge_entity_meshes(parts,caller::AbstractString;
         for cell in axes(mesh.tets,2),slot in 1:4
             tets[slot,tet_count+cell]=remap[mesh.tets[slot,cell]]
         end
+        fill!(@view(tet_owners[tet_count+1:tet_count+ntets(mesh)]),Int32(part))
         append!(tri_tag,mesh.tri_tag)
         append!(tet_tag,mesh.tet_tag)
         if bindings!==nothing
