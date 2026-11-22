@@ -372,6 +372,7 @@ end
         "interfaces/api_cell_cache_sizes_test.jl",
         "interfaces/api_mesh_jacobian_test.jl",
         "geometry/geo_plugin_test.jl",
+        "interfaces/api_subdivision_algorithm_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

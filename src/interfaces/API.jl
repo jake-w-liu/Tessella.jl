@@ -307,6 +307,9 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Print.X3dEdges"=>0.0,
     "Print.X3dVertices"=>0.0,
     "Mesh.ElementOrder"=>1.0,
+    # 1 splits a surface mesh into quadrangles, 2 a volume mesh into
+    # hexahedra, after generate(2) / generate(3) and in refine() (meshRefine.cpp).
+    "Mesh.SubdivisionAlgorithm"=>0.0,
     "Mesh.SecondOrderLinear"=>0.0,
     "Mesh.SecondOrderIncomplete"=>0.0,
     # High-order mesh optimization controls (upstream gmsh option surface).
@@ -911,6 +914,7 @@ function option(name::AbstractString, value::Real)
                         "Mesh.MeshOnlyVisible","Mesh.MaxRetries","Mesh.Renumber",
                         "Mesh.ElementOrder","Mesh.SaveAll","Geometry.OldRuledSurface",
                         "Mesh.Algorithm","Mesh.Algorithm3D","Mesh.SecondOrderLinear",
+                        "Mesh.SubdivisionAlgorithm",
                         "Mesh.SecondOrderIncomplete","Mesh.RecombineOptimizeTopology",
                         "Mesh.Recombine3DAll","Mesh.Recombine3DLevel",
                         "Mesh.Recombine3DConformity",
@@ -2999,6 +3003,20 @@ function _generate_native_lookup_live(dim::Integer)
         end
         _native_lookup_invalidate_locked!()
         isempty(CURRENT[].meshing.homology_requests) || Base.inferencebarrier(_compute_homology)()
+        # GenerateMesh subdivides a surface mesh into quadrangles
+        # (SubdivisionAlgorithm 1) or a volume mesh into hexahedra (2) before
+        # it raises the order.
+        split=Int(OPTIONS["Mesh.SubdivisionAlgorithm"])
+        if (split==1 && dimension==2) || (split==2 && dimension==3)
+            cached=LAST_MESH[]
+            if cached isa MixedMesh
+                Base.inferencebarrier(_mixed_refine_locked!)(_model_locked(),cached,
+                    typemax(Int32),typemax(Int32);split)
+                _native_lookup_invalidate_locked!()
+                order>1 && Base.inferencebarrier(_set_order_native_lookup_live)(order)
+                return (Base.inferencebarrier(_get_mesh)())::Union{Mesh,MixedMesh}
+            end
+        end
         (Base.inferencebarrier(_copy_mesh)(plan.model.meshing.mesh_authority.carrier))::Union{Mesh,MixedMesh}
     end
 end

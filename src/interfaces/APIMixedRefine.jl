@@ -20,6 +20,76 @@ const _MIXED_REFINE_TEMPLATES=Dict(
             (8,10,6,14),(10,12,9,14),(13,11,12,14),(8,7,13,14)))),
     15=>((15,((1,),)),))
 
+include("APIMixedSubdivideTables.jl")
+
+# Mesh.SubdivisionAlgorithm 1 (splitIntoQuads) and 2 (splitIntoHexas) of
+# meshRefine.cpp: triangles become three quadrangles around a centre node;
+# with 2, tetrahedra become four hexahedra (four face centres and a cell
+# centre), prisms six (two triangle-face centres and a cell centre) and
+# pyramids the 88 hexahedra of `subdivide_pyramid`. The added nodes are the
+# extra stencils below (rows after the order-two nodes of each element type).
+const _THIRD=1/3
+_mixed_subdivide_face(a,b,c)=[(a,_THIRD),(b,_THIRD),(c,_THIRD)]
+
+# Schneiders point i (0-based) as a pyramid14 row, or 0 for a point Gmsh adds.
+const _SCHNEIDERS_ROWS=Dict(29=>1,27=>2,3=>3,5=>4,102=>5,28=>6,101=>7,26=>8,
+    97=>9,24=>10,4=>11,0=>12,2=>13,104=>14,25=>15,95=>16,1=>17,99=>18)
+
+function _mixed_subdivide_pyramid_points()
+    rows=copy(_SCHNEIDERS_ROWS)
+    stencils=Vector{Vector{Tuple{Int,Float64}}}()
+    # Gmsh's pyramid map (u,v,w) = (z_i, x_i, y_i/1.414213) on its linear
+    # pyramid, whose base is [-1,1]^2 at w = 0 and apex (0,0,1).
+    for i in 0:104
+        haskey(rows,i) && continue
+        u=_SCHNEIDERS_Z[i+1];v=_SCHNEIDERS_X[i+1];w=_SCHNEIDERS_Y[i+1]/1.414213
+        scale=4*(1-w)
+        weights=((1-u-w)*(1-v-w)/scale,(1+u-w)*(1-v-w)/scale,
+                 (1+u-w)*(1+v-w)/scale,(1-u-w)*(1+v-w)/scale,w)
+        push!(stencils,[(row,weights[row]) for row in 1:5 if !iszero(weights[row])])
+        rows[i]=18+length(stencils)
+    end
+    hexes=ntuple(88) do j
+        ntuple(k->rows[_SCHNEIDERS_CONNECT[k][j]],8)
+    end
+    return stencils,hexes
+end
+const _MIXED_SUBDIVIDE_PYRAMID=_mixed_subdivide_pyramid_points()
+
+function _mixed_subdivide_stencils(msh::Int,split::Int)
+    split==0 && return ()
+    family=msh_family(msh)
+    family===:tri && return (_mixed_subdivide_face(1,2,3),)
+    split==2 || return ()
+    if family===:tet
+        return (_mixed_subdivide_face(1,3,2),_mixed_subdivide_face(1,2,4),
+            _mixed_subdivide_face(1,4,3),_mixed_subdivide_face(4,2,3),
+            [(row,0.25) for row in 1:4])
+    elseif family===:pri
+        return (_mixed_subdivide_face(1,3,2),_mixed_subdivide_face(4,5,6),
+            [(row,1/6) for row in 1:6])
+    elseif family===:pyr
+        return (_mixed_subdivide_face(1,2,5),_mixed_subdivide_face(2,3,5),
+            _mixed_subdivide_face(3,4,5),_mixed_subdivide_face(4,1,5),
+            _MIXED_SUBDIVIDE_PYRAMID[1]...)
+    end
+    return ()
+end
+
+function _mixed_refine_templates(split::Int)
+    split==0 && return _MIXED_REFINE_TEMPLATES
+    templates=copy(_MIXED_REFINE_TEMPLATES)
+    templates[2]=((3,((1,4,7,6),(4,2,5,7),(6,7,5,3))),)
+    split==2 || return templates
+    templates[4]=((5,((1,5,11,7,8,12,15,13),(5,2,6,11,12,10,14,15),
+                      (7,11,6,3,13,15,14,9),(4,10,12,8,9,14,15,13))),)
+    templates[6]=((5,((1,7,19,8,9,16,21,17),(2,10,19,7,11,18,21,16),
+                      (3,8,19,10,12,17,21,18),(9,16,21,17,4,13,20,14),
+                      (11,18,21,16,5,15,20,13),(12,17,21,18,6,14,20,15))),)
+    templates[7]=((5,_MIXED_SUBDIVIDE_PYRAMID[2]),)
+    return templates
+end
+
 function _mixed_refine_limit(value,name)
     (value isa Integer && !(value isa Bool)) || throw(ArgumentError(
         "API.mesh.refine: $name must be an integer other than Bool"))
@@ -72,11 +142,12 @@ function _mixed_refine_count_edges!(set::Set{UInt64},cells::Matrix{Int32},
     return found
 end
 
-function _mixed_refine_plan(mesh,node_limit,cell_limit,caller)
+function _mixed_refine_plan(mesh,node_limit,cell_limit,caller;split::Int=0)
     counts=Dict{Int,Int}()
     total=0
+    table=_mixed_refine_templates(split)
     for (msh,cells,_) in _cache_native_blocks(mesh)
-        templates=get(_MIXED_REFINE_TEMPLATES,msh,nothing)
+        templates=get(table,msh,nothing)
         templates===nothing && throw(ArgumentError(
             "$caller: refinement is unavailable for element type $msh"))
         for (target,children) in templates
@@ -120,6 +191,11 @@ function _mixed_refine_plan(mesh,node_limit,cell_limit,caller)
                 found=_mixed_refine_count_supports!(set,cells,Tuple(nonzero),Tuple(terms),
                     found,nnodes(mesh),node_limit,caller)
             end
+        end
+        for stencil in _mixed_subdivide_stencils(Int(msh),split)
+            set=get!(()->_mixed_refine_support_set(Val(length(stencil))),supports,length(stencil))
+            found=_mixed_refine_count_supports!(set,cells,Tuple(first.(stencil)),
+                Tuple(last.(stencil)),found,nnodes(mesh),node_limit,caller)
         end
     end
     nodes=Refine._checked_add(nnodes(mesh),found,"output node")
@@ -260,7 +336,7 @@ end
 end
 
 function _mixed_refine_child_supports(linear,class,quadratic,blocks,owners;
-                                      parent_supports=nothing)
+                                      parent_supports=nothing,tri_centers=nothing)
     parent_edges,parent_faces,parent_quads=parent_supports===nothing ?
         _mixed_refine_parent_supports(linear,class) : parent_supports
     mids,centers=_mixed_refine_support_nodes(linear,quadratic)
@@ -283,6 +359,17 @@ function _mixed_refine_child_supports(linear,class,quadratic,blocks,owners;
     end
     for ((a,b,c),owner) in parent_faces
         ab=mids[minmax(a,b)];bc=mids[minmax(b,c)];ca=mids[minmax(c,a)]
+        if tri_centers!==nothing
+            # Split into quadrangles around the triangle's centre node.
+            center=tri_centers[_api_support_face(a,b,c)]
+            _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                a,ab,center,ca,owner)
+            _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                ab,b,bc,center,owner)
+            _mixed_refine_insert_quad!(edges,edge_conflicts,quads,quad_conflicts,
+                ca,center,bc,c,owner)
+            continue
+        end
         _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,a,ab,ca,owner)
         _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,ab,b,bc,owner)
         _mixed_refine_insert_face!(edges,edge_conflicts,faces,face_conflicts,ca,bc,c,owner)
@@ -336,7 +423,7 @@ end
 
 # Raw addNodes/addElements products are real meshes even before generate().
 # Bind them in a detached plan and publish only after refinement succeeds.
-function _mixed_refine_raw_locked!(m,max_nodes,max_cells)
+function _mixed_refine_raw_locked!(m,max_nodes,max_cells;split::Int=_mixed_subdivision_split())
     caller="API.mesh.refine"
     # Bind raw products without changing endpoint associations before CAD placement.
     # Refinement performs its final association after the new supports exist.
@@ -345,7 +432,7 @@ function _mixed_refine_raw_locked!(m,max_nodes,max_cells)
     class=_classification_with_public_tags(source.class,
         _cache_public_tags(source.mesh;authority=source.authority))
     result=_mixed_refine_detached(source.model,source.mesh,class,max_nodes,max_cells;
-        node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[],
+        node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[],split,
         renumber=!iszero(OPTIONS["Mesh.Renumber"]),
         save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
         linear_nodes=!iszero(OPTIONS["Mesh.SecondOrderLinear"]))
@@ -354,10 +441,18 @@ function _mixed_refine_raw_locked!(m,max_nodes,max_cells)
     return _copy_mesh(result.plan.mesh)
 end
 
-function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
+# Gmsh's refine() splits by Mesh.SubdivisionAlgorithm: 1 into quadrangles,
+# 2 into hexahedra (and quadrangles on the surfaces).
+function _mixed_subdivision_split()
+    algorithm=Int(get(OPTIONS,"Mesh.SubdivisionAlgorithm",0.0))
+    return algorithm in (1,2) ? algorithm : 0
+end
+
+function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells;
+                               split::Int=_mixed_subdivision_split())
     stored_class=_cached_classification_locked(cached)
     result=_mixed_refine_detached(m,cached,stored_class,max_nodes,max_cells;
-        node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[],
+        node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[],split,
         renumber=!iszero(OPTIONS["Mesh.Renumber"]),
         save_all=!iszero(OPTIONS["Mesh.SaveAll"]),
         linear_nodes=!iszero(OPTIONS["Mesh.SecondOrderLinear"]))
@@ -376,7 +471,8 @@ function _mixed_refine_locked!(m,cached::MixedMesh,max_nodes,max_cells)
 end
 
 function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_cells;
-        node_max::UInt64,element_max::UInt64,renumber::Bool,save_all::Bool,linear_nodes::Bool=false)
+        node_max::UInt64,element_max::UInt64,renumber::Bool,save_all::Bool,linear_nodes::Bool=false,
+        split::Int=0)
     caller="API.mesh.refine"
     node_limit=_mixed_refine_limit(max_nodes,"max_nodes")
     cell_limit=_mixed_refine_limit(max_cells,"max_cells")
@@ -412,11 +508,28 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
         linear,linear_class=_mixed_select_columns(linear,linear_class,
             [collect(axes(b.nodes,2)) for b in linear.blocks];node_order=order)
     end
-    counts,node_count=_mixed_refine_plan(linear,node_limit,cell_limit,caller)
+    counts,node_count=_mixed_refine_plan(linear,node_limit,cell_limit,caller;split)
     parent_supports=_mixed_refine_parent_supports(linear,linear_class)
     linear_class=_mixed_refine_support_class(linear_class,linear,linear_class.cell_entities,
         parent_supports...)
-    quadratic,quadclass=_mixed_quadratic_cache(linear,linear_class,caller;node_max,model=m,linear=linear_nodes,cell_order=tagged)
+    elevated=_mixed_quadratic_cache(linear,linear_class,caller;node_max,model=m,
+        linear=linear_nodes,cell_order=tagged,
+        extra=split==0 ? nothing : msh->_mixed_subdivide_stencils(msh,split))
+    quadratic,quadclass=elevated[1],elevated[2]
+    extras=split==0 ? nothing : elevated[3]
+    templates=_mixed_refine_templates(split)
+    # The triangle centres the quadrangle split adds, by their face support.
+    tri_centers=nothing
+    if extras!==nothing
+        tri_centers=Dict{NTuple{3,Int32},Int32}()
+        for (bi,block) in enumerate(linear.blocks)
+            msh_family(block.msh)===:tri || continue
+            for column in axes(block.nodes,2)
+                tri_centers[_api_support_face(block.nodes[1,column],block.nodes[2,column],
+                    block.nodes[3,column])]=extras[bi][1,column]
+            end
+        end
+    end
     nnodes(quadratic)==node_count || error("$caller: internal support-node count mismatch")
     if !isempty(m.meshing.periodic_uid_history)
         primary_tags=_dim01_periodic_public_tags(linear,linear_class)
@@ -442,6 +555,7 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
     child_tags=tagged ? Dict{UInt64,Vector{UInt64}}() : nothing
     for (bi,(input,_,_,support,parent_owners)) in enumerate(catalog)
         original=linear.blocks[bi]
+        extras===nothing || isempty(extras[bi]) || (support=vcat(support,extras[bi]))
         for parent in axes(support,2)
             orientation=if original.msh in (4,5,6,7)
                 volume=Model._extrude_cell_signed_volume(linear.coords,original.nodes,parent,original.msh)
@@ -450,12 +564,15 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
             else
                 0.0
             end
-            for (target,children) in _MIXED_REFINE_TEMPLATES[original.msh],child in children
+            for (target,children) in templates[original.msh],child in children
                 column=cursors[target]+1
                 for row in eachindex(child)
                     connectivity[target][row,column]=support[child[row],parent]
                 end
-                _mixed_refine_certify(quadratic.coords,connectivity[target],column,target,orientation,caller)
+                # Gmsh's subdivision into hexahedra checks nothing but the sign
+                # it normalizes below (minimum scaled Jacobian 0.04 on its own
+                # pyramid split).
+                split==0 && _mixed_refine_certify(quadratic.coords,connectivity[target],column,target,orientation,caller)
                 tags[target][column]=original.tags[parent]
                 owners[target][column]=parent_owners[parent]
                 if tagged
@@ -480,13 +597,14 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
         # RefineMesh's final setAllVolumesPositive normalizes every volume
         # child, including a mesh the caller explicitly reversed beforehand.
         Model._extrude_make_positive!(quadratic.coords,connectivity[msh],msh)
+        split==0 || continue
         for column in axes(connectivity[msh],2)
             _mixed_refine_certify(quadratic.coords,connectivity[msh],column,msh,1.0,caller)
         end
     end
     blocks=[ElementBlock(msh,connectivity[msh],tags[msh]) for msh in sort!(collect(keys(counts))) if counts[msh]>0]
     edges,faces,quads=_mixed_refine_child_supports(linear,linear_class,quadratic,blocks,owners;
-        parent_supports=parent_supports)
+        parent_supports=parent_supports,tri_centers)
     if tagged
         assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
             node_max,element_max,node_limit,cell_limit,caller)
@@ -537,7 +655,8 @@ function _mixed_refine_detached(m,cached::MixedMesh,stored_class,max_nodes,max_c
         refined_cells=Dict(parent=>UInt64[refined_element_tag_map[tag] for tag in children]
             for (parent,children) in child_tags)
         plan=merge(plan,(class=refined_class,refine_primary_rows=primary_rows,
-                        refine_edge_rows=edge_rows,refine_cell_tags=refined_cells))
+                        refine_edge_rows=edge_rows,refine_cell_tags=refined_cells,
+                        refine_split=split))
         return (;mesh=plan.mesh,class=plan.class,plan)
     end
     refined=MixedMesh(quadratic.coords,blocks;physical_names=cached.physical_names)

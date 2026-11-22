@@ -651,8 +651,13 @@ function _mixed_quadratic_plane_quad_center(model,points,owners,parameters,nodes
     return ((values[1],values[2],values[3]),parameter)
 end
 
+# `extra(msh)` lists further supports of an element type as (row, weight)
+# stencils over its primary rows: the face and cell centres Gmsh's
+# meshRefine.cpp adds when it splits into quadrangles or hexahedra. Their nodes
+# are returned per block, after the order-two blocks, and shared through the
+# same weighted support identities.
 function _mixed_quadratic_cache(input_mesh,input_class,caller;
-        node_max=NODE_TAG_MAX[],model=nothing,linear=false,cell_order=false)
+        node_max=NODE_TAG_MAX[],model=nothing,linear=false,cell_order=false,extra=nothing)
     mesh,class=_mixed_prune_unused(input_mesh,input_class)
     points=NTuple{3,Float64}[(mesh.coords[1,i],mesh.coords[2,i],mesh.coords[3,i])
                              for i in axes(mesh.coords,2)]
@@ -668,19 +673,30 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
     end
     entity_nodes=Ref{Union{Nothing,Vector{Tuple{Tuple{Int,Int32},Set{Int}}}}}(nothing)
     blocks=ElementBlock[];owners=Dict{Int,Vector{Int32}}()
+    extras=Matrix{Int32}[]
     for (bi,(msh,dim,_,cells,cell_owners)) in enumerate(_cache_catalog(mesh,class))
         family=msh_spec(msh).family
         target=family===:pnt ? 15 : msh_type(family,2)
         reference=Elements.lagrange_nodes(target)
         nprimary=size(cells,1)
-        nodes=Matrix{Int32}(undef,size(reference,2),size(cells,2))
+        added=extra===nothing ? () : extra(Int(msh))
+        nlagrange=size(reference,2)
+        nodes=Matrix{Int32}(undef,nlagrange+length(added),size(cells,2))
         nodes[1:nprimary,:]=cells
-        slots=nprimary+1:size(reference,2)
+        slots=nprimary+1:nlagrange+length(added)
         interpolants=map(slots) do slot
+            if slot>nlagrange
+                stencil=added[slot-nlagrange]
+                weights=zeros(nprimary)
+                for (row,weight) in stencil
+                    weights[row]=weight
+                end
+                return (weights,Int[row for (row,_) in stencil])
+            end
             weights=MeshFunctionSpaces._first_order_values(Val(family),
                 reference[1,slot],reference[2,slot],reference[3,slot],caller,slot)
             support=findall(!iszero,collect(weights))
-            (weights,support)
+            (collect(weights),support)
         end
         # SetOrderN walks each cell edge in its own direction: a two-term
         # support is anchored at the edge's first endpoint and advanced by the
@@ -750,7 +766,7 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                         nothing
                     if certified!==nothing
                         owner=certified
-                    elseif !(dim==2 && model!==nothing &&
+                    elseif slot<=nlagrange && !(dim==2 && model!==nothing &&
                             Model._model_high_order_ruled_surface(model,Int(owner[2]),caller))
                         for (candidate,allnodes) in _mixed_quadratic_entity_nodes!(entity_nodes,class)
                             candidate[1]>dim && break
@@ -779,7 +795,8 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                     elseif !linear && model!==nothing && owner[1]==2 &&
                             _relocation_native_entity(model,2,Int(owner[2]))
                         surface_geometry=get(model.surface_geometry,Int(owner[2]),nothing)
-                        ruled=if Model._model_high_order_ruled_surface(model,Int(owner[2]),caller) &&
+                        ruled=if slot<=nlagrange &&
+                                Model._model_high_order_ruled_surface(model,Int(owner[2]),caller) &&
                                 owner==(dim,cell_owners[column])
                             boundary=Int32[nodes[row,column] for row in 1:slot-1]
                             context=(nodes=Dict(node=>(point=points[node],
@@ -833,7 +850,12 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                 nodes[slot,column]=node
                 packed==0 || (edge_nodes[packed]=node)
         end
-        push!(blocks,ElementBlock(target,nodes,mesh.blocks[bi].tags))
+        if isempty(added)
+            push!(blocks,ElementBlock(target,nodes,mesh.blocks[bi].tags))
+        else
+            push!(blocks,ElementBlock(target,nodes[1:nlagrange,:],mesh.blocks[bi].tags))
+        end
+        push!(extras,nodes[nlagrange+1:end,:])
         append!(get!(()->Int32[],owners,target),cell_owners)
     end
     coords=Matrix{Float64}(undef,3,length(points))
@@ -878,7 +900,8 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
             new_class=_mixed_rebind_class(new_class,result)
         end
     end
-    return result,new_class
+    extra===nothing && return result,new_class
+    return result,new_class,extras
 end
 
 # Gmsh SetOrderN rebuilds mesh-vertex associations from element connectivity.

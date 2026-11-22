@@ -212,6 +212,8 @@ end
 function _model_mesh_refined_cell_tags(plan,previous;caller="mesh refinement")
     isempty(previous.carrier_cells) && return Vector{Union{Nothing,UInt64}}[]
     previous.carrier isa Mesh && hasproperty(plan,:refine_cell_tags) || return Vector{Union{Nothing,UInt64}}[]
+    # Subdivision into quadrangles or hexahedra leaves no simplex carrier.
+    get(plan,:refine_split,0)==0 || return Vector{Union{Nothing,UInt64}}[]
     table,sparse,dense=_model_mesh_cell_positions(previous.mesh)
     output=Vector{Union{Nothing,UInt64}}[]
     for (bi,(msh,cells)) in enumerate(_model_mesh_carrier_blocks(previous.carrier))
