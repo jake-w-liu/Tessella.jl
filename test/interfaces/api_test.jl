@@ -789,8 +789,12 @@ end
         @test length(restricted_old)==length(restricted_new)
         @test issorted(restricted_old)
         @test sort(Int.(restricted_new))==collect(1:length(restricted_new))
-        for call in (()->_API.mesh.compute_renumbering("Hilbert"),
-                     ()->_API.mesh.compute_renumbering(3),
+        # Hilbert is one of Gmsh's renumbering methods (RCMK, Hilbert, Metis):
+        # Gmsh 4.15.2 renumbers every node with it, as Tessella does.
+        hilbert_old,hilbert_new=_API.mesh.compute_renumbering("Hilbert")
+        @test length(hilbert_old)==length(hilbert_new)==nnodes(generated)
+        @test sort(Int.(hilbert_new))==collect(1:nnodes(generated))
+        for call in (()->_API.mesh.compute_renumbering(3),
                      ()->_API.mesh.compute_renumbering("RCMK",[999]),
                      ()->_API.mesh.compute_renumbering("RCMK",[-1]),
                      ()->_API.mesh.compute_renumbering("RCMK",3))
