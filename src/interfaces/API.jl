@@ -1625,7 +1625,7 @@ add_volume(surface_loops;tag=0)=_with_model(invalidate=true,synchronize_geometry
     add_volume!(m,surface_loops;tag=tag)
 end
 add_box(x,y,z,dx,dy,dz;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
-    add_box!(m,x,y,z,dx,dy,dz;tag=tag)
+    add_box!(m,x,y,z,dx,dy,dz;tag=tag,builtin=true)
 end
 add_cylinder(x,y,z,dx,dy,dz,r;tag=0)=_with_model(invalidate=true,synchronize_geometry=true) do m
     add_cylinder!(m,x,y,z,dx,dy,dz,r;tag=tag)

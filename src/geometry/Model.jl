@@ -1877,7 +1877,7 @@ from incident edges. Assign explicit sizes with `set_point_mesh_size!` or
 `setSize` to refine.
 """
 function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
-                  _zero_literal::Bool=false)
+                  _zero_literal::Bool=false, builtin::Bool=false)
     caller="add_box!"
     first_corner=_finite3(xmin,ymin,zmin,caller)
     extent=_finite3(dx,dy,dz,caller)
@@ -1924,10 +1924,13 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
         for edge in ((p[2],p[1]),(p[1],p[3]),(p[4],p[3]),(p[2],p[4]),
                      (p[6],p[5]),(p[5],p[7]),(p[8],p[7]),(p[6],p[8]),
                      (p[2],p[6]),(p[1],p[5]),(p[4],p[8]),(p[3],p[7]))
-            # Built-in kernel Lines and Plane Surfaces, as the equivalent .geo
+            # The built-in kernel's box (API `model.add_box`, `builtin=true`)
+            # is plain Lines and Plane Surfaces, as the equivalent .geo
             # construction makes them (Gmsh meshes that construction to the
-            # same nodes and cells).
+            # same nodes and cells). The OpenCASCADE `Box` of a .geo file keeps
+            # the OCC edge and plane records its OCC operations read.
             push!(created_curves,add_line!(m,edge...))
+            builtin || (m.curve_geometry[last(created_curves)]=_model_box_edge_geometry(m,edge))
         end
         c=created_curves
         # Face loops, each oriented so its stored normal points along the
@@ -1943,6 +1946,8 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
             push!(created_loops,add_curve_loop!(m,signed_curves))
             push!(created_surfaces,
                   add_plane_surface!(m,[last(created_loops)]))
+            builtin || (m.surface_geometry[last(created_surfaces)]=
+                _model_box_plane_geometry(m,last(created_surfaces),origin,d,face))
         end
         shell=add_surface_loop!(m,[-created_surfaces[1],created_surfaces[2],
                                    -created_surfaces[3],created_surfaces[4],
