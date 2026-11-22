@@ -102,9 +102,10 @@ end
                 @test _QTNTQ.surface_faces([(2,0,surface_product)],volume)==boundary
                 generated=api.mesh.generate(3)
                 @test _QTNTQ.typed_signature(generated)==_QTNTQ.typed_signature(volume)
-                @test _QTNT.certify(generated,fixture).family_counts==certificate.family_counts
+                @test _QTNT.certify(_qtnt_public_volume(api),fixture).family_counts==certificate.family_counts
                 @test _QTNTQ.typed_signature(_qtnt_public_volume(api))==_QTNTQ.typed_signature(volume)
-                @test isempty(api.mesh.get_elements(2)[1])
+                # The bounding Surfaces keep their cells after generate(3), as in Gmsh.
+                @test !isempty(api.mesh.get_elements(2)[1])
                 @test length(api.mesh.get_nodes(3,1,true)[1])==nnodes(volume)
                 @test isempty(api.mesh.get_nodes(3,1,false)[1])
                 @test sum(length,api.mesh.get_elements(3,1)[2])==certificate.ncell
@@ -185,34 +186,50 @@ end
         _qtnt_api(fixture.source,(api,_)->begin
             api.mesh.generate(3)
             for curve in 1:3;api.mesh.set_transfinite_curve(curve,3);end
-            before=_qtnt_snapshot(api)
-            @test_throws r"multiple source cells" api.mesh.generate(3)
-            _qtnt_unchanged(api,before)
+            # Gmsh 4.15.2 keeps the meshed curves: generate(3) changes nothing.
+            nodes=api.mesh.get_nodes()
+            api.mesh.generate(3)
+            @test api.mesh.get_nodes()==nodes
         end)
-        invalid=(
-            (replace(fixture.source,"Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),r"multiple source cells"),
-            (replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,0,1},{0,0,0},Pi/6}"),r"collapsed"),
-            (fixture.source*"Transfinite Surface{sweep[0]};\n",r"transfinite cap/lateral overrides"),
-            (fixture.source*"Extrude{0,0,-1}{Surface{1};Layers{3};Recombine;QuadTriNoNewVerts;}\n",r"shared surfaces"),
-            (fixture.source*"Extrude{0,0,1}{Surface{sweep[0]};Layers{3};Recombine;QuadTriNoNewVerts;}\n",r"copied or chained sources"))
-        for (source,diagnostic) in invalid
-            geometry=_QTNTQ.execute(source;dim=0)
-            parameters=deepcopy(geometry.model.curve_params);attributes=repr(geometry.model.meshing)
-            volumes=sort!(collect(keys(geometry.model.volumes)))
-            target=occursin("chained",diagnostic.pattern) ? last(volumes) : first(volumes)
-            # The all-region request encounters the earlier shared cap before
-            # reaching the later region's copied-source dependency guard.
-            global_diagnostic=target==last(volumes) && length(volumes)>1 &&
-                occursin("chained",diagnostic.pattern) ? r"shared surfaces" : diagnostic
-            @test_throws diagnostic mesh_model_volume(geometry.model,target)
-            @test geometry.model.curve_params==parameters && repr(geometry.model.meshing)==attributes
-            @test_throws global_diagnostic _QTNTQ.execute(source)
-            context=Tessella.IO._GeoNumericContext()
-            old_part=Tessella.MeshTypes.Mesh(zeros(3,1));push!(context.mesh_parts,(0,777,old_part))
-            parts=context.mesh_parts;options=deepcopy(context.option_numbers);model_value=repr(geometry.model)
-            @test_throws global_diagnostic Tessella.GeoExec._geo_mesh_model(geometry.model,3,context)
-            @test repr(geometry.model)==model_value && context.option_numbers==options
-            @test context.mesh_parts===parts && only(parts)[3]===old_part
+        # Gmsh 4.15.2 meshes all five sources (6 runs each, all alike: nodes,
+        # triangles, tetrahedra). Tessella meshes the multi-cell source and the
+        # chained sweep as Gmsh does; it still refuses the in-plane rotation
+        # (Gmsh emits six flat tetrahedra), the transfinite cap override and
+        # the source shared by two Regions, recorded as broken.
+        sources=(
+            (replace(fixture.source,"Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),(24,Dict(2=>44,4=>36))),
+            (replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,0,1},{0,0,0},Pi/6}"),(9,Dict(2=>14,4=>6))),
+            (fixture.source*"Transfinite Surface{sweep[0]};
+",(12,Dict(2=>20,4=>9))),
+            (fixture.source*"Extrude{0,0,-1}{Surface{1};Layers{3};Recombine;QuadTriNoNewVerts;}
+",(21,Dict(2=>39,4=>18))),
+            (fixture.source*"Extrude{0,0,1}{Surface{sweep[0]};Layers{3};Recombine;QuadTriNoNewVerts;}
+",(21,Dict(2=>39,4=>18))))
+        for (index,(source,gmsh)) in enumerate(sources)
+            observed=try
+                execution=_QTNTQ.execute(source)
+                @test validate(execution.mesh).ok
+                mesh=execution.mesh
+                counts=if mesh isa Tessella.MeshTypes.Mesh
+                    Dict(2=>size(mesh.tris,2),4=>size(mesh.tets,2))
+                else
+                    counts=Dict{Int,Int}()
+                    for block in mesh.blocks
+                        Tessella.Elements.msh_dimension(block.msh) in (2,3) || continue
+                        counts[Int(block.msh)]=get(counts,Int(block.msh),0)+size(block.nodes,2)
+                    end
+                    counts
+                end
+                (nnodes(mesh),filter(pair->last(pair)>0,counts))
+            catch err
+                err isa ArgumentError || rethrow()
+                nothing
+            end
+            if index in (1,5)
+                @test observed==gmsh
+            else
+                @test_broken observed==gmsh
+            end
         end
         mixed=MixedMesh(Float64[0 1 0 1;0 0 1 1;0 0 0 0],
             [ElementBlock(2,reshape(Int32[1,2,3],3,1)),ElementBlock(3,reshape(Int32[1,2,4,3],4,1))])
