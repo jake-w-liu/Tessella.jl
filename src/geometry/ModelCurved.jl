@@ -1081,7 +1081,10 @@ function _occ_vertex_reparam_on_face(m::GeoModel, surface_tag::Int,
                                      face_g, vtag::Int, which::Int,
                                      lc::Float64)
     if _model_nurbs_surface(face_g)
-        bound=get(face_g.vertex_uv,vtag,nothing)
+        # a converted plane keeps its plane record beside the patch and has
+        # no vertex table
+        table=hasproperty(face_g,:vertex_uv) ? face_g.vertex_uv : nothing
+        bound=table===nothing ? nothing : get(table,vtag,nothing)
         bound!==nothing && return bound
         project=_model_nurbs_surface_project(face_g,m.points[vtag])
         return project[1],project[2]
