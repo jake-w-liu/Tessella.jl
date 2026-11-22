@@ -473,8 +473,9 @@ end
 
 
 # Gmsh's TetGen/BR region pass (reconstruct, recover, carve, recoverdelaunay,
-# optimizemesh) on the native Delaunay kernel. Off until it reproduces Gmsh.
-const _MODEL_NATIVE_TETGEN_BR=Ref(false)
+# optimizemesh) on the native Delaunay kernel. The switch exists for
+# comparisons against the earlier fill; the pass is Gmsh's and is on.
+const _MODEL_NATIVE_TETGEN_BR=Ref(true)
 _model_native_tetgen_br_region(kernel,facets)=ModelNativeTetgenArena.BR.region(kernel,facets)
 
 # The pass on the kernel's own rows; `nothing` when the switch is off, when the
