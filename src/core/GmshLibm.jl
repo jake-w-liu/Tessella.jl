@@ -705,4 +705,81 @@ end
 @inline _gm87_sincos(x::Float64) =
     Sys.iswindows() ? _win_sincos(x) : _gm_sincos(x)
 
+# `sscanf("%lf")` / `fscanf("%lf")` as Gmsh 4.15.2's Windows build does it.
+# That build (MinGW-w64, ANSI stdio) converts the decimal to the 80-bit long
+# double and then rounds to double, so a decimal within half a long-double
+# ulp of a halfway point between two doubles rounds twice: "-0.529113" reads
+# as -0.5291129999999999. Measured with the Python wheel: the ASCII readers of
+# MSH 2/4, STL, MESH, UNV and VTK read that way; `.geo`, `.pos` and free-field
+# BDF numbers (atof/strtod) round correctly. Gmsh on Linux and macOS rounds
+# correctly everywhere, which is `parse(Float64, s)`.
+#
+# Only a decimal whose exact distance from the correctly rounded double lies
+# near half an ulp can differ; that is checked exactly in integers, and only
+# such a decimal (or one too long for the check) is re-read at 64-bit
+# precision.
+const _GM_SCANF_DOUBLE_ROUNDING = Sys.iswindows()
+
+_gm_scanf_double(s::AbstractString) = _gm_scanf_double(s, parse(Float64, s))
+
+# The same, given `x = parse(Float64, s)` already read.
+function _gm_scanf_double(s::AbstractString, x::Float64)
+    (_GM_SCANF_DOUBLE_ROUNDING && isfinite(x) && x != 0) || return x
+    _gm_scanf_near_halfway(strip(s), x) || return x
+    return Float64(setprecision(BigFloat, 64) do
+        parse(BigFloat, s)
+    end)
+end
+
+function _gm_scanf_near_halfway(s::AbstractString, x::Float64)
+    # The decimal is N * 10^-k.
+    N = Int128(0); ndig = 0; k = 0; point = false; i = firstindex(s)
+    i <= lastindex(s) && (s[i] == '-' || s[i] == '+') && (i = nextind(s, i))
+    while i <= lastindex(s)
+        c = s[i]
+        if '0' <= c <= '9'
+            if N != 0 || c != '0'
+                ndig += 1
+                ndig > 36 && return true
+                N = 10N + (c - '0')
+            end
+            point && (k += 1)
+        elseif c == '.' && !point
+            point = true
+        elseif c == 'e' || c == 'E'
+            e = tryparse(Int, SubString(s, nextind(s, i)))
+            e === nothing && return true
+            abs(e) > 400 && return true
+            k -= e
+            break
+        else
+            return false   # inf, nan, hex: no decimal rounding involved
+        end
+        i = nextind(s, i)
+    end
+    ax = abs(x)
+    issubnormal(ax) && return true
+    m = Int128(reinterpret(UInt64, ax) & 0x000fffffffffffff) | (Int128(1) << 52)
+    e = exponent(ax) - 52          # ax = m * 2^e, ulp(ax) = 2^e
+    e >= 0 && return true
+    shift = -e
+    # t = (decimal - ax) / ulp = R / P; near |t| = 1/2 the long double can
+    # land on the halfway point. Just below a power of two the lower
+    # neighbour is half an ulp away, so its halfway point is at t = -1/4.
+    if k >= 0
+        k > 21 && return true
+        P = Int128(10)^k
+        (ndigits(N; base=2) + shift > 126) && return true
+        R = (N << shift) - m * P
+    else
+        ndig - k > 37 && return true
+        V = N * Int128(10)^(-k)
+        (ndigits(V; base=2) + shift > 126) && return true
+        R = (V << shift) - m
+        P = Int128(1)
+    end
+    m == (Int128(1) << 52) && R < 0 && return true
+    return abs(2 * abs(R) - P) * 1024 < P
+end
+
 end # module GmshLibm

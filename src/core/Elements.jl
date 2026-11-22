@@ -24,6 +24,7 @@ import ..MeshTypes: validate, nnodes
 using ..Transform: _periodic_affine_input
 using SHA
 using Printf: @printf
+using ..GmshLibm: _gm_scanf_double
 
 export ElementSpec, MSH_CATALOG, msh_spec, msh_num_nodes, msh_dimension, msh_order,
        msh_family, msh_type, msh_properties
@@ -3659,7 +3660,7 @@ end
 
 function _msh_float(token::AbstractString,context::AbstractString)
     value = try
-        parse(Float64,token)
+        _gm_scanf_double(token)   # %lf as Gmsh's Windows build reads it
     catch err
         err isa InterruptException && rethrow()
         throw(ArgumentError("read_mixed_msh: invalid floating-point value in $context"))

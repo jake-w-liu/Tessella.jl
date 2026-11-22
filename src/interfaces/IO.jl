@@ -31,7 +31,7 @@ using ..Elements: MSH_PHYSICAL_NAME_MAX_BYTES, _copy_physical_names, MixedMesh,
 using ..Predicates: _two_diff_tail
 using ..GmshLibm: _gm87_sin, _gm87_cos, _gm_tan, _gm_asin, _gm_acos, _gm_atan,
                   _gm87_atan2, _gm_sinh, _gm_cosh, _gm_tanh, _gm87_exp, _gm87_log,
-                  _gm_log10, _gm87_pow
+                  _gm_log10, _gm87_pow, _gm_scanf_double
 using Printf: @printf, @sprintf, Format, format
 
 export read_msh, write_msh, MshFile
@@ -386,7 +386,7 @@ function _read_nodes_v2!(acc, io, limits::_MshReadLimits)
         tag = _io_mesh_uid(p[1],"v2 node")
         tag > 0 || throw(ArgumentError("IO: node tag must be positive (got $tag)"))
         haskey(acc.tag2idx,tag) && throw(ArgumentError("IO: duplicate node tag $tag"))
-        x=parse(Float64,p[2]); y=parse(Float64,p[3]); z=parse(Float64,p[4])
+        x=_gm_scanf_double(p[2]); y=_gm_scanf_double(p[3]); z=_gm_scanf_double(p[4])
         (isfinite(x)&&isfinite(y)&&isfinite(z)) || throw(ArgumentError("IO: node $tag has non-finite coordinates"))
         push!(acc.node_x, x); push!(acc.node_y, y); push!(acc.node_z, z)
         acc.tag2idx[tag] = length(acc.node_x)
@@ -438,7 +438,7 @@ function _read_parametric_nodes_v2!(acc, io, limits::_MshReadLimits)
         tag = _io_mesh_uid(p[1],"v2 parametric node")
         tag > 0 || throw(ArgumentError("IO: node tag must be positive (got $tag)"))
         haskey(acc.tag2idx,tag) && throw(ArgumentError("IO: duplicate node tag $tag"))
-        x=parse(Float64,p[2]); y=parse(Float64,p[3]); z=parse(Float64,p[4])
+        x=_gm_scanf_double(p[2]); y=_gm_scanf_double(p[3]); z=_gm_scanf_double(p[4])
         (isfinite(x)&&isfinite(y)&&isfinite(z)) || throw(ArgumentError(
             "IO: node $tag has non-finite coordinates"))
         edim = parse(Int, p[5]); etag = parse(Int, p[6])
@@ -451,7 +451,7 @@ function _read_parametric_nodes_v2!(acc, io, limits::_MshReadLimits)
         (extra == 0 || extra == edim) || throw(ArgumentError(
             "IO: v2 parametric node $tag carries $extra parameters; expected 0 or $edim"))
         params = extra == 0 ? nothing : begin
-            uv = parse.(Float64, @view p[7:end])
+            uv = _gm_scanf_double.(@view p[7:end])
             all(isfinite,uv) || throw(ArgumentError(
                 "IO: node $tag has non-finite parametric coordinates"))
             Vector{Float64}(uv)
@@ -653,11 +653,11 @@ function _read_nodes_v4!(acc, io, limits::_MshReadLimits)
             expected=3+(parametric==1 ? edim : 0)
             length(c)==expected ||
                 throw(ArgumentError("IO: v4 node coordinate record has $(length(c)) fields; expected $expected"))
-            x=parse(Float64,c[1]); y=parse(Float64,c[2]); z=parse(Float64,c[3])
+            x=_gm_scanf_double(c[1]); y=_gm_scanf_double(c[2]); z=_gm_scanf_double(c[3])
             (isfinite(x)&&isfinite(y)&&isfinite(z)) || throw(ArgumentError("IO: node $(tags[i]) has non-finite coordinates"))
             params = nothing
             if parametric==1
-                uv = parse.(Float64, @view c[4:expected])
+                uv = _gm_scanf_double.(@view c[4:expected])
                 all(isfinite,uv) ||
                     throw(ArgumentError("IO: node $(tags[i]) has non-finite parametric coordinates"))
                 params = Vector{Float64}(uv)
@@ -1642,32 +1642,10 @@ function _stl_is_binary(path)
     end
 end
 
-# Gmsh's readSTL reads coordinates with `sscanf("%lf")`. The Gmsh 4.15.2
-# Windows build (MinGW-w64, ANSI stdio) converts through the 80-bit long
-# double and then rounds to double, so a decimal lying within half a long
-# double ulp of a halfway point between two doubles rounds twice: "-0.529113"
-# becomes -0.5291129999999999 (examples/simple_geo/sphere-surf.stl). Gmsh on
-# Linux and macOS parses correctly rounded, like `parse(Float64, s)`.
-const _STL_MINGW_DOUBLE_ROUNDING=Sys.iswindows()
-
-function _stl_scanf_double(s::AbstractString)
-    x=parse(Float64,s)
-    (_STL_MINGW_DOUBLE_ROUNDING && isfinite(x) && x!=0) || return x
-    # Plain decimals d.ddd with up to 15 digits: the exact residual of x
-    # against the decimal, in units of x's ulp, through an error-free
-    # product; only a residual near half an ulp can round twice.
-    m=match(r"^[-+]?(\d*)\.?(\d*)$",s)
-    if m!==nothing && length(m[1])+length(m[2])<=15 && length(m[2])<=22
-        N=Float64(parse(Int,isempty(m[1]*m[2]) ? "0" : m[1]*m[2]))
-        P=exp10(length(m[2]))
-        ax=abs(x);hi=ax*P;lo=fma(ax,P,-hi)
-        t=((N-hi)-lo)/P/eps(ax)
-        abs(abs(t)-0.5)<1/1024 || return x
-    end
-    return Float64(setprecision(BigFloat,64) do
-        parse(BigFloat,s)
-    end)
-end
+# Gmsh's readSTL reads coordinates with `sscanf("%lf")`, which the Windows
+# build rounds twice (`_gm_scanf_double`): "-0.529113" becomes
+# -0.5291129999999999 (examples/simple_geo/sphere-surf.stl).
+_stl_scanf_double(s::AbstractString)=_gm_scanf_double(s)
 
 function _read_stl_ascii(path,facet_limit::Int=Int(typemax(Int32)))
     open(path,"r") do stream
@@ -12261,6 +12239,7 @@ function _unv_float(token::AbstractString,caller::AbstractString,context::Abstra
     value=tryparse(Float64,token)
     value===nothing && throw(ArgumentError(
         "$caller: invalid floating-point value '$token' in $context"))
+    value=_gm_scanf_double(token,value)   # %lf as Gmsh's Windows build reads it
     isfinite(value) || throw(ArgumentError(
         "$caller: non-finite floating-point value in $context"))
     return value
@@ -12673,6 +12652,7 @@ function _medit_float(token,caller,context)
     value=tryparse(Float64,token)
     value===nothing && throw(ArgumentError(
         "$caller: invalid floating-point value '$token' in $context"))
+    value=_gm_scanf_double(token,value)   # %lf as Gmsh's Windows build reads it
     isfinite(value) || throw(ArgumentError(
         "$caller: non-finite floating-point value in $context"))
     return value
@@ -13047,9 +13027,12 @@ function _write_foreign_bridge(path,node_labels::Vector{Int64},
         end
         println(io,"\$Nodes")
         println(io,length(node_labels))
+        # Hexadecimal floats: the bridge must hand the reader the doubles the
+        # foreign reader produced, and a decimal would be read back the way
+        # Gmsh's Windows `%lf` reads it (`_gm_scanf_double`), rounding twice.
         @inbounds for i in eachindex(node_labels)
-            println(io,node_labels[i]+node_offset," ",
-                repr(coords[3i-2])," ",repr(coords[3i-1])," ",repr(coords[3i]))
+            @printf(io,"%d %a %a %a\n",node_labels[i]+node_offset,
+                coords[3i-2],coords[3i-1],coords[3i])
         end
         println(io,"\$EndNodes")
         println(io,"\$Elements")
