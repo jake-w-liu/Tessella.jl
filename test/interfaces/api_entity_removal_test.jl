@@ -52,7 +52,7 @@ end
         # The retained boundary entities of the removed Volume still mesh, so
         # the rebuilt model produces its own deterministic topology.
         @test mesh_crc(_REMOVAL_API.mesh.generate(3)).sha==
-              "806de8398cf4483ea6ffe46abe19960a6876f5f06efccb358fe60f20a124ee74"
+              "c83a7dc94444ad9bc593d562b032ca7f6fe80954b389607efcc26ccdb4723191"
 
         _REMOVAL_API.finalize()
         _REMOVAL_API.initialize()

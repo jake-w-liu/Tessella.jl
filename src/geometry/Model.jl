@@ -1846,7 +1846,10 @@ end
     add_box!(model, x, y, z, dx, dy, dz; tag=0) -> tag
 
 Add an axis-aligned box volume from finite corner `(x,y,z)` and signed
-extents `(dx,dy,dz)`. Like Gmsh's OCC `addBox`, the two rounded Float64
+extents `(dx,dy,dz)`, built from built-in kernel entities: its Lines and Plane
+Surfaces are those of the equivalent `.geo` construction (Points, Lines, Curve
+Loops, Plane Surfaces, a Surface Loop and a Volume in the order below), which
+Gmsh 4.15.2 meshes to the same counts. Like Gmsh's OCC `addBox`, the two rounded Float64
 corners determine its minimum corner and positive spans; every span must
 exceed OpenCASCADE's geometric confusion tolerance `1e-7`. The box is a real boundary
 representation: it owns 8 corner Points, 12 edge Curves, 6 planar Surfaces and
@@ -1912,8 +1915,10 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
         for edge in ((p[2],p[1]),(p[1],p[3]),(p[4],p[3]),(p[2],p[4]),
                      (p[6],p[5]),(p[5],p[7]),(p[8],p[7]),(p[6],p[8]),
                      (p[2],p[6]),(p[1],p[5]),(p[4],p[8]),(p[3],p[7]))
+            # Built-in kernel Lines and Plane Surfaces, as the equivalent .geo
+            # construction makes them (Gmsh meshes that construction to the
+            # same nodes and cells).
             push!(created_curves,add_line!(m,edge...))
-            m.curve_geometry[last(created_curves)]=_model_box_edge_geometry(m,edge)
         end
         c=created_curves
         # Face loops, each oriented so its stored normal points along the
@@ -1929,8 +1934,6 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
             push!(created_loops,add_curve_loop!(m,signed_curves))
             push!(created_surfaces,
                   add_plane_surface!(m,[last(created_loops)]))
-            m.surface_geometry[last(created_surfaces)]=
-                _model_box_plane_geometry(m,last(created_surfaces),origin,d,face)
         end
         shell=add_surface_loop!(m,[-created_surfaces[1],created_surfaces[2],
                                    -created_surfaces[3],created_surfaces[4],

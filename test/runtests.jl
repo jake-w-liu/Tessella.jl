@@ -380,6 +380,7 @@ end
         "interfaces/api_merge_pinched_regions_test.jl",
         "interfaces/api_native_volume_uid_classification_test.jl",
         "geometry/model_metric_volume_functional_test.jl",
+        "interfaces/api_add_box_geo_construction_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

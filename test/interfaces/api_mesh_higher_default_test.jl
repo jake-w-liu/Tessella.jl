@@ -115,7 +115,7 @@ end
         _DSQ.model.add_point(0.75,0.75,0.75;tag=102)
         view=_DSQ.mesh.generate(3)
         @test view isa Mesh
-        @test mesh_crc(view).sha=="ec97caf92e736f8590fe61176430799f103bbe3804756c0577ab56c1d6f4a52e"
+        @test mesh_crc(view).sha=="0f2943547029739d8965e3d121f71b20f069d74d1eb61ab20d608ac41fc36476"
         @test mesh_crc(_DSQ.mesh.get())==mesh_crc(view)
         @test _DSQ.mesh.get_elements(0,101)[1]==Int32[15]
         @test _DSQ.mesh.get_elements(0,102)[1]==Int32[15]

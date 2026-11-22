@@ -9,7 +9,7 @@ const A=Tessella.API
 # * a straight OCC edge was graded by the generic curve kernel (numerical
 #   tangent, convex-combination inversion): its nodes sat up to 2e-12 off
 #   Gmsh's, which is enough to change the frontal mesh of both faces it bounds;
-# * the faces of a `Box` (the GEO OpenCASCADE `Box` and `model.add_box`) took a
+# * the faces of a `Box` (the GEO OpenCASCADE `Box` and `model.occ.add_box`) took a
 #   separate refinement arm (1616 triangles on the unit box at size 0.1 where
 #   Gmsh has 1470), and their boundary was listed one edge later than the wire
 #   OpenCASCADE builds, which changes the initial triangulation.
@@ -62,7 +62,7 @@ const A=Tessella.API
     end
 
     @testset "unit Box, size 0.25" begin
-        generate(()->A.model.add_box(0,0,0,1,1,1),0.25)
+        generate(()->(A.model.occ.add_box(0,0,0,1,1,1);A.model.occ.synchronize()),0.25)
         try
             tags,xyz,_=A.mesh.get_nodes()
             @test length(tags)==134

@@ -42,7 +42,7 @@ end
         base=_MESH_TRANSFORM_API.mesh.generate(3)
         base_crc=mesh_crc(base)
         @test base_crc.sha==
-              "ec97caf92e736f8590fe61176430799f103bbe3804756c0577ab56c1d6f4a52e"
+              "24516b60ce315c6c0404f81b1fbcf24013bff1a3cc6930ac1af92e638f7ce668"
         @test _MESH_TRANSFORM_API.model.get_bounding_box(-1,-1)==
               (0.0,0.0,0.0,1.0,1.0,1.0)
 
