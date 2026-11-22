@@ -182,7 +182,7 @@ end
     @test !haskey(m.cylinders,1)
     @test !_materialized_curved_consistent(m,1)
     # Curved shells cannot ride the planar explicit-shell mesher.
-    @test_throws ArgumentError mesh_model_volume(m,1)
+    @test_throws ErrorException mesh_model_volume(m,1)   # "rebuild the model"
 
     # Retagging migrates encodings and OCC state with the entity.
     m=GeoModel()
@@ -245,8 +245,9 @@ end
         @test _materialized_curved_consistent(model,v)
         @test ntets(mesh_model_volume(model,v))>0
     end
-    @test_throws ArgumentError mesh_model_volume(model,4)
-    @test_throws ArgumentError mesh_model_volume(model,5)
+    # tori mesh too, as in Gmsh 4.15.2
+    @test ntets(mesh_model_volume(model,4))>0
+    @test ntets(mesh_model_volume(model,5))>0
 end
 
 @testset ".geo two-point sphere forms" begin
@@ -316,7 +317,7 @@ end
     @test model_curvature(m,1,1,[0.3])≈[0.25]
     # No compact encoding — the torus cannot ride the analytic mesher and the
     # planar explicit-shell path rejects the Torus face.
-    @test_throws ArgumentError mesh_model_volume(m,1)
+    @test_throws ErrorException mesh_model_volume(m,1)   # "rebuild the model"
 
     # Partial torus: end vertex first, then start; trimmed equator arc, two
     # closed meridians, Torus face + two Plane caps; shell [t,+start,-end].
@@ -344,7 +345,7 @@ end
     # Exact face box: extremes sit on the end meridians and the equator arc.
     @test collect(model_bounding_box(m,2,1))≈[0.0,0.0,-1.0,4.0,4.0,1.0] atol=1e-15
     @test collect(model_bounding_box(m,3,1))≈[0.0,0.0,-1.0,4.0,4.0,1.0] atol=1e-15
-    @test_throws ArgumentError mesh_model_volume(m,1)
+    @test_throws ErrorException mesh_model_volume(m,1)   # "rebuild the model"
 
     # Validation mirrors gmsh: radii strictly positive, angle in (0,2π].
     m=GeoModel()

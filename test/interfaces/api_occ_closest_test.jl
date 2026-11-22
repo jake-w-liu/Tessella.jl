@@ -65,13 +65,13 @@ end
     # Empty input yields empty outputs.
     tags,dist,coord=occ.get_closest_entities(4.0,1.0,2.0,Tuple{Int,Int}[])
     @test isempty(tags) && isempty(dist) && isempty(coord)
-    # Ties order by distance first, then (dim, tag): a vertex and two
-    # box edges all at distance √2 from (3,0,1).
+    # Ordered by distance. With the box in OpenCASCADE's layout (Gmsh
+    # 4.15.2's values): the point, then Curves 1, 10 and 2.
     p=occ.add_point(2.0,0.0,0.0)
     tags,dist,_=occ.get_closest_entities(3.0,0.0,1.0,
         [(1,10),(0,p),(1,2),(1,1)],4)
-    @test tags[1]==(1,10) && dist[1]≈1.0
-    @test (0,p) in tags && all(≈(sqrt(2.0)),dist[2:4])
+    @test tags==[(0,p),(1,1),(1,10),(1,2)]
+    @test dist≈[sqrt(2.0),3.0,sqrt(10.0),sqrt(18.0)]
 end
 
 @testset "occ.get_closest_entities wire, shell and face dims" begin
