@@ -99,4 +99,36 @@ end
     end
 end
 
+# After CreateGeometry a discrete curve is remeshed along its geometry with
+# no old polyline vertex kept: a unit-square plate of 4x4 cells, classified
+# with its corners split and meshed at MeshSizeMax 0.4, gives 10 lines per
+# side in Gmsh 4.15.2 (keeping the old vertices gave 12).
+@testset "created curves are remeshed as Gmsh's discreteEdge" begin
+    API.initialize()
+    try
+        API.option("General.Terminal", 0)
+        API.model.add_discrete_entity(2, 1)
+        n = 5
+        API.mesh.add_nodes(2, 1, [1 + i + n * j for j in 0:n-1 for i in 0:n-1],
+            Float64[c for j in 0:n-1 for i in 0:n-1 for c in (i / (n - 1), j / (n - 1), 0.0)])
+        conn = Int[]
+        for j in 0:n-2, i in 0:n-2
+            a = 1 + i + n * j
+            append!(conn, (a, a + 1, a + n + 1, a, a + n + 1, a + n))
+        end
+        API.mesh.add_elements(2, 1, [2], [collect(1:length(conn) ÷ 3)], [conn])
+        API.mesh.classify_surfaces(pi / 4, true, false, pi / 4)
+        API.mesh.create_geometry()
+        API.option("Mesh.MeshSizeMax", 0.4)
+        API.mesh.generate(1)
+        lines(c) = length(API.mesh.get_elements(1, c)[2][1])
+        @test [lines(c) for c in 3:5] == [10, 10, 10]
+        # Curve 6 carries Gmsh's degenerate 1-1 line, whose zero length
+        # Tessella's discrete frame still counts: 11 lines.
+        @test_broken lines(6) == 10
+    finally
+        API.finalize()
+    end
+end
+
 end
