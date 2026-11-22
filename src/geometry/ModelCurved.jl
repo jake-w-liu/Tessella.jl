@@ -1020,11 +1020,14 @@ end
 function _occ_face_uv_bounds(m::GeoModel,g)
     umin=vmin=Inf; umax=vmax=-Inf; found=false
     for (ct,e) in g.pcurves
-        rec=m.curve_geometry[ct]
+        # an untyped line (a Boolean scratch model's verbatim operand edge)
+        # carries no record: its range is the segment's own
+        rec=get(m.curve_geometry,ct,nothing)
+        t0,t1=rec===nothing ? Base.tail(_brep_edge_curve(m,ct)) : (rec.t0,rec.t1)
         for pc in (e.fwd,e.rev)
             pc===nothing && continue
             found=true
-            lo,hi=_occ_pcurve_fillbndbox(pc,rec.t0,rec.t1)
+            lo,hi=_occ_pcurve_fillbndbox(pc,t0,t1)
             umin=min(umin,lo[1]); vmin=min(vmin,lo[2])
             umax=max(umax,hi[1]); vmax=max(vmax,hi[2])
         end

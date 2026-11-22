@@ -7089,6 +7089,7 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             isempty(extras[fidx]) || (touched[i]=true)
             regions,arcs,cycles=_brep_face_regions(
                 S,f,i,es,secs_pf[i][fidx],extras[fidx],tol,caller)
+            regions=_brep_regions_from_first_vertex(S,f,regions,arcs,cycles)
             cofaces=get(coinc_by_face[i],fidx,Tuple{Int,Int}[])
             for region in regions
                 uv=_brep_region_sample(arcs,cycles,region,tol,caller)
@@ -7132,8 +7133,23 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
                     # the lowest-indexed coincident copy carries the wall —
                     # the same computation on that operand's own face emits
                     # the identical uses, so non-owners emit nothing
-                    if minimum(vcat(i,same_p,opp_p))!=i
-                        touched[i]=true;continue
+                    owner=minimum(vcat(i,same_p,opp_p))
+                    if owner!=i
+                        touched[i]=true
+                        # the owner's piece of this wall stands in for
+                        # operand i's face here when i's image is ordered
+                        for (fo,ks) in enumerate(kept)
+                            get(ks,:oi,0)==owner || continue
+                            ks.sg.occ===:plane || continue
+                            _brep_planes_coincident(ks.sg,f.sg) || continue
+                            uvo=_brep_surface_uv(ks.sg,P)
+                            _occ_spec_in_uv(ks,uvo[1],uvo[2],tol) || continue
+                            also=vcat(get(ks,:also,Tuple{Int,Float64}[]),
+                                      [(i,length(kept)+0.5)])
+                            kept[fo]=merge(ks,(also=also,))
+                            break
+                        end
+                        continue
                     end
                     if !isempty(opp_p) &&
                             (op===:union || op===:intersection)
@@ -7213,6 +7229,43 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
     op===:intersection &&
         (kept=_brep_unify_union(kept,tol,caller;same_uses=true))
     return kept,touched
+end
+
+# For each (piece, operand): the first kept-face position of that operand's
+# own faces (or coincident stand-ins) on the piece's boundary.
+function _brep_piece_first_own(pieces,kept)
+    own=Dict{Tuple{Any,Int},Float64}()
+    for p in pieces, cf in p.comps, fi in cf
+        for (oi,pos) in vcat([(get(kept[fi],:oi,0),Float64(fi))],
+                             get(kept[fi],:also,Tuple{Int,Float64}[]))
+            oi==0 && continue
+            k=(p,oi)
+            own[k]=min(get(own,k,Inf),pos)
+        end
+    end
+    return own
+end
+
+# The pieces of a split face in OpenCASCADE's order: the piece at the first
+# vertex of the face's first wire comes first. Gmsh 4.15.2 lists a box
+# fragmented by a sphere over its corner as box∩sphere, then the rest; a
+# pyramid whose base is pierced by a cylinder as the pyramid's outer part
+# first.
+function _brep_regions_from_first_vertex(S,f,regions,arcs,cycles)
+    length(regions)<2 && return regions
+    isempty(f.wires) || isempty(f.wires[1]) && return regions
+    eidx,sgn,_=f.wires[1][1]
+    e=S.edges[eidx]
+    P0=_brep_vertex_eval(e.curve,sgn>0 ? e.t0 : e.t1)
+    scale=max(1.0,abs(P0[1]),abs(P0[2]),abs(P0[3]))
+    at(r)=any(c->any(a->begin
+            ar=arcs[a[1]]
+            _b3dist(_brep_vertex_eval(ar.crv,ar.vt0),P0)<=1e-9*scale ||
+                _b3dist(_brep_vertex_eval(ar.crv,ar.vt1),P0)<=1e-9*scale
+        end,cycles[c]),r)
+    k=findfirst(at,regions)
+    (k===nothing || k==1) && return regions
+    return vcat([regions[k]],regions[1:k-1],regions[k+1:end])
 end
 
 # Operands whose distinct vertices coincide (two boxes touching at a corner)
@@ -7739,12 +7792,17 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         end
     end
     # result order: fuse follows first-appearance (operand) order; the cell
-    # ops order by membership — lowest member index, then mask value —
-    # matching OCC's traversal of the GF decomposition
+    # ops by their lowest member, then by where that member's faces first
+    # meet the piece (OpenCASCADE builds an operand's split solids from its
+    # faces in order). Gmsh 4.15.2 numbers a box fragmented by a sphere at
+    # its corner: box∩sphere, then the rest of the box.
+    
     if op===:union
         sort!(pieces,by=p->p.order)
     else
-        sort!(pieces,by=p->(trailing_zeros(p.srcs),p.srcs,p.order))
+        own=_brep_piece_first_own(pieces,kept)
+        sort!(pieces,by=p->(trailing_zeros(p.srcs),
+            get(own,(p,trailing_zeros(p.srcs)+1),Inf),p.order))
     end
     # the image indices were computed pre-sort — rebuild them
     image=[Int[] for _ in 1:nops]
@@ -7752,6 +7810,17 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         s=p.srcs
         for i in 1:nops
             (s&_brep_bit(i))!=0 && push!(image[i],pi)
+        end
+    end
+    let
+        # an operand's image lists its pieces as its own faces meet them, in
+        # face order (OpenCASCADE's split solids of that operand)
+        first_own=Dict{Tuple{Int,Int},Float64}()
+        for ((p,oi),pos) in _brep_piece_first_own(pieces,kept)
+            first_own[(findfirst(q->q===p,pieces),oi)]=pos
+        end
+        for i in 1:nops
+            sort!(image[i],by=pi->(get(first_own,(pi,i),Inf),pi))
         end
     end
     emit=falses(length(kept))

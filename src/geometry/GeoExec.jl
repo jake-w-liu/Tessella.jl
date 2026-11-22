@@ -1954,6 +1954,18 @@ function _geo_boolean_operands(m::GeoModel,groups::Vector{String},
     return (objects=objects,tools=tools)
 end
 
+# Whether every listed volume is bounded by OpenCASCADE-typed faces only,
+# so that the kernel can take it as an operand.
+function _geo_occ_typed_volumes(m::GeoModel,entities)
+    for (_,t) in entities
+        haskey(m.volumes,t) || return false
+        for sh in m.volumes[t], s in get(m.surface_loops,abs(sh),Int[])
+            hasproperty(get(m.surface_geometry,abs(s),(;)),:occ) || return false
+        end
+    end
+    return true
+end
+
 # Drop a kernel binding and those of its sub-shapes no other bound shape
 # owns, without recording a removal: the `.geo` entities stay live and are
 # bound afresh from the model when the kernel next needs them.
@@ -1971,9 +1983,13 @@ function _geo_occ_forget!(kernel,id)
     return nothing
 end
 
-# Apply the resolved operands: an all-volume operation runs the native
-# arrangement `boolean_volumes_multi!` (which keeps the lazy `m.booleans`
-# provenance records); any sub-volume operand goes through the OCC kernel —
+# Apply the resolved operands. Volumes bounded by OpenCASCADE faces, and
+# any sub-volume operand, go through the OCC kernel like the API's
+# `model.occ` Booleans, whose publication numbers the result as Gmsh does
+# (compsolid2, transform and t18 get Gmsh's tags). Volumes with untyped
+# `.geo` Plane Surfaces, which the kernel cannot take, run the native
+# arrangement `boolean_volumes_multi!` (keeping the lazy `m.booleans`
+# provenance records). The kernel route is `OCC_Internals::booleanOperator` —
 # `OCC_Internals::booleanOperator` — with entities bound into `m.occ_kernel`
 # first and the outcome synchronized back, the same routing the
 # `model.occ.fuse/cut/intersect/fragment` API takes. Operand tags that
@@ -1987,7 +2003,9 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
                              allocator_state,caller::AbstractString)
     obj=objects.dimtags;tool=tools.dimtags
     isempty(obj) && return NTuple{2,Int}[]
-    if all(e->e[1]==3,obj) && all(e->e[1]==3,tool)
+    if all(e->e[1]==3,obj) && all(e->e[1]==3,tool) &&
+            !Base.inferencebarrier(_geo_occ_typed_volumes)(m,
+                Iterators.flatten((obj,tool)))
         # an operand the kernel already holds (a transformed Box goes
         # through it) would otherwise keep answering with its old shape
         # after the native arrangement rebuilt the volume: a later

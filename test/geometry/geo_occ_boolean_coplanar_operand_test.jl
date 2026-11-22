@@ -57,7 +57,7 @@ end
         @test Tuple(length(A.model.get_entities(d)) for d in 0:3)==(13,22,11,3)
         # Gmsh numbers the box's corner piece 1 and the rest of the box 2
         boxes=Dict(t=>A.model.get_bounding_box(3,t) for t in 1:2)
-        @test_broken boxes[1][4]<boxes[2][4]
+        @test boxes[1][4]<boxes[2][4]
         @test sort(A.model.get_entities_for_physical_group(3,1))==[1,2]
         small=argmin(t->boxes[t][4],[1,2])
         bb=boxes[small]

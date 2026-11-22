@@ -304,9 +304,9 @@ end
     occ.synchronize()
     out,map=occ.fragment([(3,1),(3,2)],[(3,3)])
     @test out==[(3,1),(3,2),(3,3)]
-    @test map[1]==[(3,1)] && map[3]==[(3,1),(3,3)]
-    # Gmsh lists the second operand's image as [(3,2),(3,1)]
-    @test_broken map[2]==[(3,2),(3,1)]
+    # an operand's image lists its pieces in the order its own faces meet
+    # them: Gmsh gives [(3,2),(3,1)] for the second, [(3,1),(3,3)] for the third
+    @test map==[[(3,1)],[(3,2),(3,1)],[(3,1),(3,3)]]
     @test Tuple(length(occ.get_entities(d)) for d in 0:3)==(22,36,18,3)
     @test [occ.get_mass(3,t) for t in 1:3]≈[0.125,0.875,0.875]
 end

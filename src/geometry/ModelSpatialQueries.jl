@@ -175,6 +175,23 @@ function _model_volume_bounds(
 
     shelled || throw(ArgumentError(
         "$caller: $entity has no native solid encoding"))
+    # trimmed OpenCASCADE sphere/torus/cylinder/cone faces: the solid's own
+    # trimmed faces bound it (a Boolean piece of a sphere is not its ball)
+    if any(g->g!==nothing && hasproperty(g,:occ) &&
+                   g.occ in (:sphere,:torus,:cylinder,:cone),
+                (get(m.surface_geometry,abs(surface),nothing)
+                 for shell in m.volumes[tag]
+                 for surface in m.surface_loops[shell])) &&
+            !any(hasproperty(get(m.surface_geometry,abs(surface),nothing),:natural_bounds)
+                 for shell in m.volumes[tag] for surface in m.surface_loops[shell])
+        b=try
+            _brep_shell_bounds(m,tag,caller)
+        catch err
+            err isa ArgumentError || rethrow()
+            nothing
+        end
+        b===nothing || return _model_bounds_checked(b,caller,entity)
+    end
     # Gmsh's GRegion::bounds is the union of its faces' boxes; a discrete
     # face (a merged STL) is boxed by its mesh and may have no curves at all.
     if any(hasproperty(get(m.surface_geometry,abs(surface),nothing),:natural_bounds) ||

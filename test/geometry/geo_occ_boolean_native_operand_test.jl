@@ -71,7 +71,10 @@ end
         @test Tuple(length(A.model.get_entities(d)) for d in 0:3)==(21,40,24,4)
         vols=[mass(t) for t in 1:4]
         @test sort(vols)≈sort([1/3-0.104/3,0.104/3,0.076/3,0.02]) rtol=1e-12
-        # Gmsh orders the two rod pieces outside the pyramid top, bottom
+        # Gmsh orders the two rod pieces outside the pyramid top, bottom: the
+        # first edge of its Box's first face is -1, from (xmin,ymin,zmax);
+        # Tessella's Box stores that face as the chained cycle 4,3,-2,-1
+        # (OpenCASCADE: -1,-2,3,4), so its first vertex is (xmin,ymin,zmin)
         @test_broken vols≈[1/3-0.104/3,0.104/3,0.076/3,0.02]
     end
 end

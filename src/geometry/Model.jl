@@ -2341,7 +2341,7 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         caller::AbstractString="boolean_volumes_multi!",
         image_out::Union{Nothing,Vector{Vector{Int}}}=nothing,
         msg_out::Union{Nothing,AbstractVector{String}}=nothing,
-        snapshots::Bool=true)
+        snapshots::Bool=true,fresh_floor::Int=0)
     op in (:union,:intersection,:difference,:fragments) || throw(ArgumentError(
         "$caller: op must be :union, :intersection, :difference, or :fragments"))
     remove_object isa Bool && remove_tool isa Bool || throw(ArgumentError(
@@ -2533,6 +2533,9 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
             _bind_boolean_piece!(m,piece_tag[pi],op,tags,meshes,p,caller)
         end
         fresh=isempty(m.volumes) ? 0 : maximum(keys(m.volumes))
+        # the OCC bridge's scratch model numbers fresh pieces above every
+        # operand tag, so a fresh piece is never taken for a rebound operand
+        fresh=max(fresh,fresh_floor)
         out=Int[]
         for (pi,p) in enumerate(pieces)
             if p.pseudo!=0

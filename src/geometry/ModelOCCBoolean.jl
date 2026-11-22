@@ -146,7 +146,6 @@ end
 # all later snaps agree.
 function _model_occ_boolean_snap_vertex(pub::_ModelOCCBooleanPub,
                                         p::NTuple{3,Float64})
-    p=_model_occ_snap_coord.(p)
     atol=1e-11*max(1.0,abs(p[1]),abs(p[2]),abs(p[3]))
     # bound vertices are already committed registry geometry — a dusty
     # staged candidate must never win over them, or both coordinates end
@@ -603,7 +602,8 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     image=Vector{Int}[]
     out=boolean_volumes_multi!(sm,op,obj_tags,tool_tags;
         tag=explicit,remove_object=removeObject,remove_tool=removeTool,
-        caller=caller,image_out=image,msg_out=msg_out,snapshots=false)
+        caller=caller,image_out=image,msg_out=msg_out,snapshots=false,
+        fresh_floor=op===:union ? 0 : max(maximum(in_tags),explicit))
     # explicit-tag corner: the sole result is an unmodified operand kept in
     # place — upstream's `_multiBind` reports its own tag rather than the
     # requested one; the owning operand is the one mapping to itself
@@ -1875,14 +1875,22 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             emit[fi]=true
         end
     end
-    # a sheet spec emitted into a shell is a modified operand upstream —
-    # its result face is a fresh topological entity (Extent ≥ 1), so it
-    # must not take the verbatim/preserved path even when its domain
-    # survived the arrangement unchanged
+    # A sheet whose domain survived whole (one region over its own edges:
+    # a wall splitting a box) stays the same face in the result's shells,
+    # with its edges and vertices: Gmsh 4.15.2 keeps Surface 7 bounded by
+    # Curves 13-16 when two rectangles cut a box into slabs. A sheet that
+    # was split or trimmed is a fresh entity.
+    sheet_whole=Set{Int}()
     for (fi,spec) in enumerate(kept)
         emit[fi] || continue
         oi=get(spec,:oi,0)
-        oi>0 && !isvol[oi] && (touched[oi]=true)
+        (oi>0 && !isvol[oi]) || continue
+        if !touched[oi] && spec.stag==tags[oi] &&
+                count(s->get(s,:oi,0)==oi,kept)==1
+            push!(sheet_whole,fi)
+        else
+            touched[oi]=true
+        end
     end
     pseudo_surf=Dict{Int,Set{Int}}()
     pseudo_ctag=Dict{Int,Vector{Int}}()
@@ -1918,6 +1926,16 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
              ar.key[1]===:e && ar.key[2] in pset) || (ok=false;break)
         end
         ok || continue
+        reuse[fi]=true;emit[fi]=false
+        for w in spec.wires, ar in w
+            reuse_ctag[ar.key]=ar.key[2]
+        end
+    end
+    for fi in sheet_whole
+        spec=kept[fi]
+        all(ar->ar.key isa Tuple && length(ar.key)>=2 && ar.key[1]===:e &&
+                ar.key[2] in reps[spec.oi].ctags,
+            (ar for w in spec.wires for ar in w)) || (touched[spec.oi]=true;continue)
         reuse[fi]=true;emit[fi]=false
         for w in spec.wires, ar in w
             reuse_ctag[ar.key]=ar.key[2]
