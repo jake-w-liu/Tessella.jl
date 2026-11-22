@@ -270,26 +270,42 @@ end
 # incidence before the fill can return ahead of constrained recovery.
 function _model_native_boundary_facets_match(surface,mesh)
     size(surface.tris,1)==3 && size(mesh.tets,1)==4 || return false
-    wanted=Set{NTuple{3,Int32}}()
-    for column in axes(surface.tris,2)
-        vertices=surface.tris[:,column]
-        allunique(vertices) && all(row->0<row<=size(surface.coords,2),vertices) || return false
-        face=Tuple(sort!(Int32.(vertices)))
-        face in wanted && return false
-        push!(wanted,face)
+    # Sorted tables, not hash sets: this runs on every fill that does not
+    # already carry the surface rows, a refused initial fill included.
+    ns=size(surface.coords,2);nf=size(surface.tris,2)
+    nf>0 || return false
+    wanted=Vector{NTuple{3,Int32}}(undef,nf)
+    @inbounds for column in 1:nf
+        a=surface.tris[1,column];b=surface.tris[2,column];c=surface.tris[3,column]
+        (a!=b && b!=c && a!=c && 0<a<=ns && 0<b<=ns && 0<c<=ns) || return false
+        wanted[column]=_sorted_face3(Int32(a),Int32(b),Int32(c))
     end
-    isempty(wanted) && return false
-    counts=Dict{NTuple{3,Int32},Int}()
-    for column in axes(mesh.tets,2)
-        vertices=mesh.tets[:,column]
-        allunique(vertices) && all(row->0<row<=size(mesh.coords,2),vertices) || return false
-        for missing in 1:4
-            face=Tuple(sort!(Int32[vertices[i] for i in 1:4 if i!=missing]))
-            counts[face]=get(counts,face,0)+1
+    sort!(wanted)
+    @inbounds for i in 2:nf
+        wanted[i]==wanted[i-1] && return false
+    end
+    nv=size(mesh.coords,2)
+    @inbounds for column in axes(mesh.tets,2)
+        a=mesh.tets[1,column];b=mesh.tets[2,column];c=mesh.tets[3,column];d=mesh.tets[4,column]
+        (a!=b && a!=c && a!=d && b!=c && b!=d && c!=d &&
+         0<a<=nv && 0<b<=nv && 0<c<=nv && 0<d<=nv) || return false
+    end
+    faces=_sorted_tet_faces(mesh.tets)
+    found=0;position=1;total=length(faces)
+    @inbounds while position<=total
+        next=position+1
+        while next<=total && faces[next]==faces[position]
+            next+=1
         end
+        run=next-position
+        run>2 && return false
+        if run==1
+            found+=1
+            (found<=nf && faces[position]==wanted[found]) || return false
+        end
+        position=next
     end
-    all(count->count in (1,2),values(counts)) || return false
-    return Set(face for (face,count) in counts if count==1)==wanted
+    return found==nf
 end
 
 function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;

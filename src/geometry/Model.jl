@@ -11451,6 +11451,9 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         end
     end
     sort!(unique!(line_tags))
+    # The native fill was validated in full (`_certify_surface_fill`) before it
+    # was returned; see `topology_certified` below.
+    filled=explicit_geometry!==nothing && !legacy_factory ? mesh : nothing
     protected_faces,protected_edges=_protected_cells!()
     empty!(protected_faces); empty!(protected_edges)
     if native_constraints!==nothing
@@ -11543,6 +11546,10 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     # place of the initial fill; re-bind the birth receipt so refinement and
     # the volume production below still observe a complete row/cell binding.
     _model_native_volume_rebind!(_native_initial_births,mesh)
+    # A fill that no recovery pass replaced keeps its full certificate; from
+    # here the complex changes only through cavity insertion and edge swaps,
+    # each of which certifies the face incidence of the cells it replaces.
+    topology_certified=mesh===filled && m.meshing.algorithm_3d in (1,3,9)
     # Boundary/embedded recovery precedes insertion in meshGRegion. The
     # Delaunay path now uses the actual normalized circumradius cavity
     # criterion; Algorithm3 retains this recovered initial complex.
@@ -11711,9 +11718,14 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
              native_constraints)
         mesh=_model_volume_combine3d!(m,t,mesh,native_constraints,effective,
             initial_geometry,_mesh_input,_native_initial_births,caller)
+        topology_certified=false
     end
     reversed=get(m.meshing.reverse,(3,t),false)
-    diag=validate(mesh)
+    # Every cell is still checked (finite, non-flat, positive, no duplicate);
+    # the vertex-link topology certificate is not proved a second time for a
+    # complex that carries it from its fill (a tenth of generate(3) on a box).
+    diag=topology_certified && mesh isa Mesh ? validate(mesh;require_tet_topology=false) :
+        validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
     _volume_cell_count(mesh)>0 || throw(ErrorException(
         "$caller: Volume[$t] produced no volume cells"))

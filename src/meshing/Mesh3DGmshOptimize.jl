@@ -34,14 +34,33 @@ const _GOPT_SWAP_TABLE=Dict{Int,Tuple{Vector{NTuple{3,Int}},Vector{Vector{Int}}}
     for (size,(triangles,triangulations)) in _GOPT_SWAP_PATTERNS)
 
 # `neighbors` is stored inline: a vector per cell was two more heap objects
-# for every tetrahedron of the mesh and for every cell a swap creates.
-mutable struct _GmshOptimizeTet
+# for every tetrahedron of the mesh and for every cell a swap creates. The
+# record is immutable, so the cell vector holds it inline instead of one heap
+# object per cell; the setters below replace a record in place.
+struct _GmshOptimizeTet
     vertices::NTuple{4,Int32}
     neighbors::NTuple{4,Int32}
     number::UInt64
     physical::Int32
     quality::Float64
     deleted::Bool
+end
+
+@inline function _gopt_set_neighbor!(cells,index,slot,value)
+    c=cells[index]
+    cells[index]=_GmshOptimizeTet(c.vertices,Base.setindex(c.neighbors,Int32(value),slot),
+        c.number,c.physical,c.quality,c.deleted)
+    return nothing
+end
+@inline function _gopt_set_quality!(cells,index,quality)
+    c=cells[index]
+    cells[index]=_GmshOptimizeTet(c.vertices,c.neighbors,c.number,c.physical,quality,c.deleted)
+    return nothing
+end
+@inline function _gopt_delete!(cells,index)
+    c=cells[index]
+    cells[index]=_GmshOptimizeTet(c.vertices,c.neighbors,c.number,c.physical,c.quality,true)
+    return nothing
 end
 
 mutable struct _GmshOptimizeState
@@ -168,9 +187,8 @@ function _gopt_connect!(state,indices)
             if previous===nothing
                 faces[key]=(Int32(index),face)
             elseif previous[1]!=index
-                first_owner=state.cells[previous[1]]
-                first_owner.neighbors=Base.setindex(first_owner.neighbors,Int32(index),previous[2])
-                cell.neighbors=Base.setindex(cell.neighbors,previous[1],face)
+                _gopt_set_neighbor!(state.cells,previous[1],previous[2],index)
+                _gopt_set_neighbor!(state.cells,index,face,previous[1])
             end
         end
     end
@@ -229,9 +247,8 @@ function _gopt_connect_sorted!(state,indices::AbstractUnitRange)
             while next<=last_ && rest[next]==rest[position]
                 other=who[next]
                 head_cell=head>>2;other_cell=other>>2
-                first_owner=state.cells[head_cell];later_owner=state.cells[other_cell]
-                first_owner.neighbors=Base.setindex(first_owner.neighbors,other_cell,Int(head&Int32(3))+1)
-                later_owner.neighbors=Base.setindex(later_owner.neighbors,head_cell,Int(other&Int32(3))+1)
+                _gopt_set_neighbor!(state.cells,head_cell,Int(head&Int32(3))+1,other_cell)
+                _gopt_set_neighbor!(state.cells,other_cell,Int(other&Int32(3))+1,head_cell)
                 next+=1
             end
             position=next
@@ -260,9 +277,8 @@ function _gopt_connect_merge_sorted!(state,indices::AbstractUnitRange)
         head=records[position]
         while next<=total && records[next][1]==head[1]
             other=records[next]
-            first_owner=state.cells[head[2]];later_owner=state.cells[other[2]]
-            first_owner.neighbors=Base.setindex(first_owner.neighbors,other[2],Int(head[3]))
-            later_owner.neighbors=Base.setindex(later_owner.neighbors,head[2],Int(other[3]))
+            _gopt_set_neighbor!(state.cells,head[2],Int(head[3]),other[2])
+            _gopt_set_neighbor!(state.cells,other[2],Int(other[3]),head[2])
             next+=1
         end
         position=next
@@ -503,9 +519,8 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
         push!(new_cells,first_cell);push!(new_cells,last_cell)
     end
     for index in cavity
-        cell=state.cells[index]
-        cell.deleted=true
-        _gopt_note_carriers!(state,cell.vertices,-1)
+        _gopt_delete!(state.cells,index)
+        _gopt_note_carriers!(state,state.cells[index].vertices,-1)
     end
     _gopt_connect!(state,outside)
     return true
@@ -568,7 +583,7 @@ function _gopt_smooth_vertex!(state,index,role)
         return false
     end
     for (position,index) in enumerate(cavity)
-        state.cells[index].quality=qualities[position]
+        _gopt_set_quality!(state.cells,index,qualities[position])
     end
     return true
 end
@@ -783,7 +798,7 @@ function _ng_smooth_vertex!(state,index,role)
         cell=state.cells[index]
         cell.deleted && continue
         quality,_=_gopt_quality(state,cell.vertices)
-        cell.quality=quality
+        _gopt_set_quality!(state.cells,index,quality)
     end
     return true
 end
