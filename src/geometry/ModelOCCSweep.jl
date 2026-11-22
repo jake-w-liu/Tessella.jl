@@ -125,21 +125,105 @@ function _model_occ_sweep_top_edge!(sw::_ModelOCCSweep,kernel,src_id,caller)
     haskey(sw.emap,src_id) && return sw.emap[src_id]
     source=kernel.shapes[src_id]
     g=source.geometry.geometry
-    g.occ===:line || throw(ArgumentError(
-        "$caller: extrusion of OCC curve kind $(g.occ) is not yet " *
-        "supported"))
     a_id,b_id=source.children
     a=_model_occ_sweep_vertex!(sw,kernel,a_id)
     b=_model_occ_sweep_vertex!(sw,kernel,b_id)
     id=_model_occ_sweep_id!(sw,kernel)
     tag=_model_occ_sweep_tag!(sw,kernel,1)
+    record=g.occ===:line ?
+        (occ=:line,origin=_occ3_add(g.origin,sw.d),dir=g.dir,
+         t0=g.t0,t1=g.t1) :
+        _model_occ_translated_curve_record(g,sw.d,caller)
     _model_occ_sweep_bind!(sw,1,tag,id,
-        _ModelOCCShape(1,(kind=:line,geometry=
-            (occ=:line,origin=_occ3_add(g.origin,sw.d),dir=g.dir,
-             t0=g.t0,t1=g.t1)),
+        _ModelOCCShape(1,(kind=source.geometry.kind,geometry=record),
             UInt64[a,b]))
     sw.emap[src_id]=id
     return id
+end
+
+# The record of a curve translated by `d`, same parametrization: conics move
+# their centre, NURBS-backed records their poles (with any analytic shadow).
+function _model_occ_translated_curve_record(g,d,caller)
+    if g.occ===:circle || g.occ===:ellipse
+        out=merge(g,(center=_occ3_add(g.center,d),))
+        hasproperty(g,:native_geometry) && (out=merge(out,(native_geometry=
+            _model_occ_translated_curve_record(g.native_geometry,d,caller),)))
+        return out
+    elseif g.occ===:line
+        return merge(g,(origin=_occ3_add(g.origin,d),))
+    elseif g.occ===:copied_curve && hasproperty(g,:curve)
+        t=_affine_translation(d,caller)
+        out=merge(g,(curve=_model_occ_transform_nurbs_curve(g.curve,t,caller),))
+        hasproperty(g,:center) && (out=merge(out,(center=_occ3_add(g.center,d),)))
+        hasproperty(g,:origin) && (out=merge(out,(origin=_occ3_add(g.origin,d),)))
+        return out
+    end
+    throw(ArgumentError(
+        "$caller: extrusion of OCC curve kind $(g.occ) is not yet supported"))
+end
+
+# The lateral face a curved profile edge sweeps along `sw.d`: the exact
+# degree-(p,1) tensor patch between the edge's NURBS form and its translated
+# copy (`BRepSweep_Translation` gives a surface of linear extrusion of the
+# same curve, which Gmsh's getType names "Unknown"). Wire: the edge (u
+# increasing), the swept edge at u = 1, the
+# translated copy reversed, the swept edge at u = 0 reversed; a closed edge
+# uses its one swept edge on both sides. The wall's outward direction is the
+# traversal tangent times the profile normal; the record's `reversed` flag
+# and the shell use carry the flip, as the loft's tensor laterals do.
+function _model_occ_extrude_curved_lateral!(sw::_ModelOCCSweep,kernel,edge_id,
+                                            la,lb,top,traversal_rev,hole,
+                                            outer_normal,caller)
+    g=kernel.shapes[edge_id].geometry.geometry
+    nc,um=_loft_edge_nc(g,false,caller)
+    nu=length(nc.controls)
+    ctrl=Matrix{NTuple{3,Float64}}(undef,nu,2)
+    wts=Matrix{Float64}(undef,nu,2)
+    for i in 1:nu
+        p=nc.controls[i]
+        ctrl[i,1]=p; ctrl[i,2]=_occ3_add(p,sw.d)
+        wts[i,1]=nc.weights[i]; wts[i,2]=nc.weights[i]
+    end
+    patch=_ModelNURBSSurface(:bspline,NURBS.NURBSSurface(nc.degree,1,
+        nc.knots,Float64[0.0,0.0,1.0,1.0],ctrl,wts))
+    tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
+    pc=Dict{Int,NamedTuple}()
+    pc[tag_of(edge_id)]=(fwd=_loft_umap_pcurve(um,0.0),rev=nothing)
+    pc[tag_of(top)]=(fwd=_loft_umap_pcurve(um,1.0),rev=nothing)
+    for (sid,u_side,reversed_use) in ((la,0.0,true),(lb,1.0,false))
+        rec=sw.shapes[sid].geometry.geometry
+        pcv=_loft_seam_pcurve(u_side,rec.t0,rec.t1,0.0,1.0)
+        ent=get(pc,tag_of(sid),(fwd=nothing,rev=nothing))
+        pc[tag_of(sid)]=reversed_use ? (fwd=ent.fwd,rev=pcv) :
+                                       (fwd=pcv,rev=ent.rev)
+    end
+    a_id,b_id=kernel.shapes[edge_id].children
+    ta_id,tb_id=sw.shapes[top].children
+    vuv=Dict{Int,NTuple{2,Float64}}()
+    for (vid,uv) in ((a_id,(0.0,0.0)),(b_id,(1.0,0.0)),
+                     (ta_id,(0.0,1.0)),(tb_id,(1.0,1.0)))
+        haskey(vuv,tag_of(vid)) || (vuv[tag_of(vid)]=uv)
+    end
+    _,du,dv=_occ_surface_d1((patch=patch,),0.5,0.5)
+    # traversal tangent at the middle; hole walls face into the hole
+    tangent=traversal_rev ? (.-du) : du
+    hole && (tangent=(.-tangent))
+    wall=_occ_cross(tangent,outer_normal)
+    reversed=_dot3(_occ_cross(du,dv),wall)<0
+    uses=Tuple{UInt64,Bool}[(edge_id,false),(lb,false),(top,true),(la,true)]
+    wire_id=_model_occ_sweep_id!(sw,kernel)
+    wire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+    _model_occ_sweep_bind!(sw,-1,wire_tag,wire_id,
+        _ModelOCCShape(-1,(uses=uses,),UInt64[u[1] for u in uses]))
+    face_id=_model_occ_sweep_id!(sw,kernel)
+    face_tag=_model_occ_sweep_tag!(sw,kernel,2)
+    _model_occ_sweep_bind!(sw,2,face_tag,face_id,
+        _ModelOCCShape(2,(kind=:tensor_bspline,geometry=(occ=:tensor_bspline,
+            patch=patch,pcurves=pc,vertex_uv=vuv,reversed=reversed,
+            native_type="Unknown")),
+            UInt64[wire_id]))
+    sw.smap[face_id]=edge_id
+    return face_id,face_tag,reversed
 end
 
 _model_occ_sweep_shape_of(sw::_ModelOCCSweep,kernel,id)=
@@ -315,6 +399,7 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
         "$caller: face boundary has no consistent normal"))
     outer_normal=_occ_dir(outer_normal)
     laterals=Tuple{UInt64,Int}[]
+    curved_rev=Dict{UInt64,Bool}()
     cap_uses=Vector{Tuple{UInt64,Bool}}[]
     for (windex,wire_id) in enumerate(source.children)
         wire=kernel.shapes[wire_id]
@@ -331,6 +416,23 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
             lb=_model_occ_sweep_lateral_edge!(sw,kernel,b_id)
             top=_model_occ_sweep_top_edge!(sw,kernel,edge_id,caller)
             push!(cap_wire,(top,rev))
+            # An edge two input faces share sweeps one lateral face (one
+            # compound, as upstream): the second solid uses it reversed.
+            shared=findfirst(==(edge_id),sw.smap)
+            if shared!==nothing
+                srec=sw.shapes[shared].geometry.geometry
+                first_rev=srec.occ===:tensor_bspline ? srec.reversed : false
+                push!(laterals,(shared,sw.tags[shared]))
+                curved_rev[shared]=!first_rev
+                continue
+            end
+            if kernel.shapes[edge_id].geometry.kind!==:line
+                lface_id,lface_tag,lrev=_model_occ_extrude_curved_lateral!(
+                    sw,kernel,edge_id,la,lb,top,rev,hole,outer_normal,caller)
+                push!(laterals,(lface_id,lface_tag))
+                curved_rev[lface_id]=lrev
+                continue
+            end
             # The quad traversal is built on the wire's traversal flag;
             # hole walls traverse opposite so their Newell lands on the
             # cavity's outward (into-material) side directly — `axis`
@@ -400,7 +502,8 @@ function _model_occ_extrude_planar!(sw::_ModelOCCSweep,kernel,src_id,caller)
         _ModelOCCShape(2,(kind=:plane,geometry=cap_geometry),
                        cap_wire_ids))
     # shell order as the prism's: laterals, the profile, the cap
-    shell_uses=Tuple{UInt64,Bool}[(fid,false) for (fid,_) in laterals]
+    shell_uses=Tuple{UInt64,Bool}[(fid,get(curved_rev,fid,false))
+                                  for (fid,_) in laterals]
     push!(shell_uses,(src_id,_dot3(src_normal,sw.d)>0))
     push!(shell_uses,(cap_id,false))
     shell_id=_model_occ_sweep_id!(sw,kernel)
@@ -595,12 +698,12 @@ function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
                     end
                 end
             end
+            abs(_dot3(g.geometry.axis,d))>
+                _OCC_CONFUSION*_occ_modulus(d) || throw(
+                ArgumentError(
+                "$caller: extrusion direction is coplanar with " *
+                "the surface"))
             if all_lines
-                abs(_dot3(g.geometry.axis,d))>
-                    _OCC_CONFUSION*_occ_modulus(d) || throw(
-                    ArgumentError(
-                    "$caller: extrusion direction is coplanar with " *
-                    "the surface"))
                 :planar
             elseif edges==1
                 eid=only(kernel.shapes[only(
@@ -612,21 +715,14 @@ function _model_occ_extrude(m::GeoModel,dim_tags,dx,dy,dz;
                     eg.t1-eg.t0==_OCC_TWO_PI || throw(ArgumentError(
                         "$caller: extrusion of partial-circle " *
                         "profiles is not yet supported"))
+                    # an oblique sweep of a disk is the general prism
                     _occ_modulus(_occ_cross(d,eg.n))<
-                        _OCC_CONFUSION*_occ_modulus(d) || throw(
-                        ArgumentError(
-                        "$caller: extrusion of a disk must follow " *
-                        "its surface normal"))
-                    :disk
-                elseif eg.occ===:ellipse
-                    throw(ArgumentError(
-                        "$caller: extrusion of elliptical profiles " *
-                        "is not yet supported"))
+                        _OCC_CONFUSION*_occ_modulus(d) ? :disk : :planar
                 else
-                    :unsupported
+                    :planar
                 end
             else
-                :unsupported
+                :planar
             end
         else
             throw(ArgumentError(
@@ -741,12 +837,26 @@ function _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,
     source=kernel.shapes[src_id]
     g=source.geometry.geometry
     spline=_model_occ_revol_spline_profile(g)
-    g.occ===:line || spline || throw(ArgumentError(
+    conic=g.occ===:circle || g.occ===:ellipse
+    g.occ===:line || spline || conic || throw(ArgumentError(
         "$caller: revolve of OCC curve kind $(g.occ) is not yet " *
         "supported"))
     a_id,b_id=source.children
     a=_model_occ_revol_vertex!(sw,kernel,a_id,p,n,Ma,loca,spec)
     b=_model_occ_revol_vertex!(sw,kernel,b_id,p,n,Ma,loca,spec)
+    if conic
+        # the rotated conic keeps its parameter: centre and frame rotate
+        X=_occ_xform_dir(Ma,g.X); N=_occ_xform_dir(Ma,g.n)
+        rec=merge(g,(center=_occ_xform_pnt(Ma,loca,g.center),X=X,n=N))
+        hasproperty(g,:Y) && (rec=merge(rec,(Y=_occ_xform_dir(Ma,g.Y),)))
+        id=_model_occ_sweep_id!(sw,kernel)
+        tag=_model_occ_sweep_tag!(sw,kernel,1)
+        _model_occ_sweep_bind!(sw,1,tag,id,
+            _ModelOCCShape(1,(kind=source.geometry.kind,geometry=rec),
+                UInt64[a,b]))
+        sw.emap[src_id]=id
+        return id
+    end
     if spline
         # a rotation acts on a rational curve through its poles
         curve=g.curve.curve
@@ -1062,6 +1172,83 @@ function _model_occ_revol_spline!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     return face_id
 end
 
+# Surface of revolution of a conic (or other NURBS-convertible) profile edge
+# that is not itself a B-spline record: the exact tensor product of the
+# edge's rational form (u, on the normalized parameter the loft uses) and
+# each pole's rational circle (v, the ring's parameter, equal to the angle at
+# its knots). The profile edge and its rotated copy are u-traces through the
+# conic chart, the rims v-traces through the ring's. Wire, CCW in (u,v): the
+# profile, the end-vertex rim, the rotated copy reversed, the start-vertex
+# rim reversed; a full turn uses the profile on both v sides. Gmsh's getType
+# names the face "Surface of Revolution".
+function _model_occ_revol_curved!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
+    haskey(sw.fmap,src_id) && return sw.fmap[src_id]
+    source=kernel.shapes[src_id]
+    g=source.geometry.geometry
+    profile,um=_loft_edge_nc(g,false,caller)
+    a_id,b_id=source.children
+    full=a==_OCC_TWO_PI
+    vals,qs,ws,V,vrep=_occ_nurbs_conic_axis(0.0,a)
+    nu,nv=length(profile.controls),length(vals)
+    controls=Matrix{NTuple{3,Float64}}(undef,nu,nv)
+    W=Matrix{Float64}(undef,nu,nv)
+    for i in 1:nu
+        _,h,radial=_model_occ_revol_rh(profile.controls[i],p,n)
+        on_axis=_occ3_add(p,_occ3_scale(n,h))
+        side=_occ_cross(n,radial)
+        for j in 1:nv
+            sn,cs=_gm_sincos(vals[j])
+            controls[i,j]=ntuple(k->fma(qs[j]*cs,radial[k],
+                fma(qs[j]*sn,side[k],on_axis[k])),3)
+            W[i,j]=profile.weights[i]*ws[j]
+        end
+    end
+    patch=_ModelNURBSSurface(:bspline,NURBS.NURBSSurface(
+        profile.degree,2,copy(profile.knots),V,controls,W))
+    tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
+    pcurves=Dict{Int,NamedTuple}()
+    geometry=(occ=:tensor_bspline,patch=patch,pcurves=pcurves,
+              vertex_uv=Dict{Int,NTuple{2,Float64}}(),reversed=false,
+              native_type="Surface of Revolution")
+    rims=UInt64[]
+    for (vid,uside) in ((a_id,0.0),(b_id,1.0))
+        rho,_,_=_model_occ_revol_rh(kernel.shapes[vid].geometry.point,p,n)
+        if rho<=_OCC_CONFUSION
+            eid=_model_occ_revol_apex!(sw,kernel,vid,geometry,a,caller)
+            trace=(lin2d=((uside,0.0),(0.0,1.0)),)
+        else
+            eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
+            trace=(brep_conversion2d=((lin2d=((uside,0.0),(0.0,1.0)),),
+                                      nothing,(u=nothing,v=vrep)),)
+        end
+        pcurves[tag_of(eid)]=(fwd=trace,rev=trace)
+        push!(rims,eid)
+    end
+    rot_id=full ? src_id :
+        _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,caller)
+    at_start=_loft_umap_pcurve(um,0.0)
+    at_end=_loft_umap_pcurve(um,a)
+    if full
+        pcurves[tag_of(src_id)]=(fwd=at_start,rev=at_end)
+    else
+        pcurves[tag_of(src_id)]=(fwd=at_start,rev=at_start)
+        pcurves[tag_of(rot_id)]=(fwd=at_end,rev=at_end)
+    end
+    wire=Tuple{UInt64,Bool}[(src_id,false),(rims[2],false),(rot_id,true),
+                            (rims[1],true)]
+    wire_id=_model_occ_sweep_id!(sw,kernel)
+    wire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
+    _model_occ_sweep_bind!(sw,-1,wire_tag,wire_id,
+        _ModelOCCShape(-1,(uses=wire,),UInt64[u[1] for u in wire]))
+    face_id=_model_occ_sweep_id!(sw,kernel)
+    face_tag=_model_occ_sweep_tag!(sw,kernel,2)
+    _model_occ_sweep_bind!(sw,2,face_tag,face_id,
+        _ModelOCCShape(2,(kind=:tensor_bspline,geometry=geometry),
+                       UInt64[wire_id]))
+    sw.fmap[src_id]=face_id
+    return face_id
+end
+
 # Annulus (or disk) plane face swept by a radial profile edge at axial
 # coordinate h — two concentric circles for a full turn, one open
 # sector wire (outer arc, rotated radial leg, inner arc, source radial
@@ -1338,6 +1525,7 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     verts=Tuple{Float64,Float64}[]
     rot_wire=Tuple{UInt64,Bool}[]
     rhat=nothing
+    curved=false
     for (edge_id,rev) in wire.geometry.uses
         a_id,b_id=kernel.shapes[edge_id].children
         pa=kernel.shapes[a_id].geometry.point
@@ -1361,6 +1549,26 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
                                      caller)
         full || push!(rot_wire,(_model_occ_revol_top_edge!(
             sw,kernel,edge_id,p,n,Ma,loca,spec,caller),rev))
+        ekind=kernel.shapes[edge_id].geometry.kind
+        if ekind!==:line
+            # a curved profile edge: its tensor surface of revolution, the
+            # use flag from the swept normal at the middle of the edge
+            fid=_model_occ_revol_curved!(sw,kernel,edge_id,p,n,a,Ma,loca,
+                                         spec,caller)
+            rec=_model_occ_sweep_shape_of(sw,kernel,fid).geometry.geometry
+            pm,du,dv=_occ_surface_d1(rec,0.5,a/2)
+            # outward at the profile point: the in-plane outward of the
+            # edge's traversal, rotated with the sweep
+            _,pdu,_=_occ_surface_d1(rec,0.5,0.0)
+            o_edge=_occ_crossed(_occ_dir(rev ? _occ3_scale(pdu,-1.0) : pdu),
+                                face_axis)
+            # rotate o_edge by a/2 about the axis
+            half=_extrude_rotate_point(n,(0.0,0.0,0.0),a/2,o_edge)
+            push!(shell_uses,(fid,_dot3(_occ_cross(du,dv),half)<0))
+            curved=true
+            push!(laterals,fid)
+            continue
+        end
         if ra<=_OCC_CONFUSION && rb<=_OCC_CONFUSION
             continue  # on-axis profile edge sweeps nothing
         elseif dh<=_OCC_CONFUSION*len
@@ -1474,7 +1682,9 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     # the boundary isn't a compact primitive. Partial turns add the
     # sector bisector and its radial arm — the centroid rides the
     # u=a/2 meridian off axis.
-    if !haskey(solid_geometry,:primitive) &&
+    # (a curved profile's polygon moments are not its moments: the volume
+    # then integrates over the boundary like any other solid)
+    if !curved && !haskey(solid_geometry,:primitive) &&
             !haskey(solid_geometry,:sector)
         V,h_c,arm=_model_occ_revol_profile_moments(verts,a)
         V>_OCC_CONFUSION || throw(ArgumentError(
@@ -1588,7 +1798,7 @@ function _model_occ_revol_check_face(kernel,face_id,p,n,caller)
             "the revolution axis (spindle torus)"))
         return :disk
     end
-    all(k->k===:line,kinds) || throw(ArgumentError(
+    all(k->k in (:line,:circle,:ellipse),kinds) || throw(ArgumentError(
         "$caller: revolution of a face bounded by non-line curves " *
         "is not yet supported"))
     # The face plane must be an axial plane: its axis is perpendicular

@@ -264,6 +264,12 @@ function _model_occ_synchronize!(m::GeoModel)
                     throw(ArgumentError("$caller: Could not fix wire in surface $tag"))
                 end
                 loop=_alloc_curve_loop_tag(m,0,caller)
+                # The allocator skips the loops of derived (`Extrude`,
+                # `Duplicata`) built-in surfaces; overwriting one would
+                # hand that surface this wire's curves.
+                while haskey(m.loops,loop)
+                    loop+=1
+                end
                 # This loop is the typed GModel carrier of an explicit OCC wire
                 # shape. Its internal slot is not the OCC wire namespace tag.
                 m.loops[loop]=ordered

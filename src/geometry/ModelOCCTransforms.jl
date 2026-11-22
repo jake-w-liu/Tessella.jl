@@ -673,6 +673,25 @@ function _model_occ_copy!(m::GeoModel,dim_tags,caller::AbstractString)
         # again — `_multiBind` only pushes unbound (`!exists`) shapes.
         haskey(kernel.shape_tags,nid) && continue
         tag=_model_occ_next_tag(kernel,d,-1,caller)
+        # `BRepBuilderAPI_Copy` keeps the shape's structure, so `_bind`'s
+        # walk meets the copied sub-shapes in the order it met the
+        # originals: each dimension's copies take the next tags in the
+        # order of their originals' tags.
+        counters=copy(kernel.maxima)
+        order=Tuple{Int,Int,UInt64}[]
+        for cid in _model_occ_closure(kernel,UInt64[id])
+            cid==id && continue
+            haskey(oldtags,cid) || continue
+            haskey(kernel.shape_tags,remap[cid]) && continue
+            haskey(ctx.newtags,remap[cid]) && continue
+            push!(order,(kernel.shapes[cid].dimension,oldtags[cid],remap[cid]))
+        end
+        sort!(order)
+        for (cd,_,cnid) in order
+            cd>=0 || continue
+            counters[cd+3]+=1
+            ctx.newtags[cnid]=counters[cd+3]
+        end
         _model_occ_bind_tree!(kernel,newshapes,nid,d,tag,ctx)
         push!(out,(d,tag))
     end

@@ -12,6 +12,10 @@ function _model_entity_type_name(m::GeoModel,dimension::Int,tag::Int)
     end
     if dimension==2
         geometry=get(m.surface_geometry,tag,nothing)
+        # an exact NURBS stand-in for an OCC surface kind without a native
+        # record (a swept surface) reports the kind Gmsh names
+        geometry isa NamedTuple && hasproperty(geometry,:native_type) &&
+            return geometry.native_type
         _model_nurbs_surface(geometry) && return geometry.patch.family===:bezier ?
             "Bezier surface" : "BSpline surface"
         return _surface_type_name(_surface_type(m,tag))
