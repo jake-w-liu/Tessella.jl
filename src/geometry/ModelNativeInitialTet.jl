@@ -398,7 +398,8 @@ function _model_volume_geometry_production(mesh,births,caller)
 end
 
 function _model_native_initial_delaunay_fill(surface::Mesh,order,options,caller;
-                                             births=nothing,kernel_output=nothing)
+                                             births=nothing,kernel_output=nothing,
+                                             build_mesh::Bool=true)
     length(order)==nnodes(surface) && sort(collect(order))==collect(1:nnodes(surface)) ||
         throw(ArgumentError("$caller: native initial boundary order is not a complete row permutation"))
     points=NTuple{3,Float64}[_model_mesh_coordinate(surface,row) for row in order]
@@ -419,6 +420,13 @@ function _model_native_initial_delaunay_fill(surface::Mesh,order,options,caller;
         births.element_high_water=Base.checked_add(births.element_high_water,temporary)
     end
     kernel_output===nothing || (kernel_output[]=kernel)
+    build_mesh || return nothing
+    return _model_native_kernel_mesh(surface,order,cells)
+end
+
+# The kernel's real cells as a Mesh on the surface rows, each cell oriented
+# positively. Only needed when the TetGen pass refuses the Region.
+function _model_native_kernel_mesh(surface::Mesh,order,cells::AbstractMatrix)
     mapped=Matrix{Int32}(undef,4,size(cells,2))
     for column in axes(cells,2)
         vertices=ntuple(slot->Int32(order[cells[slot,column]]),4)

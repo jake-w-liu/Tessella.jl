@@ -341,7 +341,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
     if node_order!==nothing
         native_kernel=Ref{ModelNativeInitialTet.Kernel}()
         mesh=_model_native_initial_delaunay_fill(initial_surface,node_order,options,caller;
-            births,kernel_output=native_kernel)
+            births,kernel_output=native_kernel,build_mesh=!_MODEL_NATIVE_TETGEN_BR[])
         br=_model_native_tetgen_br_fill(initial_surface,node_order,native_kernel[],caller;
             protected_facets,interior_points,tetgen_flip)
         if br!==nothing
@@ -353,6 +353,14 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
                 return br
             end
             push!(failures,reason)
+        end
+        if mesh===nothing
+            kernel=native_kernel[]
+            live=[cell.vertices for cell in kernel.cells if cell.vertices[1]!=0 &&
+                  all(v->v<=kernel.count,cell.vertices)]
+            cells=Matrix{Int32}(undef,4,length(live))
+            for (column,v) in enumerate(live),k in 1:4;cells[k,column]=v[k];end
+            mesh=_model_native_kernel_mesh(initial_surface,node_order,cells)
         end
         valid,reason=certify(mesh)
         if valid

@@ -10,7 +10,7 @@ function _emptytg(points,ninput,seed,epsilon)
         Int[],Int32[],Int[],Int[],Int32[],0,0,0,ShellPool(),ShellPool(),UInt32(seed),
         false,false,false,1,-1,-1,epsilon,0.0,0.0,0.0,
         Tri[],BadFace[],Tri[],Tri[],Tri[],Sh[],Sh[],Sh[],Sh[],Tri[],Sh[],Sh[],Int32[],Int32[],
-        Vector{Tri}[],0,Vector{Tri}(undef,3))
+        Vector{Tri}[],0,Vector{Tri}(undef,3),Vector{Tri}[])
     sizehint!(m.nb,32n);sizehint!(m.tv,32n);sizehint!(m.tseg,48n);sizehint!(m.tsub,32n)
     sizehint!(m.tmark,8n)
     for p in 1:n;setpointtype!(m,p,VOLVERTEX);end

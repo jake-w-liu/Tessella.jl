@@ -197,17 +197,26 @@ mutable struct TG
     # Scratch handles for one flip at a time (flipnm, flipnm_post and
     # removefacebyflips use theirs only around their own flip calls).
     F3::Vector{Tri}
+    # Edge-star arrays (TetGen's new triface[n]) for reuse; every star of one
+    # removeedgebyflips call returns here when that call ends.
+    pool::Vector{Vector{Tri}}
+end
+@inline function _acquire!(m,n)
+    isempty(m.pool) && return Vector{Tri}(undef,n)
+    v=pop!(m.pool)
+    resize!(v,n)
+    return v
 end
 
 # ---------------------------------------------------------------------------
 # Tetrahedron primitives.
 @inline _nbi(t)=4*(t.tet-1)+(t.ver&3)+1
 @inline _tvi(slot,pivot)=4*(slot-1)+pivot-3
-@inline tvert(m,slot,pivot)=m.tv[_tvi(slot,pivot)]
-@inline org(m,t)=m.tv[_tvi(t.tet,ORGPIVOT[t.ver+1])]
-@inline dest(m,t)=m.tv[_tvi(t.tet,DESTPIVOT[t.ver+1])]
-@inline apex(m,t)=m.tv[_tvi(t.tet,APEXPIVOT[t.ver+1])]
-@inline oppo(m,t)=m.tv[_tvi(t.tet,OPPOPIVOT[t.ver+1])]
+@inline tvert(m,slot,pivot)=@inbounds m.tv[_tvi(slot,pivot)]
+@inline org(m,t)=@inbounds m.tv[_tvi(t.tet,ORGPIVOT[t.ver+1])]
+@inline dest(m,t)=@inbounds m.tv[_tvi(t.tet,DESTPIVOT[t.ver+1])]
+@inline apex(m,t)=@inbounds m.tv[_tvi(t.tet,APEXPIVOT[t.ver+1])]
+@inline oppo(m,t)=@inbounds m.tv[_tvi(t.tet,OPPOPIVOT[t.ver+1])]
 @inline setorg!(m,t,p)=(m.tv[_tvi(t.tet,ORGPIVOT[t.ver+1])]=p)
 @inline setdest!(m,t,p)=(m.tv[_tvi(t.tet,DESTPIVOT[t.ver+1])]=p)
 @inline setapex!(m,t,p)=(m.tv[_tvi(t.tet,APEXPIVOT[t.ver+1])]=p)
@@ -215,28 +224,28 @@ end
 @inline function setvertices!(m,t,a,b,c,d)
     setorg!(m,t,a);setdest!(m,t,b);setapex!(m,t,c);setoppo!(m,t,d)
 end
-@inline enext(t)=Tri(t.tet,ENEXTTBL[t.ver+1])
-@inline eprev(t)=Tri(t.tet,EPREVTBL[t.ver+1])
-@inline esym(t)=Tri(t.tet,ESYMTBL[t.ver+1])
-@inline enextesym(t)=Tri(t.tet,ENEXTESYMTBL[t.ver+1])
-@inline eprevesym(t)=Tri(t.tet,EPREVESYMTBL[t.ver+1])
-@inline eorgoppo(t)=Tri(t.tet,EORGOPPOTBL[t.ver+1])
-@inline edestoppo(t)=Tri(t.tet,EDESTOPPOTBL[t.ver+1])
+@inline enext(t)=@inbounds Tri(t.tet,ENEXTTBL[t.ver+1])
+@inline eprev(t)=@inbounds Tri(t.tet,EPREVTBL[t.ver+1])
+@inline esym(t)=@inbounds Tri(t.tet,ESYMTBL[t.ver+1])
+@inline enextesym(t)=@inbounds Tri(t.tet,ENEXTESYMTBL[t.ver+1])
+@inline eprevesym(t)=@inbounds Tri(t.tet,EPREVESYMTBL[t.ver+1])
+@inline eorgoppo(t)=@inbounds Tri(t.tet,EORGOPPOTBL[t.ver+1])
+@inline edestoppo(t)=@inbounds Tri(t.tet,EDESTOPPOTBL[t.ver+1])
 @inline function bond!(m,t1,t2)
-    m.nb[_nbi(t1)]=(t2.tet<<4)|BONDTBL[t1.ver+1,t2.ver+1]
-    m.nb[_nbi(t2)]=(t1.tet<<4)|BONDTBL[t2.ver+1,t1.ver+1]
+    @inbounds m.nb[_nbi(t1)]=(t2.tet<<4)|BONDTBL[t1.ver+1,t2.ver+1]
+    @inbounds m.nb[_nbi(t2)]=(t1.tet<<4)|BONDTBL[t2.ver+1,t1.ver+1]
     return nothing
 end
 @inline dissolve!(m,t)=(m.nb[_nbi(t)]=0)
 @inline function fsym(m,t)
-    x=m.nb[_nbi(t)]
+    x=@inbounds m.nb[_nbi(t)]
     n=tdec(x)
-    return Tri(n.tet,FSYMTBL[t.ver+1,n.ver+1])
+    return @inbounds Tri(n.tet,FSYMTBL[t.ver+1,n.ver+1])
 end
 @inline function fnext(m,t)
-    x=m.nb[4*(t.tet-1)+FACEPIVOT1[t.ver+1]+1]
+    x=@inbounds m.nb[4*(t.tet-1)+FACEPIVOT1[t.ver+1]+1]
     n=tdec(x)
-    return Tri(n.tet,FACEPIVOT2[t.ver+1,n.ver+1])
+    return @inbounds Tri(n.tet,FACEPIVOT2[t.ver+1,n.ver+1])
 end
 # decode(t.tet[i], neightet) for a raw face index i in 0..3.
 @inline rawnb(m,slot,i)=tdec(m.nb[4*(slot-1)+i+1])
@@ -254,7 +263,7 @@ end
 @inline marktest2!(m,t)=(m.tmark[t.tet]|=Int32(4096))
 @inline unmarktest2!(m,t)=(m.tmark[t.tet]&=~Int32(4096))
 @inline marktest2ed(m,t)=(m.tmark[t.tet]&Int32(4096))!=0
-@inline elemcounter(m,t)=m.tmark[t.tet]>>16
+@inline elemcounter(m,t)=@inbounds m.tmark[t.tet]>>16
 @inline function setelemcounter!(m,t,value)
     c=m.tmark[t.tet]&Int32(65535)
     m.tmark[t.tet]=c|(Int32(value)<<16)
@@ -265,8 +274,8 @@ end
 # Subface/segment attachments of a tetrahedron.
 @inline _subi(t)=4*(t.tet-1)+(t.ver&3)+1
 @inline _segi(t)=6*(t.tet-1)+VER2EDGE[t.ver+1]+1
-@inline issubface(m,t)=m.tsub[_subi(t)]!=0
-@inline issubseg(m,t)=m.tseg[_segi(t)]!=0
+@inline issubface(m,t)=@inbounds m.tsub[_subi(t)]!=0
+@inline issubseg(m,t)=@inbounds m.tseg[_segi(t)]!=0
 @inline function tspivot(m,t)
     x=m.tsub[_subi(t)]
     x==0 && return SNULL

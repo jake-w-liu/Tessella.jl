@@ -541,7 +541,7 @@ function flipnm!(m,abtets,n,level,abedgepivot,fc)
                 if j>2 || (m.flipstarsize>0 && n1>m.flipstarsize)
                     i+=1;continue
                 end
-                tmpabtets=Vector{Tri}(undef,n1)
+                tmpabtets=_acquire!(m,n1)
                 j=0;spintet=flipedge
                 while true
                     tmpabtets[j+1]=spintet
@@ -592,6 +592,7 @@ function flipnm!(m,abtets,n,level,abedgepivot,fc)
                     for j in 1:nn
                         decreaseelemcounter!(m,tmpabtets[j])
                     end
+                    push!(m.pool,tmpabtets)
                 end
                 i+=1
             end
@@ -733,7 +734,7 @@ function removeedgebyflips!(m,flipedge,fc)
     end
     n<3 && throw(Unsupported("removeedgebyflips: an inverted edge star"))
     m.flipstarsize>0 && n>m.flipstarsize && return 0,flipedge
-    abtets=Vector{Tri}(undef,n)
+    abtets=_acquire!(m,n)
     spintet=flipedge;i=0
     while true
         abtets[i+1]=spintet;setelemcounter!(m,spintet,1);i+=1
@@ -748,7 +749,9 @@ function removeedgebyflips!(m,flipedge,fc)
     bak=fc.unflip;fc.unflip=false
     flipnm_post!(m,abtets,n,nn,0,fc)
     fc.unflip=bak
+    append!(m.pool,m.stars)
     empty!(m.stars)
+    push!(m.pool,abtets)
     return nn,flipedge
 end
 
