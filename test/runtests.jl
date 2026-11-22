@@ -401,6 +401,7 @@ end
         "interfaces/io_unv_mesh_test.jl",
         "interfaces/api_mixed_queries_test.jl",
         "geometry/geo_periodic_test.jl",
+        "fields/geo_extend_field_volume_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

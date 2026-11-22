@@ -6197,6 +6197,44 @@ mutable struct _ModelExtendField <: AbstractSizeField
     caller::String
     mesh1d::Any
     field::Union{Nothing,ExtendField}
+    surfaces::Vector{Int}
+    surface_field::Union{Nothing,ExtendField}
+end
+
+# Upstream `recomputeSurfaces` (first volume query): one sample per triangle
+# of each listed surface, its barycentre and the mean of its three edge
+# lengths, read from the surface product of the pass that meshes the volume
+# (`mesh_model_volume` leaves it in task-local storage), or else from the
+# model's mesh.
+function _model_extend_surface_samples!(f::_ModelExtendField)
+    f.surface_field===nothing || return f.surface_field
+    seeds=NTuple{3,Float64}[];sizes=Float64[]
+    input=get(task_local_storage(),:tessella_volume_mesh_input,nothing)
+    authority=input===nothing ? f.m.meshing.mesh_authority : input
+    mesh=authority===nothing || !hasproperty(authority,:mesh) ? nothing : authority.mesh
+    listed=Set(f.surfaces)
+    if mesh isa Elements.MixedMesh && mesh.entity_data!==nothing
+        data=mesh.entity_data;x=mesh.coords
+        for (bi,block) in enumerate(mesh.blocks)
+            block isa ElementBlock && Elements.msh_family(block.msh)===:tri || continue
+            owners=data.block_entities[bi]
+            for j in axes(block.nodes,2)
+                Int(owners[j]) in listed || continue
+                a=block.nodes[1,j];b=block.nodes[2,j];c=block.nodes[3,j]
+                push!(seeds,((x[1,a]+x[1,b]+x[1,c])/3,(x[2,a]+x[2,b]+x[2,c])/3,
+                             (x[3,a]+x[3,b]+x[3,c])/3))
+                e(p,q)=hypot(x[1,q]-x[1,p],x[2,q]-x[2,p],x[3,q]-x[3,p])
+                push!(sizes,(e(a,b)+e(b,c)+e(c,a))/3)
+            end
+        end
+    end
+    config=f.config
+    field=ExtendField(;
+        surface_seeds=isempty(seeds) ? nothing : seeds,surface_sizes=sizes,
+        dist_max=config.dist_max,size_max=config.size_max,power=config.power,
+        global_factor=f.global_factor)
+    isempty(seeds) || (f.surface_field=field)
+    return field
 end
 
 function _model_extend_samples!(f::_ModelExtendField)
@@ -6235,19 +6273,19 @@ field_value(::_ModelExtendField,x,y,z)=GMSH_MAX_SIZE
 field_value(::_ModelExtendField,x,y,z,::Nothing)=GMSH_MAX_SIZE
 function field_value(f::_ModelExtendField,x,y,z,entity::Tuple{T,U}) where
         {T<:Integer,U<:Integer}
-    Int(entity[1])==2 || return GMSH_MAX_SIZE
-    return field_value(_model_extend_samples!(f),x,y,z,entity)
+    dim=Int(entity[1])
+    dim==2 && !isempty(f.curves) && return field_value(_model_extend_samples!(f),x,y,z,entity)
+    dim==3 && !isempty(f.surfaces) &&
+        return field_value(_model_extend_surface_samples!(f),x,y,z,entity)
+    return GMSH_MAX_SIZE
 end
 
 function _extend_context_field(m::GeoModel,spec,config,params,
                                caller::AbstractString;mesh1d=nothing)
-    isempty(config.surfaces) || throw(ArgumentError(
-        "$caller: Field[$(spec.tag)] Extend SurfacesList (volume extension " *
-        "from surface meshes) is not supported"))
     factor=params.mesh_size_factor
     return _ModelExtendField(m,collect(Int,config.curves),config,
         (isfinite(factor) && factor>0) ? Float64(factor) : 1.0,
-        String(caller),mesh1d,nothing)
+        String(caller),mesh1d,nothing,collect(Int,config.surfaces),nothing)
 end
 
 function _model_periodic_surface_mesh(
@@ -11170,6 +11208,9 @@ function mesh_model_volume(m::GeoModel, tag::Integer;
     # constraints into refinement and recovery, changing the emitted mesh.
     protected_faces,protected_edges=_protected_cells!()
     empty!(protected_faces); empty!(protected_edges)
+    # The surface product of this pass, for size fields that read the
+    # boundary mesh of the volume being meshed (Extend's SurfacesList).
+    task_local_storage(:tessella_volume_mesh_input,_mesh_input)
     births=_return_volume_production ?
         _ModelNativeVolumeBirths(_mesh_node_high_water,_mesh_element_high_water) : nothing
     # One Region asks for the face table and the topology certificate of each
