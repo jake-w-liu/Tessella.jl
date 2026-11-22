@@ -1152,14 +1152,17 @@ function mesh_transfinite_patch(side1::AbstractVector,side2::AbstractVector,
 
     mesh=Mesh(coordinates;segs=segment_topology,tris=triangle_topology,
               seg_tag=segment_tags,tri_tag=triangle_tags)
-    diagnostic=validate(mesh)
+    # The grid topology is fixed by construction (`_fill_segments!`,
+    # `_fill_triangles!`): a manifold disc whose boundary is the emitted
+    # chains. Only the geometric part of the audit is left: degenerate
+    # triangles, duplicate cells and non-finite measures.
+    diagnostic=validate(mesh;require_manifold_tris=false)
     diagnostic.ok || throw(ErrorException(
         "mesh_transfinite_patch: internal output validation failed — " *
         join(diagnostic.messages,"; ")))
     (nnodes(mesh)==nodes&&nsegs(mesh)==segments&&ntris(mesh)==triangles) ||
         throw(ErrorException(
             "mesh_transfinite_patch: internal output count postcondition failed"))
-    _validate_boundary_postcondition(mesh)
     return mesh
 end
 

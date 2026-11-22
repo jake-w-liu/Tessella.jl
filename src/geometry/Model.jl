@@ -8579,20 +8579,35 @@ function _transfinite_volume_face_grid(m::GeoModel, volume::Int, surf::Int,
     composite===nothing || throw(ArgumentError(
         "$caller: transfinite Volume[$volume] face Surface[$surf] chains " *
         "several curves on one side, which volume faces do not support"))
+    L=length(curve_points[1])-1
+    H=length(curve_points[2])-1
+    # With the surface pass's products at hand the face is read from them,
+    # as Gmsh's MeshTransfiniteVolume reads each face's transfinite_vertices:
+    # every grid point is overwritten from the actual product below, and the
+    # triangles are the grid's own arrangement. Only a naked model call
+    # (no lower products) runs the patch kernel again.
     # `_transfinite_surface_sides` already welds every chain end to the
     # shared vertex coordinates — the volume kernel's bitwise shared-edge
     # certification relies on the same weld.
-    kernel=mesh_transfinite_patch(curve_points[1],curve_points[2],
-                                  curve_points[3],curve_points[4];
-                                  arrangement=spec.arrangement,
-                                  allow_warped=allow_warped,
-                                  project_plane=project_plane,
-                                  interpolate=sphere_center===nothing ?
-                                      nothing : _transfinite_sphere_eval(
-                                          m,surf,signed_curves,
-                                          sphere_center,caller))
-    L=length(curve_points[1])-1
-    H=length(curve_points[2])-1
+    kernel=if _mesh_input===nothing
+        mesh_transfinite_patch(curve_points[1],curve_points[2],
+                               curve_points[3],curve_points[4];
+                               arrangement=spec.arrangement,
+                               allow_warped=allow_warped,
+                               project_plane=project_plane,
+                               interpolate=sphere_center===nothing ?
+                                   nothing : _transfinite_sphere_eval(
+                                       m,surf,signed_curves,
+                                       sphere_center,caller))
+    else
+        length(curve_points[3])==L+1 && length(curve_points[4])==H+1 ||
+            throw(ArgumentError(
+                "$caller: Incompatible surface $surf in transfinite volume $volume"))
+        grid_tris=Matrix{Int32}(undef,3,2*L*H)
+        Transfinite._fill_triangles!(grid_tris,L+1,L,H,
+            Transfinite._arrangement(spec.arrangement))
+        (coords=Matrix{Float64}(undef,3,(L+1)*(H+1)),tris=grid_tris)
+    end
     found=0; slot=0
     for p in 1:8
         perm=_VOLUME_FACE_PERMS[p]
