@@ -930,13 +930,22 @@ Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};
         @test sort(_MESH_DATA_API.mesh.get_nodes(1,1)[2][1:3:end])==
               sort(curve_nodes[2][1:3:end])
         @test _MESH_DATA_API.mesh.get_nodes(3,1)[1]==Int[]
-        # A selective transform that inverts tets is rejected atomically.
+        # generate(3) after clearing the refined volume fills it again from
+        # the refined surfaces, as Gmsh 4.15.2 does. A selective transform
+        # moves the selected nodes even when it inverts tets: Gmsh's
+        # affineTransform checks nothing.
         _MESH_DATA_API.mesh.generate(3)
+        @test !isempty(_MESH_DATA_API.mesh.get_elements(3,1)[1])
         _MESH_DATA_API.mesh.refine()
         before=_MESH_DATA_API.mesh.get_nodes()
-        @test_throws ArgumentError _MESH_DATA_API.mesh.affine_transform(
+        _,surface_before,_=_MESH_DATA_API.mesh.get_nodes(2,1)
+        _MESH_DATA_API.mesh.affine_transform(
             [1.0 0 0 0; 0 1 0 0; 0 0 1 50.0; 0 0 0 1],[(2,1)])
-        @test _MESH_DATA_API.mesh.get_nodes()==before
+        _,surface_moved,_=_MESH_DATA_API.mesh.get_nodes(2,1)
+        @test surface_moved[3:3:end]==surface_before[3:3:end].+50.0
+        @test _MESH_DATA_API.mesh.get_nodes()[1]==before[1]
+        _MESH_DATA_API.mesh.affine_transform(
+            [1.0 0 0 0; 0 1 0 0; 0 0 1 -50.0; 0 0 0 1],[(2,1)])
         # A gentle selective transform moves only the surface-owned nodes.
         _,coords_before,_=_MESH_DATA_API.mesh.get_nodes(2,1)
         _MESH_DATA_API.mesh.affine_transform(
