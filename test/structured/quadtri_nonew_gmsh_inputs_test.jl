@@ -74,6 +74,26 @@ end
     # The same Source swept by two Regions.
     shared = patch * "Extrude{0,0,-1}{Surface{1};Layers{3};Recombine;QuadTriNoNewVerts;}\n"
     @test _counts(_run(shared).mesh) == (63, Dict(2 => 112, 3 => 4, 4 => 128, 7 => 8))
+    # Two square Regions sharing a transfinite wall: Gmsh meshes the wall
+    # transfinite, then QuadToTriLateralRemesh re-triangulates it with the
+    # Regions' diagonals; 20 runs gave the two results below.
+    squares = """
+    Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
+    Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
+    Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
+    Curve Loop(1)={1,2,3,4};Plane Surface(1)={1};
+    Point(5)={2,0,0,1};Point(6)={2,1,0,1};
+    Line(5)={2,5};Line(6)={5,6};Line(7)={6,3};
+    Curve Loop(2)={5,6,7,-2};Plane Surface(2)={2};
+    Transfinite Curve{:}=2;
+    Transfinite Surface{1};Transfinite Surface{2};
+    Recombine Surface{1,2};
+    left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
+    right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
+    Transfinite Surface{20};
+    """
+    @test _counts(_run(squares).mesh) in ((18, Dict(2 => 32, 3 => 2, 4 => 20, 7 => 2)),
+                                          (18, Dict(2 => 32, 3 => 2, 4 => 16, 7 => 4)))
     # A transfinite cap whose diagonals the Region cannot follow: Gmsh stops
     # ("Extruded hexahedron needs subdivision ..."), so does Tessella.
     @test_throws r"do not exactly cover the typed volume boundary" _run(

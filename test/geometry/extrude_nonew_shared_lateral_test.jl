@@ -531,8 +531,10 @@ end
             left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
             right[]=Extrude{0,0,1}{Surface{2};Layers{2};};
             """;mesh_dim=3)
-        # Boundary overrides attached to the shared Surface keep the
-        # constrained-boundary diagnostic before any shared admission.
+        # A transfinite shared wall: Gmsh meshes it transfinite, then
+        # QuadToTriLateralRemesh re-triangulates it with the Regions'
+        # diagonals (20 runs: 18 nodes, 32 tri, 2 quad, 20 tets + 2 pyramids
+        # 18 times, 16 tets + 4 pyramids twice). The planned wall stands.
         execution=_sl_model(_sl_squares()*"""
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
@@ -540,7 +542,7 @@ end
         s=_sl_shared_tag(execution)
         execution.model.meshing.transfinite_surfaces[s]=
             (arrangement=:left,corners=Int[])
-        @test_throws r"constrained-boundary planner" mesh_model_volume(execution.model,1)
+        @test validate(mesh_model_volume(execution.model,1)).ok
     end
 
     @testset "union-grid literal shared walls" begin

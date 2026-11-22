@@ -10218,10 +10218,12 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
         "$caller: max_periodic_passes must be in 1:64"))
     npasses=Int(max_periodic_passes)
     # `meshGFace::operator()` tries `MeshTransfiniteSurface` before
-    # `MeshExtrudedSurface`: a `Transfinite Surface` on a swept cap or lateral
-    # keeps its transfinite mesh, which the QuadTri region then has to follow.
+    # `MeshExtrudedSurface`: a `Transfinite Surface` on a swept cap keeps its
+    # transfinite mesh, which the QuadTri region then has to follow. A
+    # lateral is re-triangulated afterwards by QuadToTriLateralRemesh with
+    # the Region's diagonals, so the planned wall stands.
     planned=haskey(m.meshing.transfinite_surfaces,t) &&
-        haskey(m.meshing.extrude_sources,(2,t)) ? nothing :
+        get(m.meshing.extrude_sources,(2,t),(0,0))[1]==2 ? nothing :
         _extrude_nonew_surface_mesh(m,t,caller;scope=_extrude_scope,
             min_angle_deg=min_angle_deg,max_periodic_passes=npasses,
             size_field=size_field,_mesh_input=_mesh_input)

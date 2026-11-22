@@ -78,15 +78,6 @@ function _extrude_nonew_scope_contract(m::GeoModel,t::Int,
     curves=Set{Int}()
     points=Set{Int}()
     for surface in surfaces
-        # A transfinite cap is meshed first and the Region follows it (or
-        # stops, as Gmsh does, when it cannot). A transfinite lateral is not
-        # followed yet: Gmsh meshes it (two square Regions sharing a
-        # transfinite wall: 18 nodes, 32 tri, 2 quad, 20 or 16 tets).
-        surface==source || !haskey(m.meshing.transfinite_surfaces,surface) ||
-            get(m.meshing.extrude_sources,(2,surface),(0,0))[1]==2 ||
-            throw(ArgumentError(
-                "$caller: QuadTriNoNewVerts transfinite lateral overrides " *
-                "require the constrained-boundary planner"))
         # A mesh-level `Reverse Surface` flag only flips the published cell
         # windings — the scope mirrors a reversed Source through its Source
         # mesh (the surface pass already flipped it) and flips each emitted
@@ -445,6 +436,11 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
                 plan.sweep.cols,plan.catalog,plan.edges,caller) :
             _extrude_lateral_mesh(
                 working,tag,params,spec,link[2],caller;edges=plan.edges)
+        # A transfinite lateral needs no special case: Gmsh meshes it
+        # transfinite first, then QuadToTriLateralRemesh re-triangulates
+        # every lateral of a QuadTri Region with the Region's diagonals
+        # (two squares sharing a transfinite wall: Gmsh's wall in 18 of 20
+        # runs is this planner's wall, not the transfinite one).
     end
     face_capacity=quad_patch ? _extrude_nonew_quad_patch_face_capacity(plan.catalog) : quad_strip ?
         _extrude_nonew_quad_strip_face_capacity(plan.catalog) : three_quad_strip ?
