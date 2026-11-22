@@ -246,7 +246,20 @@ function _dim01_fully_discrete(m,entity)
     record=get(m.discrete,entity,nothing)
     record===nothing && return false
     entity[1]==1 && return !Model._model_discrete_curve_parametrized(record)
+    # Gmsh's GFace/GRegion::isFullyDiscrete asks for a DiscreteSurface or
+    # DiscreteVolume: a partition surface or volume is neither, so a new
+    # generate deletes its mesh (and cannot remesh it) while partition curves
+    # and points keep theirs.
+    _dim01_partition_entity(m,entity) && return false
     return true
+end
+
+# A partition entity of PartitionMesh / Merge: never meshed by generate
+# (partitionFace/partitionRegion inherit discreteFace::mesh, which returns
+# without a parametrization).
+function _dim01_partition_entity(m,entity)
+    receipt=get(m.meshing.imported_entities,entity,nothing)
+    return receipt!==nothing && startswith(receipt.kind,"Partition ")
 end
 
 function _dim01_physical(m,entity)

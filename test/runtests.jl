@@ -384,6 +384,7 @@ end
         "interfaces/api_nonew_p2_ownership_test.jl",
         "interfaces/api_occ_boolean_sheet_rim_test.jl",
         "interfaces/geo_discrete_stl_volume_test.jl",
+        "interfaces/api_partition_regenerate_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

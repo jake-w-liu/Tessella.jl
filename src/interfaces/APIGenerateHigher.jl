@@ -2068,7 +2068,7 @@ function _higher_surface_mesh_scan(m,entities,options,have,discarded,caller;
                 "by the analytic primitive Volume producer"))
             continue
         end
-        keep=_dim01_fully_discrete(m,(2,tag)) ||
+        keep=_dim01_fully_discrete(m,(2,tag)) || _dim01_partition_entity(m,(2,tag)) ||
              (options.mesh_only_visible && model_entity_visibility(m,2,tag)==0) ||
              (options.mesh_only_empty && owner in have)
         if keep
@@ -2092,7 +2092,7 @@ function _higher_volume_mesh_tags(m,entities,options,have)
         owner=(3,Int32(tag))
         visible=!(options.mesh_only_visible && model_entity_visibility(m,3,tag)==0)
         swept=Model._extrude_gate(m,3,tag)!==nothing
-        keep=_dim01_fully_discrete(m,(3,tag)) ||
+        keep=_dim01_fully_discrete(m,(3,tag)) || _dim01_partition_entity(m,(3,tag)) ||
              (!swept && (!visible || (options.mesh_only_empty && owner in have)))
         keep || push!(tags,tag)
     end
