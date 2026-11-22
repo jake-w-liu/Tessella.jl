@@ -14,6 +14,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Compiling the package image from scratch peaks at 7 to 12 GB (measured on
+# Julia 1.12 and 1.13 with four threads, 2026-11-22). A hosted Linux runner has
+# 16 GB and a macOS runner 7 GB: with several image threads the Linux runner
+# was lost mid-compile twice. One image thread lowers the peak on Julia 1.13
+# (about 3.3 GB locally) and the Linux jobs get swap for Julia 1.12, whose peak
+# does not depend on the thread count.
+env:
+  JULIA_IMAGE_THREADS: 1
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -28,6 +37,14 @@ jobs:
         with:
           version: ${{ matrix.julia }}
       - uses: julia-actions/cache@v2
+      - name: Add swap space for compiling the package image
+        if: runner.os == 'Linux'
+        run: |
+          sudo fallocate -l 12G /swapfile.tessella
+          sudo chmod 600 /swapfile.tessella
+          sudo mkswap /swapfile.tessella
+          sudo swapon /swapfile.tessella
+          free -g
       - name: Instantiate dependencies
         run: julia --project=. --startup-file=no -e 'using Pkg; Pkg.instantiate(;allow_autoprecomp=false)'
       - name: Run optimized numerical and public contract tests
@@ -131,6 +148,14 @@ jobs:
         with:
           version: '1.13'
       - uses: julia-actions/cache@v2
+      - name: Add swap space for compiling the package image
+        if: runner.os == 'Linux'
+        run: |
+          sudo fallocate -l 12G /swapfile.tessella
+          sudo chmod 600 /swapfile.tessella
+          sudo mkswap /swapfile.tessella
+          sudo swapon /swapfile.tessella
+          free -g
       - name: Install documentation dependencies
         run: julia --project=docs -e 'using Pkg; Pkg.instantiate()'
       - name: Build and publish documentation
