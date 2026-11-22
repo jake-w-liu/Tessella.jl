@@ -3,10 +3,20 @@ using ...Predicates: orient3,insphere
 include("ModelNativeHilbertIntervals.jl")
 
 const FACE=((1,2,3),(2,4,3),(3,4,1),(2,1,4))
-mutable struct Cell
+# Immutable, so `Kernel.cells` stores the records inline rather than one heap
+# object per cell; the setters replace a record in place.
+struct Cell
     vertices::NTuple{4,Int32}
     neighbors::NTuple{4,Int32}
     marked::Bool
+end
+@inline function set_neighbor!(k,t,s,value)
+    c=k.cells[t];k.cells[t]=Cell(c.vertices,Base.setindex(c.neighbors,Int32(value),s),c.marked)
+    return nothing
+end
+@inline function set_marked!(k,t,value)
+    c=k.cells[t];k.cells[t]=Cell(c.vertices,c.neighbors,value)
+    return nothing
 end
 mutable struct Kernel
     points::Vector{NTuple{3,Float64}}
@@ -87,8 +97,8 @@ function connect!(k,t,s,pending)
         push!(pending,(f,Int32(t),Int32(s)))
     else
         _,other,os=pending[index];deleteat!(pending,index)
-        k.cells[t].neighbors=Base.setindex(k.cells[t].neighbors,other,s)
-        k.cells[other].neighbors=Base.setindex(k.cells[other].neighbors,Int32(t),os)
+        set_neighbor!(k,t,s,other)
+        set_neighbor!(k,other,os,t)
     end
     return nothing
 end
@@ -150,7 +160,7 @@ function walk(k,t,node)
 end
 @inline function mark!(k,t)
     if !k.cells[t].marked
-        k.cells[t].marked=true;push!(k.touched,Int32(t))
+        set_marked!(k,t,true);push!(k.touched,Int32(t))
     end
     return nothing
 end
@@ -159,7 +169,7 @@ function cavity(k,start,node)
     cells=empty!(k.cavity_cells);boundary=empty!(k.cavity_boundary)
     stack=empty!(k.cavity_stack);push!(stack,(0,start,1))
     for t in k.touched
-        k.cells[t].marked=false
+        set_marked!(k,t,false)
     end
     empty!(k.touched)
     while !isempty(stack)
@@ -248,18 +258,18 @@ function run!(k)
             if t>length(k.cells)
                 push!(k.cells,Cell((0,0,0,0),(0,0,0,0),false))
             end
-            k.cells[t].vertices=(f...,node);k.cells[t].neighbors=(other,0,0,0)
+            k.cells[t]=Cell((f...,node),(other,0,0,0),k.cells[t].marked)
             if other!=0
                 os=findfirst(s->key(face(k,other,s))==key(f),1:4)
                 os===nothing && throw(ArgumentError("native initial tetrahedralization: inconsistent cavity incidence"))
-                k.cells[other].neighbors=Base.setindex(k.cells[other].neighbors,t,os)
+                set_neighbor!(k,other,os,t)
             end
             for s in 2:4
                 connect!(k,t,s,pending)
             end
         end
         for i in length(boundary)+1:length(cells)
-            k.cells[cells[i]].vertices=(0,0,0,0)
+            c=k.cells[cells[i]];k.cells[cells[i]]=Cell((0,0,0,0),c.neighbors,c.marked)
         end
     end
     output=NTuple{4,Int32}[c.vertices for c in k.cells if c.vertices[1]!=0 && all(i->i<=k.count,c.vertices)]
