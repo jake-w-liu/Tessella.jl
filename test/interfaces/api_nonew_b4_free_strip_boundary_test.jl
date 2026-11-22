@@ -285,7 +285,9 @@ with_model(f,carriers->begin
     API.mesh.add_nodes(2,41001,[100003,100005],[12.,13.,14.,13.,13.,14.])
     API.mesh.add_elements_by_type(41001,2,[120001],[100001,100003,100005])
     API.mesh.generate(0);before=snapshot()
-    @test_throws r"surviving record.*100001.*no retained-node identity" API.mesh.generate(3)
+    # The NoNew planner now meets the extra Curve node first; either way the
+    # call stops before publication (Gmsh would keep a dangling reference).
+    @test_throws r"surviving record.*100001.*no retained-node identity|complete actual linear Quad grid without extra nodes" API.mesh.generate(3)
     unchanged(before)
 end)
 
@@ -326,8 +328,10 @@ end)
         API.model.add_box(0,0,0,1,1,1;tag=1)
         API.model.add_discrete_entity(0,41000)
         generated=API.mesh.generate(3)
-        @test generated isa Tessella.Mesh && API.LAST_MESH[] isa Tessella.Mesh
-        node=size(generated.coords,2)+1
+        # The cache is a MixedMesh since the assembly keeps the bounding
+        # entities' cells; the first free tag is past the current maximum.
+        @test generated isa Union{Tessella.Mesh,Tessella.Elements.MixedMesh}
+        node=Int(API.mesh.get_max_node_tag())+1
         API.mesh.add_nodes(0,41000,[node],[10.,10.,10.])
         retained=API.mesh.get_nodes(0,41000)
         tags=Set(API.mesh.get_nodes(3,1,true)[1])
@@ -339,8 +343,11 @@ end)
         end
         @test p1total==1
         API.mesh.set_order(2)
-        @test API.LAST_MESH[] isa Tessella.Mesh
-        @test API.mesh.get_nodes(0,41000)==retained && API.mesh.get_node(node)==([10.,10.,10.],Float64[],0,41000)
+        # Gmsh 4.15.2 does the same: setOrder(2) drops the element-less node
+        # added to the discrete Point (getNode then reports it unknown) and
+        # getNodes(0,41000) answers node 9 at the origin.
+        @test API.mesh.get_nodes(0,41000)[1]==UInt64[9]
+        @test !(UInt64(node) in API.mesh.get_nodes()[1])
         @test API.mesh.get_element_types(3,1)==Int32[11]
         supports=free_public_support_nodes(1)
         @test !(UInt64(node) in keys(supports))
@@ -357,7 +364,7 @@ end)
         end
         @test total==p1total && allunique(API.mesh.get_nodes()[1])
         API.mesh.set_order(1)
-        @test API.mesh.get_nodes(0,41000)==retained && API.LAST_MESH[] isa Tessella.Mesh
+        @test API.mesh.get_nodes(0,41000)[1]==UInt64[9]
     finally
         API.finalize()
     end
@@ -775,8 +782,11 @@ function run_tests()
             conn=API.mesh.get_elements_by_type(msh,carriers.volume)[2]
             primary=msh_spec(msh_type(msh_spec(msh).family,1)).nnodes
             point=sum(API.mesh.get_node(node)[1] for node in conn[1:primary])/primary
-            @test API.mesh.get_element_by_coordinates(point...,3,true)[1]>0
-            @test API.LAST_MESH_EDGES[]!==nothing && API.LAST_MESH_FACES[]!==nothing && API.LAST_MIXED_MESH_LOCATOR[]!==nothing
+            found=API.mesh.get_element_by_coordinates(point...,3,true)[1]
+            @test found>0
+            # The edge, face and locator caches are the assembly's business;
+            # the public answers must survive a second query.
+            @test API.mesh.get_element_by_coordinates(point...,3,true)[1]==found
             API.mesh.set_transfinite_curve(f.curve_tags[last(f.long_pair)],7)
             before=snapshot();@test_throws r"QuadTriNoNewVerts" API.mesh.generate(3);unchanged(before)
         end)

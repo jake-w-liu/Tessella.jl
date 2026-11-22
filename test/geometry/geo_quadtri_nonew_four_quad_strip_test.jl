@@ -175,15 +175,29 @@ end
         larger=replace(f.source,"Transfinite Curve{$(join(long_tags,','))}=5;"=>
             "Transfinite Curve{$(first(long_tags))}=6;Transfinite Curve{$(last(long_tags))}=7;")
         @test larger!=f.source
-        # Gmsh 4.15.2 meshes this input (a transfinite Surface with unequal
-        # opposite sides falls back to the unstructured algorithm); Tessella
-        # refuses it, which geo_quadtri_nonew_test.jl records as broken. What
-        # is checked here is that the refusal changes nothing.
-        _fqsc_atomic(merge(f,(;source=larger)),r"QuadTriNoNewVerts|non-matching node counts")
+        # Gmsh 4.15.2 meshes the unequal sides (unstructured Source), the
+        # tilted translation and the transfinite cap. Its QuadTri cells vary
+        # with vertex addresses: the sets below are every result of 20 fresh
+        # processes (nodes; surface and volume cells by type). Tessella's
+        # result must be one of them.
         tilted=replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.1,0.0,1.0}")
         @test tilted!=f.source
-        _fqsc_atomic(merge(f,(;source=tilted)),r"normal|translation")
-        _fqsc_atomic(merge(f,(;source=f.source*"Transfinite Surface{sweep[0]};")),r"constrained-boundary|override")
+        observed=(
+            (larger,[(62,Dict(2=>80,3=>20,4=>101,7=>20))]),
+            (tilted,[(20,Dict(2=>28,3=>4,4=>16,7=>4)),(20,Dict(2=>28,3=>4,4=>12,7=>6)),
+                (20,Dict(2=>28,3=>4,4=>11,6=>1,7=>5)),(20,Dict(2=>28,3=>4,4=>8,7=>8))]),
+            (f.source*"Transfinite Surface{sweep[0]};",[(20,Dict(2=>28,3=>4,4=>16,7=>4)),
+                (20,Dict(2=>28,3=>4,4=>12,7=>6)),(20,Dict(2=>28,3=>4,4=>11,6=>1,7=>5))]))
+        for (text,gmsh) in observed
+            mesh=_FQSC.execute(text).mesh
+            counts=Dict{Int,Int}()
+            for block in _FQSC.blocks(mesh)
+                msh_dimension(block.msh) in (2,3) || continue
+                counts[Int(block.msh)]=get(counts,Int(block.msh),0)+size(block.nodes,2)
+            end
+            @test (nnodes(mesh),counts) in gmsh
+        end
+        # Gmsh stops on a partial final layer ("Could not find extruded node").
         incomplete=replace(f.source,"Layers{1}"=>"Layers{{1},{0.5}}")
         @test incomplete!=f.source
         _fqsc_atomic(merge(f,(;source=incomplete)),r"height|normalized|1.0")

@@ -221,9 +221,11 @@ function _extrude_nonew_projection_context(m::GeoModel,mesh,volume::Int,
         # standalone constructor; attached records can differ by one ULP.
         # A shared-incidence Region rebuilds through its component scope —
         # union-grid owners emit the volume on the union level set.
+        # The model's current lower products, when it holds them, are the
+        # Source and cap this sweep was planned on.
         isempty(_extrude_nonew_shared_for(working,volume,caller)) ?
             _extrude_nonew_complete_plan(working,volume,caller;
-                _working_model=true) :
+                _working_model=true,_mesh_input=working.meshing.mesh_authority) :
             _extrude_nonew_scope(working,caller;
                 tags=_extrude_nonew_shared_closure(working,[volume],caller),
                 _working_model=true).volumes[volume]

@@ -339,7 +339,14 @@ function run_tests()
             with_model(f,carriers->begin
                 API.mesh.generate(3);API.mesh.set_order(2)
                 API.mesh.set_transfinite_surface(carriers.top)
-                before=snapshot();@test_throws r"QuadTriNoNewVerts" API.mesh.generate(3);unchanged(before)
+                # Gmsh 4.15.2 meshes on: generate(3) after setOrder(2) and a
+                # transfinite cap returns the order-one mesh with the same
+                # cells (rect grid 2x3: 105 -> 24 nodes, 100 elements; so
+                # does Tessella).
+                cells=sum(length,API.mesh.get_elements()[2])
+                API.mesh.generate(3)
+                @test sum(length,API.mesh.get_elements()[2])==cells
+                @test all(msh->msh in (1,2,3,4,5,6,7,15),API.mesh.get_element_types())
             end)
         end
     end

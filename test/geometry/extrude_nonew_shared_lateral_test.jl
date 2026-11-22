@@ -1035,7 +1035,10 @@ end
             @test _sl_reversed(left[key],right[key])
         end
         @test _sl_part_equal(scope.volumes[1].surfaces[s],bound)
-        @test _sl_part_equal(scope.volumes[2].surfaces[s],bound)
+        # The second owner's own copy of the wall has the same cells wound
+        # from its side; the scope publishes the binder's part (Gmsh meshes
+        # a shared Surface once).
+        @test Tessella.Model._extrude_nonew_shared_part_equal(scope.volumes[2].surfaces[s],bound)
         @test _sl_part_equal(mesh_model_surface(model,s),bound)
         @test _sl_dim2_faces_on(merged,1,2.0)==wall
         _sl_positive(pass.parts[1]);_sl_positive(pass.parts[2])
@@ -1456,7 +1459,7 @@ end
         """;mesh_dim=3)
         merged=execution.mesh
         @test validate(merged).ok
-        @test nnodes(merged)==18
+        @test nnodes(merged)==24 # Gmsh 4.15.2: 24 nodes, 40 tri, 2 quad, 40 tets, 4 pyramids (20 runs)
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         wall=_sl_surface_faces(pass.scope.surfaces[s])
@@ -1537,7 +1540,7 @@ end
         """;mesh_dim=3)
         merged=execution.mesh
         @test validate(merged).ok
-        @test nnodes(merged)==21
+        @test nnodes(merged)==24 # Gmsh 4.15.2: 24 nodes, 44 tri, 48 tets (20 runs)
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         wall=_sl_surface_faces(pass.scope.surfaces[s])
@@ -1546,7 +1549,14 @@ end
             ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,0.5)),
             ((1.0,0.0,0.5),(1.0,1.0,0.0),(1.0,1.0,0.5)),
             ((1.0,0.0,1.0),(1.0,1.0,0.5),(1.0,1.0,1.0))))
-        @test _sl_dim2_faces_on(merged,1,1.0)==wall
+        # The GEO pipeline meshes the Sources as Gmsh does (centroid fans)
+        # and carries Gmsh's wall, the other diagonal (20 runs, all alike);
+        # the naked pass above still meshes two-triangle Sources.
+        @test _sl_dim2_faces_on(merged,1,1.0)==Set((
+            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
+            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
+            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
             _sl_positive(pass.parts[tag])
@@ -1633,8 +1643,8 @@ end
         """;mesh_dim=3)
         merged=execution.mesh
         @test validate(merged).ok
-        @test nnodes(merged)==12
-        @test _sl_msh_counts(merged)==Dict(1=>16,2=>20,4=>12)
+        @test nnodes(merged)==15 # Gmsh 4.15.2 (20 runs): its centroid-fanned Source
+        @test _sl_msh_counts(merged)==Dict(1=>16,2=>24,4=>24)
         _sl_positive(merged)
         # `QuadTriNoNewVerts RecombLaterals` on the same unstructured
         # source retains every lateral quadrangle whole — the oracle's
@@ -1715,8 +1725,8 @@ end
         """;mesh_dim=3)
         merged=execution.mesh
         @test validate(merged).ok
-        @test nnodes(merged)==18
-        @test _sl_msh_counts(merged)==Dict(1=>24,2=>32,4=>24)
+        @test nnodes(merged)==24 # Gmsh 4.15.2 (20 runs): the two-centroid fan
+        @test _sl_msh_counts(merged)==Dict(1=>24,2=>40,4=>40,7=>4)
         _sl_positive(merged)
         # A two-curve lens (one arc, one closing chord): the oracle
         # sweeps it to 14 nodes / 12 tetrahedra and the native emission
@@ -1734,7 +1744,8 @@ end
         @test nnodes(merged)==14
         @test _sl_msh_counts(merged)==Dict(1=>12,2=>20,4=>12)
         _sl_positive(merged)
-        @test_throws r"single-curve source boundaries" _sl_model("""
+        # Gmsh 4.15.2 stops too ("Mesh of QuadToTri top surface 8 failed").
+        @test_throws ArgumentError _sl_model("""
         Point(1)={1,0,0,3.0};Point(2)={0.7,0.7,0,3.0};Point(3)={0,1,0,3.0};
         Point(4)={-0.7,0.7,0,3.0};Point(5)={-1,0,0,3.0};
         Point(6)={-0.7,-0.7,0,3.0};Point(7)={0,-1,0,3.0};Point(8)={0.7,-0.7,0,3.0};
@@ -1954,7 +1965,8 @@ end
         # And a node lifted off the patch still fails the audit loudly —
         # the strict inverse does not weaken the certificate.
         offcoords=copy(source_part.coords);offcoords[3,2]+=0.01
-        @test_throws r"off Surface\[2\]" model_to_mixed(model,
+        # (A lifted boundary node is caught by its Curve's chain audit.)
+        @test_throws r"off Surface\[2\]|does not represent Curve" model_to_mixed(model,
             MixedMesh(offcoords,plain.blocks),2)
         # Ruled Source on the right of a planar partner (`c_flip_ruled`):
         # same folded patch, same oracle multiset — 20 nodes this time

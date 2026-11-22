@@ -159,8 +159,17 @@ end
         for laterals in (false,true)
             f=_RGSC.fixture("collapsed_layers";grid=(2,3),laterals,layers=:four,offset=(0.,0.,2.0^50),height=.25)
             _rgsc_atomic(f,r"strictly ordered|collapse")
+            # Gmsh 4.15.2 meshes the oblique translation (20 runs, all alike);
+            # so does Tessella, through the general QuadToTri planner.
             f=_RGSC.fixture("oblique";grid=(2,3),laterals,layers=:one)
-            _rgsc_atomic(merge(f,(;source=replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.25,0.0,1.0}"))),r"axis-normal|one finite nonzero")
+            mesh=_RGSC.execute(replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.25,0.0,1.0}")).mesh
+            counts=Dict{Int,Int}()
+            for block in mesh.blocks
+                Tessella.Elements.msh_dimension(block.msh) in (2,3) || continue
+                counts[Int(block.msh)]=get(counts,Int(block.msh),0)+size(block.nodes,2)
+            end
+            @test (Tessella.MeshTypes.nnodes(mesh),counts)==(laterals ?
+                (24,Dict(2=>12,3=>16,4=>4,7=>16)) : (24,Dict(2=>32,3=>6,4=>24,7=>6)))
         end
     end
 end
