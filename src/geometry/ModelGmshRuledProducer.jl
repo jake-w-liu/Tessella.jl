@@ -35,7 +35,9 @@ function _gmsh_native_ruled_initial(source::_ModelSurfaceSource,tag::Int,ground)
     ids=Int[v<=4 ? -v : rank[row_of[v]] for v in eachindex(p.x)]
     constrained=Tuple{Int32,Int32}[(product.source_rows[a],product.source_rows[b])
                                    for (a,b,_) in source.segments]
-    bds=Mesh2D._gmsh_bds_delaunayize(p,ids,interior_faces,constrained,ground)
+    owners=Tuple{Int,Int}[v<=4 ? (2,0) : (Int(source.owners[row_of[v]][1]),
+        Int(source.owners[row_of[v]][2])) for v in eachindex(p.x)]
+    bds=Mesh2D._gmsh_bds_delaunayize(p,ids,interior_faces,constrained,ground;owners)
     for (a,b,c,d) in bds.swaps
         ra=row_of[a];rb=row_of[b];rc=row_of[c];rd=row_of[d]
         done=false
