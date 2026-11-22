@@ -115,7 +115,7 @@ function _checkconstraints(m,fliptype,pa,pb,pc,pd,pe,fc)
 end
 
 function removefacebyflips!(m,flipface,fc)
-    F=Vector{Tri}(undef,3)
+    F=m.F3
     F[1]=flipface;F[2]=fsym(m,flipface)
     pa=org(m,F[1]);pb=dest(m,F[1]);pc=apex(m,F[1]);pd=oppo(m,F[1]);pe=oppo(m,F[2])
     flipedge=flipface;reducflag=false
@@ -138,8 +138,8 @@ function removefacebyflips!(m,flipface,fc)
     return nn==2
 end
 
-function recoveredgebyflips!(m,startpt,endpt,fullsearch)
-    fc=Flip()
+function recoveredgebyflips!(m,startpt,endpt,fullsearch,fc=Flip())
+    _flipreset!(fc)
     fc.seg=(startpt,endpt)
     fc.checkflipeligibility=true
     while true
@@ -266,13 +266,14 @@ end
 
 function recoversegments!(m,misseglist,fullsearch)
     S=m.subsegs
+    fc=Flip()
     while !isempty(m.subsegstack)
         sseg=pop!(m.subsegstack)
         sstpivot1(m,sseg).tet!=0 && continue
         startpt=sorg(S,sseg);endpt=sdest(S,sseg)
-        ok,t=recoveredgebyflips!(m,startpt,endpt,false)
-        ok || ((ok,t)=recoveredgebyflips!(m,endpt,startpt,false))
-        !ok && fullsearch && ((ok,t)=recoveredgebyflips!(m,startpt,endpt,true))
+        ok,t=recoveredgebyflips!(m,startpt,endpt,false,fc)
+        ok || ((ok,t)=recoveredgebyflips!(m,endpt,startpt,false,fc))
+        !ok && fullsearch && ((ok,t)=recoveredgebyflips!(m,startpt,endpt,true,fc))
         if ok
             _bondsegment!(m,sseg,t)
         else
@@ -281,8 +282,8 @@ function recoversegments!(m,misseglist,fullsearch)
     end
 end
 
-function recoverfacebyflips!(m,pa,pb,pc)
-    fc=Flip()
+function recoverfacebyflips!(m,pa,pb,pc,fc=Flip())
+    _flipreset!(fc)
     fc.fac=(pa,pb,pc)
     fc.checkflipeligibility=true
     fac=(pa,pb,pc)
@@ -339,6 +340,7 @@ end
 
 function recoversubfaces!(m,misshlist)
     F=m.subfaces
+    fc=Flip()
     while !isempty(m.subfacstack)
         searchsh=pop!(m.subfacstack)
         shdead(F,searchsh) && continue
@@ -349,7 +351,7 @@ function recoversubfaces!(m,misshlist)
             sstpivot1(m,seg).tet==0 && throw(Unsupported("an unrecovered segment of a subface"))
             searchsh=senext(searchsh)
         end
-        ok,searchtet=recoverfacebyflips!(m,sorg(F,searchsh),sdest(F,searchsh),sapex(F,searchsh))
+        ok,searchtet=recoverfacebyflips!(m,sorg(F,searchsh),sdest(F,searchsh),sapex(F,searchsh),fc)
         if ok
             tsbond!(m,searchtet,searchsh)
             tsbond!(m,fsym(m,searchtet),sesym(searchsh))

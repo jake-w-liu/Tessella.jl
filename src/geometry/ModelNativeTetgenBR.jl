@@ -124,6 +124,14 @@ mutable struct Flip
     fac::NTuple{3,Int32}
 end
 Flip()=Flip(0,0,false,false,false,0.0,0.0,false,0.0,0.0,false,(0,0),(0,0,0))
+# A fresh flipconstraints, reusing `fc` (TetGen makes one on the stack per call).
+function _flipreset!(fc::Flip)
+    fc.enqflag=0;fc.chkencflag=0;fc.unflip=false;fc.collectnewtets=false
+    fc.remove_ndelaunay_edge=false;fc.bak_tetprism_vol=0.0;fc.tetprism_vol_sum=0.0
+    fc.remove_large_angle=false;fc.cosdihed_in=0.0;fc.cosdihed_out=0.0
+    fc.checkflipeligibility=false;fc.seg=(0,0);fc.fac=(0,0,0)
+    return fc
+end
 
 mutable struct Opt
     max_min_volume::Bool
@@ -186,6 +194,9 @@ mutable struct TG
     cavetetvertlist::Vector{Int32}
     stars::Vector{Vector{Tri}}
     steiner::Int
+    # Scratch handles for one flip at a time (flipnm, flipnm_post and
+    # removefacebyflips use theirs only around their own flip calls).
+    F3::Vector{Tri}
 end
 
 # ---------------------------------------------------------------------------
@@ -319,7 +330,7 @@ function makeshellface!(p::ShellPool)
         p.dead=tdecsh(p.w[11*(slot-1)+1])
     else
         p.maxitems+=1;slot=p.maxitems
-        append!(p.w,ntuple(_->0,11));push!(p.mark,0);push!(p.flag,0)
+        resize!(p.w,11*slot);push!(p.mark,0);push!(p.flag,0)
     end
     for i in 1:11;p.w[11*(slot-1)+i]=0;end
     p.mark[slot]=0;p.flag[slot]=0

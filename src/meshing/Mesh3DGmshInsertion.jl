@@ -318,11 +318,17 @@ function _gmsh3_shell!(T)
     return nothing
 end
 
+# Grow the cavity across every boundary face the point does not see, taking
+# the first such face in cavity-and-slot order each time. A boundary face
+# stops being one only when its neighbour joins the cavity and never becomes
+# one again, so after an addition the next such face is never before the one
+# just used: the scan resumes there rather than restarting (same cavity, same
+# order, linear instead of quadratic in the cavity size).
 function _gmsh3_star!(T,point,tags,protected_faces)
-    while true
-        _gmsh3_shell!(T)
-        added=false
-        for t in T.cavity,slot in 1:4
+    i=1
+    while i<=length(T.cavity)
+        t=T.cavity[i]
+        for slot in 1:4
             nb=_nbr(T,t,slot)
             (nb!=0 && T.mark[nb]==T.epoch) && continue
             face=_face(T,t,slot)
@@ -330,11 +336,11 @@ function _gmsh3_star!(T,point,tags,protected_faces)
             (nb!=0 && tags[nb]==tags[t] &&
              !(_sort3t(face...) in protected_faces)) || return false
             T.mark[nb]=T.epoch;push!(T.cavity,nb)
-            added=true
-            break
         end
-        added || return true
+        i+=1
     end
+    _gmsh3_shell!(T)
+    return true
 end
 
 function _gmsh3_weights(a,b,c,d,point)

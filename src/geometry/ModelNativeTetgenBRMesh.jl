@@ -10,7 +10,7 @@ function _emptytg(points,ninput,seed,epsilon)
         Int[],Int32[],Int[],Int[],Int32[],0,0,0,ShellPool(),ShellPool(),UInt32(seed),
         false,false,false,1,-1,-1,epsilon,0.0,0.0,0.0,
         Tri[],BadFace[],Tri[],Tri[],Tri[],Sh[],Sh[],Sh[],Sh[],Tri[],Sh[],Sh[],Int32[],Int32[],
-        Vector{Tri}[],0)
+        Vector{Tri}[],0,Vector{Tri}(undef,3))
     sizehint!(m.nb,32n);sizehint!(m.tv,32n);sizehint!(m.tseg,48n);sizehint!(m.tsub,32n)
     sizehint!(m.tmark,8n)
     for p in 1:n;setpointtype!(m,p,VOLVERTEX);end
@@ -21,34 +21,47 @@ end
 # first pool slots; faces are bonded, hull tetrahedra appended in traversal
 # order, and point2tet points at the last real tetrahedron of each vertex.
 function _reconstruct!(m,kernel)
-    pending=Dict{NTuple{3,Int32},Int}()
-    for source in kernel.cells
+    # Live kernel cells become slots 1, 2, ... in order. A face is bonded
+    # when its second tetrahedron is made; the kernel's own adjacency names
+    # that neighbour, so no face table is built.
+    slotof=zeros(Int32,length(kernel.cells))
+    # Kernel face k is opposite vertex OPPOSITE[k]; tetgen face f is opposite
+    # vertex f+1.
+    facefor=(2,3,4,1)          # kernel face opposite kernel vertex q
+    for (ci,source) in enumerate(kernel.cells)
         source.vertices[1]==0 && continue
         p=source.vertices
         ori=orient3(m.xyz[p[1]],m.xyz[p[2]],m.xyz[p[3]],m.xyz[p[4]])
-        ori>0 && (p=(p[2],p[1],p[3],p[4]))
         ori==0 && throw(Unsupported("a degenerate tetrahedron in the initial Delaunay mesh"))
+        swapped=ori>0
+        swapped && (p=(p[2],p[1],p[3],p[4]))
         t=maketetrahedron!(m)
+        slotof[ci]=Int32(t.tet)
         setvertices!(m,t,p[1],p[2],p[3],p[4])
         for f in 0:3
+            q=f+1
+            swapped && q<=2 && (q=3-q)
+            other=source.neighbors[facefor[q]]
+            other==0 && continue
+            o=Int(slotof[other])
+            o==0 && continue
             h=Tri(t.tet,f)
             a=org(m,h);b=dest(m,h);c=apex(m,h)
-            x,y,z=a,b,c
-            x>y && ((x,y)=(y,x));y>z && ((y,z)=(z,y));x>y && ((x,y)=(y,x))
-            key=(x,y,z)
-            other=pop!(pending,key,0)
-            if other==0
-                pending[key]=tenc(h)
-            else
-                o=tdec(other)
-                # The matching version reverses the directed edge [a,b].
-                for v in (o.ver&3):4:11
-                    g=Tri(o.tet,v)
+            bonded=false
+            for g0 in 0:3
+                x=tvert(m,o,4+g0)
+                (x==a || x==b || x==c) && continue
+                # The neighbour's face opposite x; its matching version
+                # reverses the directed edge [a,b].
+                for v in g0:4:11
+                    g=Tri(o,v)
                     if org(m,g)==b && dest(m,g)==a && apex(m,g)==c
-                        bond!(m,h,g);break
+                        bond!(m,h,g);bonded=true;break
                     end
                 end
+                break
             end
+            bonded || throw(Unsupported("the initial Delaunay adjacency is inconsistent"))
         end
     end
     real=m.tmax
@@ -89,6 +102,9 @@ end
 # Subfaces and segments of the surface triangles (in Gmsh's GFace and triangle
 # order), then unifysegments().
 function _surface!(m,facets,ang_tol)
+    n=length(facets)
+    sizehint!(m.subfaces.w,11n);sizehint!(m.subfaces.mark,n);sizehint!(m.subfaces.flag,n)
+    sizehint!(m.subsegs.w,33n);sizehint!(m.subsegs.mark,3n);sizehint!(m.subsegs.flag,3n)
     for face in facets
         for j in 1:3
             pointtype(m,face[j])==VOLVERTEX && setpointtype!(m,face[j],FACETVERTEX)

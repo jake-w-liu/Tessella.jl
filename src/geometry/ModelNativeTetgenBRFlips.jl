@@ -247,30 +247,32 @@ end
 function checkflipeligibility(m,fliptype,pa,pb,pc,pd,pe,level,edgepivot,fc)
     rejflag=(fc.seg[1]!=0 || fc.fac[1]!=0) && _checkconstraints(m,fliptype,pa,pb,pc,pd,pe,fc)
     (fc.remove_large_angle && !rejflag) || return rejflag
-    function check(p,q,r,s)
-        _,_,cosmaxd=tetalldihedral(m,p,q,r,s)
-        diff=cosmaxd-fc.cosdihed_in
-        abs(diff/fc.cosdihed_in)<m.epsilon && (diff=0.0)
-        diff<=0 && return true
-        cosmaxd<fc.cosdihed_out && (fc.cosdihed_out=cosmaxd)
-        return false
-    end
     if fliptype==1
         if pc!=DUMMY && pe!=DUMMY && pd!=DUMMY
-            rejflag=check(pe,pd,pb,pc) || check(pe,pd,pc,pa)
+            rejflag=_rejectangle!(m,fc,pe,pd,pb,pc) || _rejectangle!(m,fc,pe,pd,pc,pa)
         end
     elseif fliptype==2
         if pa!=DUMMY && pb!=DUMMY && pc!=DUMMY
             if level==0
-                rejflag=check(pa,pb,pc,pd) || check(pb,pa,pc,pe)
+                rejflag=_rejectangle!(m,fc,pa,pb,pc,pd) || _rejectangle!(m,fc,pb,pa,pc,pe)
             elseif edgepivot==1
-                rejflag=check(pb,pa,pc,pe)
+                rejflag=_rejectangle!(m,fc,pb,pa,pc,pe)
             else
-                rejflag=check(pa,pb,pc,pd)
+                rejflag=_rejectangle!(m,fc,pa,pb,pc,pd)
             end
         end
     end
     return rejflag
+end
+# A new tetrahedron must not have a dihedral angle as large as the one being
+# removed; the largest new angle is recorded in fc.cosdihed_out.
+function _rejectangle!(m,fc,p,q,r,s)
+    _,_,cosmaxd=tetalldihedral(m,p,q,r,s)
+    diff=cosmaxd-fc.cosdihed_in
+    abs(diff/fc.cosdihed_in)<m.epsilon && (diff=0.0)
+    diff<=0 && return true
+    cosmaxd<fc.cosdihed_out && (fc.cosdihed_out=cosmaxd)
+    return false
 end
 
 # finddirection(): walk from org(t) toward `endpt`; returns (t, kind) with
@@ -411,7 +413,7 @@ end
 
 function flipnm!(m,abtets,n,level,abedgepivot,fc)
     pa=org(m,abtets[1]);pb=dest(m,abtets[1])
-    fliptets=Vector{Tri}(undef,3)
+    fliptets=m.F3
     if n>3
         reflexlinkedgecount=0
         i=0
@@ -664,7 +666,7 @@ function flipnm!(m,abtets,n,level,abedgepivot,fc)
 end
 
 function flipnm_post!(m,abtets,n,nn,abedgepivot,fc)
-    fliptets=Vector{Tri}(undef,3)
+    fliptets=m.F3
     if nn==2
         if fc.unflip
             flip23!(m,abtets,0,1,fc)

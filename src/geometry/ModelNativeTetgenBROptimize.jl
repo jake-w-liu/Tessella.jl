@@ -92,8 +92,10 @@ function smoothpoint!(m,start::NTuple{3,Float64},list::Vector{Tri},ccw::Bool,opm
             k=randomnation!(m,length(list)-i)
             face=list[k+1]
             pa=m.xyz[org(m,face)];pb=m.xyz[dest(m,face)];pc=m.xyz[apex(m,face)]
-            fcent=ntuple(j->(pa[j]+pb[j]+pc[j])/3.0,3)
-            nextpt=ntuple(j->startpt[j]+opm.searchstep*(fcent[j]-startpt[j]),3)
+            fcent=((pa[1]+pb[1]+pc[1])/3.0,(pa[2]+pb[2]+pc[2])/3.0,(pa[3]+pb[3]+pc[3])/3.0)
+            step=opm.searchstep
+            nextpt=(startpt[1]+step*(fcent[1]-startpt[1]),startpt[2]+step*(fcent[2]-startpt[2]),
+                    startpt[3]+step*(fcent[3]-startpt[3]))
             j=0
             while j<length(list)
                 f=list[j+1]
@@ -409,7 +411,7 @@ function splitsliver!(m,slitet,cosd,chkencflag)
         push!(m.cavetetlist,esym(enext(abtets[i])))
     end
     pa=m.xyz[org(m,abtets[1])];pb=m.xyz[dest(m,abtets[1])]
-    smtpt=ntuple(i->0.5*(pa[i]+pb[i]),3)
+    smtpt=(0.5*(pa[1]+pb[1]),0.5*(pa[2]+pb[2]),0.5*(pa[3]+pb[3]))
     opm=Opt()
     opm.min_max_dihedangle=true
     opm.initval=cosd+1.0
