@@ -13609,7 +13609,17 @@ end
 function _stl_bridge_records(path,tag::Integer)
     mesh=read_stl(path)
     nn=nnodes(mesh)
-    node_labels=collect(Int64(1):Int64(nn))
+    # Gmsh's readSTL makes one MVertex per facet corner, numbered in file
+    # order, keeps the first at each position and deletes the others, so a
+    # node's number is the index of the first corner at its position. The
+    # welded nodes come in first-occurrence order and every facet is kept,
+    # so that index is the node's first appearance in `tris`.
+    node_labels=zeros(Int64,nn)
+    for i in axes(mesh.tris,2), k in 1:3
+        v=mesh.tris[k,i]
+        node_labels[v]==0 && (node_labels[v]=Int64(3*(i-1)+k))
+    end
+    any(iszero,node_labels) && (node_labels=collect(Int64(1):Int64(nn)))
     coords=Vector{Float64}(undef,3*nn)
     @inbounds for i in 1:nn
         coords[3i-2]=mesh.coords[1,i]

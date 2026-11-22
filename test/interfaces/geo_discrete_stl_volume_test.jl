@@ -85,4 +85,25 @@ endsolid one
     end
 end
 
+# Gmsh's readSTL makes a node per facet corner, numbered in file order, and
+# keeps the first one at each position: two facets sharing an edge give
+# nodes 1, 2, 3 and 6 (Gmsh 4.15.2).
+@testset "STL nodes are numbered by their first facet corner" begin
+    mktempdir() do dir
+        path = joinpath(dir, "two.stl")
+        facet(a, b, c) = " facet normal 0 0 1\n  outer loop\n" *
+            join(("   vertex $(p[1]) $(p[2]) 0\n" for p in (a, b, c))) * "  endloop\n endfacet\n"
+        write(path, "solid two\n" * facet((0, 0), (1, 0), (1, 1)) * facet((0, 0), (1, 1), (0, 1)) * "endsolid two\n")
+        API.initialize()
+        try
+            API.option("General.Terminal", 0)
+            API.open(path)
+            @test Int.(API.mesh.get_nodes()[1]) == [1, 2, 3, 6]
+            @test Int.(API.mesh.get_elements(2)[3][1]) == [1, 2, 3, 1, 3, 6]
+        finally
+            API.finalize()
+        end
+    end
+end
+
 end
