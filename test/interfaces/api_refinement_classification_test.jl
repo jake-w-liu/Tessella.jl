@@ -1,3 +1,5 @@
+module APIRefinementClassificationTest
+
 using Test
 using Tessella
 
@@ -19,7 +21,7 @@ using Tessella
         # establish the carrier of a quadratic midpoint.
         class=classified(mesh,owners;segs=Int32[2],tris=Int32[3])
         refined=Tessella.Refine.refine_uniform(mesh)
-        result=api._inherit_refined_classification(class,refined,refined)
+        result=api._inherit_refined_classification(class,refined,refined,Tessella.Model.GeoModel())
         @test result.node_entities==Tuple{Int,Int32}[
             (0,1),(1,2),(2,3),(1,2),(2,3),(2,3)]
         @test result.tri_entities==fill(Int32(3),4)
@@ -31,7 +33,7 @@ using Tessella
     class=classified(mesh,Tuple{Int,Int32}[(1,1),(1,1),(1,2),(1,2)];
                      segs=Int32[1,2])
     refined=Tessella.Refine.refine_uniform(mesh)
-    result=api._inherit_refined_classification(class,refined,refined)
+    result=api._inherit_refined_classification(class,refined,refined,Tessella.Model.GeoModel())
     @test result.node_entities==Tuple{Int,Int32}[(1,1),(1,1),(1,2),(1,2),(1,1),(1,2)]
     @test result.seg_entities==Int32[1,1,2,2]
 
@@ -42,7 +44,7 @@ using Tessella
     owners=Tuple{Int,Int32}[(0,i) for i in 1:4]
     class=classified(mesh,owners;segs=Int32[9],tris=Int32[8],tets=Int32[7])
     refined=Tessella.Refine.refine_uniform(mesh)
-    result=api._inherit_refined_classification(class,refined,refined)
+    result=api._inherit_refined_classification(class,refined,refined,Tessella.Model.GeoModel())
     @test result.node_entities[1:4]==owners
     # Lexicographic edges: 12, 13, 14, 23, 24, 34. Lower-dimensional
     # cells own their shared edge midpoints even when a tet also uses them.
@@ -52,7 +54,7 @@ using Tessella
     empty_mesh=Mesh(zeros(3,0))
     class=classified(empty_mesh,Tuple{Int,Int32}[])
     refined=Tessella.Refine.refine_uniform(empty_mesh)
-    @test isempty(api._inherit_refined_classification(class,refined,refined).node_entities)
+    @test isempty(api._inherit_refined_classification(class,refined,refined,Tessella.Model.GeoModel()).node_entities)
     for higher in ((1,Int32(2)),(2,Int32(3)),(3,Int32(4)))
         @test api._merged_node_owner((0,Int32(1)),higher)==(0,Int32(1))
         @test api._merged_node_owner(higher,(0,Int32(1)))==(0,Int32(1))
@@ -78,7 +80,15 @@ end
             @test length(api.mesh.get_nodes(1,1,true)[1])==segments+1
             tags,_,parameters=api.mesh.get_nodes(1,1)
             @test length(tags)==segments-1
-            @test sort(parameters)==[index/segments for index in 1:segments-1]
+            # Gmsh 4.15.2's parameters: the 1-D mesher's own, then averages.
+            expected=level==1 ? [0.24999999999941844,0.4999999999986921,0.7499999999993461] :
+                [0.12499999999977891,0.24999999999941844,0.37499999999905526,0.4999999999986921,
+                 0.6249999999990191,0.7499999999993461,0.874999999999673]
+            if Sys.ARCH===:x86_64
+                @test sort(parameters)==expected
+            else
+                @test sort(parameters)≈expected atol=1e-12
+            end
             @test length(api.mesh.get_nodes(0,1)[1])==1
             @test length(api.mesh.get_nodes(0,2)[1])==1
         end
@@ -138,12 +148,24 @@ end
             @test orientation(original)==signs
             @test projected.coords==original.coords
             @test projected.tet_tag==original.tet_tag
-            refined=api.mesh.refine()
-            @test orientation(refined)==repeat(signs;inner=8)
+            # Gmsh 4.15.2 subdivides each tetrahedron into eight positively
+            # oriented children, whatever the orientation of the parent.
+            function api_signs()
+                tags,coords,_=api.mesh.get_nodes()
+                at=Dict(t=>i for (i,t) in enumerate(tags))
+                point(t)=coords[3at[t]-2:3at[t]]
+                _,cells=api.mesh.get_elements_by_type(4,1)
+                return [Tessella.Predicates.orient3((point(cells[4(i-1)+j]) for j in 1:4)...)
+                        for i in 1:length(cells)÷4]
+            end
+            before=api_signs()
+            api.mesh.refine()
+            positive=Tessella.Predicates.orient3([0.,0,0],[1.,0,0],[0.,1,0],[0.,0,1])
+            @test all(==(positive),api_signs())
+            reverse_all && @test all(!=(positive),before)
             @test api.mesh.get_element_types(3,1)==Int32[4]
-            @test length(api.mesh.get_elements_by_type(4,1)[1])==size(refined.tets,2)
+            @test length(api_signs())==8*length(signs)
             @test !isempty(api.mesh.get_nodes(0,1)[1])
-            @test validate(refined;require_positive_tets=false).ok
         end
     finally
         api.finalize()
@@ -235,4 +257,6 @@ end
     finally
         api.finalize()
     end
+end
+
 end

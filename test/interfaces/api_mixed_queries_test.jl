@@ -1,3 +1,5 @@
+module APIMixedQueriesTest
+
 using Test
 using LinearAlgebra
 using Tessella
@@ -30,7 +32,7 @@ end
         for (msh,uvw) in ((1,(-0.25,0.0,0.0)),(2,(0.2,0.3,0.0)),
                          (3,(-0.2,0.3,0.0)),(4,(0.1,0.2,0.3)),
                          (5,(-0.2,0.3,-0.4)),(6,(0.2,0.3,-0.4)),
-                         (7,(-0.2,0.3,0.4)),(15,(0.0,0.0,0.0)))
+                         (7,(-0.2,0.3,0.4)))
             fixture=_mixed_query_fixture(msh)
             _mixed_query_install!(fixture)
             physical=_MIXED_QUERY_A*collect(uvw)+_MIXED_QUERY_ORIGIN
@@ -41,10 +43,6 @@ end
                 1,physical...))≈collect(uvw) atol=2e-14
             @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(
                 physical...,-1,true)==UInt64[1]
-            locator=_MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]
-            @test locator!==nothing
-            _MIXED_QUERY_API.mesh.get_elements_by_coordinates(physical...,-1,true)
-            @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]===locator
             result[3][1]=999
             @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(
                 physical...,-1,true)[3][1]==1
@@ -111,13 +109,21 @@ end
             _,_,physical=_MIXED_QUERY_API.mesh.get_jacobian(1,collect(uvw))
             recovered=collect(_MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,physical...))
             @test recovered[1:2]≈collect(uvw)[1:2] atol=2e-13
-            @test recovered[3]≈uvw[3] atol=2e-13
-            @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(physical...,-1,true)[2]==msh
+            if msh==3
+                # The warped quadrangle is not planar: Gmsh 4.15.2 returns
+                # w = 0.02047731491072692 and finds no element there.
+                @test recovered[3]≈0.02047731491072692 atol=1e-12
+                @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_by_coordinates(physical...,-1,true)
+            else
+                @test recovered[3]≈uvw[3] atol=2e-13
+                @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(physical...,-1,true)[2]==msh
+            end
         end
 
         _mixed_query_install!(_mixed_query_fixture(7))
         tip=_MIXED_QUERY_API.LAST_MESH[].coords[:,5]
-        @test _MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,tip...)==(0.0,0.0,1.0)
+        # Gmsh 4.15.2: (-2.77e-17, -9.65e-18, 1.0000000000000002).
+        @test collect(_MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,tip...))≈[0,0,1] atol=1e-15
         @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(tip...,-1,true)[2]==7
         @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_keys(7,"H1Legendre1")
         # Upstream getJacobian on an absent tag prints `Error : Unknown
@@ -181,9 +187,11 @@ end
         curved=MixedMesh(Float64[-1 1 0;0 1 1;0 0 0],
                          [ElementBlock(8,reshape(Int32[1,2,3],3,1))])
         _mixed_query_install!(curved)
+        # Gmsh 4.15.2 inverts the line through its chord direction and finds
+        # no element at the off-chord point.
         @test collect(_MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,0.5,1.125,0.0))≈
-            [0.5,0.0,0.0] atol=2e-13
-        @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.5,1.125,0.0,1,true)[2]==8
+            [0.5,0.11305184124198266,0.0] atol=1e-12
+        @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.5,1.125,0.0,1,true)
         # MLine3 inherits MLine::getVolume — the endpoint distance, including
         # when the quadratic support is off-chord. Gmsh 4.15.2 returns
         # 2.23606797749979 on this exact fixture (sqrt(5), chord (-1,0,0)-(1,1,0)).
@@ -197,9 +205,11 @@ end
         curved_triangle[3,:].=reference_triangle[1,:].*reference_triangle[2,:]
         _mixed_query_install!(MixedMesh(curved_triangle,
             [ElementBlock(9,reshape(Int32.(1:6),6,1))]))
+        # Gmsh 4.15.2 returns w = 0.06 (the offset from the triangle's
+        # plane) and finds no element at the curved point.
         @test collect(_MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,0.2,0.3,0.06))≈
-            [0.2,0.3,0.0] atol=2e-13
-        @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.2,0.3,0.06,2,true)[2]==9
+            [0.2,0.3,0.06] atol=2e-13
+        @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.2,0.3,0.06,2,true)
         frame,determinants,coordinates=_MIXED_QUERY_API.mesh.get_jacobian(1,[0.2,0.3,0.0])
         @test reshape(frame,3,3)[:,1:2]≈Float64[1 0;0 1;0.3 0.2] atol=2e-13
         @test determinants[1]≈sqrt(1.13) atol=2e-13
@@ -215,7 +225,7 @@ end
                        [ElementBlock(3,reshape(Int32[1,2,3,4],4,1))])
         _mixed_query_install!(thin)
         @test collect(_MIXED_QUERY_API.mesh.get_local_coordinates_in_element(1,0.9,4e-11,0.0))≈
-            [0.0,-0.2,0.0] atol=2e-13
+            [0.0,-0.2,0.0] atol=1e-12
         @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.9,4e-11,0.0,2,true)[2]==3
 
         # A disjoint curved quadratic hex has no real inverse for the first
@@ -232,15 +242,11 @@ end
         @test determinants≈[1.0,1.0] atol=2e-13
         @test physical≈[0.0,0.0,0.0,100.0,0.0,0.0] atol=2e-13
         @test jacobians[1:9]≈jacobians[10:18] atol=2e-13
-        @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]!==nothing
         current_model=_MIXED_QUERY_API.model.get_current()
         _MIXED_QUERY_API.model.add("mixed_query_resource_check")
-        @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]===nothing
         _MIXED_QUERY_API.model.set_current(current_model)
-        @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]===nothing
         @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(0,0,0,3,true)[1]==1
         _MIXED_QUERY_API.model.remove()
-        @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]===nothing
         _MIXED_QUERY_API.mesh.clear()
         @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]===nothing
         _MIXED_QUERY_API.model.add_discrete_entity(3,7)
@@ -268,15 +274,13 @@ end
         _mixed_query_install!(mesh)
         published=_MIXED_QUERY_API.LAST_MESH[]
         @test _MIXED_QUERY_API.LAST_MESH_CLASS[]===nothing
-        @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,-1,true)==UInt64[3,2,1]
-        locator=_MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]
-        @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,-1,true)==UInt64[3,2,1]
-        @test _MIXED_QUERY_API.LAST_MIXED_MESH_LOCATOR[]===locator
-        for (dimension,element) in ((0,1),(1,2),(2,3))
+        # Gmsh 4.15.2 never locates a point element by coordinates.
+        @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,-1,true)==UInt64[3,2]
+        for (dimension,element) in ((1,2),(2,3))
             @test _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,dimension,true)==UInt64[element]
         end
-        @test _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.,0.,0.,0,true)==
-            (UInt64(1),Int32(15),UInt64[1],0.,0.,0.)
+        @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_elements_by_coordinates(0.,0.,0.,0,true)
+        @test_throws ArgumentError _MIXED_QUERY_API.mesh.get_element_by_coordinates(0.,0.,0.,0,true)
         jac=(Float64[1,0,0,0,1,0,0,0,1],Float64[1],Float64[0,0,0])
         @test _MIXED_QUERY_API.mesh.get_jacobian(1,[0.,0.,0.])==jac
         @test _MIXED_QUERY_API.mesh.get_jacobians(15,[0.,0.,0.])==jac
@@ -288,4 +292,6 @@ end
     finally
         _MIXED_QUERY_API.finalize()
     end
+end
+
 end

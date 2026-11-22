@@ -1,3 +1,5 @@
+module GeoPeriodicTest
+
 using Test
 using Tessella
 using Tessella.MeshTypes: mesh_crc, validate, nnodes, ntris
@@ -1242,4 +1244,6 @@ end
                   stripped.model.points[a],1:nnodes(stripped.mesh))
     @test any(node->Tuple(stripped.mesh.coords[:,node])==
                   stripped.model.points[b],1:nnodes(stripped.mesh))
+end
+
 end
