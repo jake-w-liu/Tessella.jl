@@ -48,7 +48,7 @@ end
             rows=model_rows(kind,nc)
             view=A.view.add("v")
             A.view.add_model_data(view,0,"smooth",kind,[11,12],rows,0.0,nc)
-            A.plugin.set_number("Smooth","View",view)
+            A.plugin.set_number("Smooth","View",A.view.get_index(view))
             A.plugin.run("Smooth")
             types,tags,values=A.view.get_model_data(view,0)
             @test types==["NodeData"]
@@ -70,14 +70,14 @@ end
         A.mesh.add_elements_by_type(1,9,[11],[1,2,3,4,5,6])
         view=A.view.add("v")
         A.view.add_model_data(view,0,"high order","ElementData",[11],[[7.]],0.0,1)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         A.plugin.run("Smooth")
         types,tags,values=A.view.get_model_data(view,0)
         @test types==["NodeData"] && tags==UInt64.(1:6)
         @test values==fill(7.,6)
         A.view.add_model_data(view,1,"high order","ElementNodeData",[11],
             [collect(1.:6.)],0.0,1)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         A.plugin.run("Smooth")
         types,tags,values=A.view.get_model_data(view,1)
         @test types==["NodeData"] && tags==UInt64.(1:6)
@@ -95,7 +95,7 @@ end
         view=A.view.add("v")
         A.view.add_model_data(view,0,"coincident","ElementData",[11,12],
             [[1.],[3.]],0.0,1)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         A.plugin.run("Smooth")
         types,tags,values=A.view.get_model_data(view,0)
         @test types==["NodeData"] && tags==UInt64.(1:6)
@@ -113,7 +113,7 @@ end
         view=A.view.add("v")
         A.view.add_model_data(view,0,"short","ElementNodeData",[11,12],
             [[10.,20.,30.],[40.]],0.0,1)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         A.plugin.run("Smooth")
         types,tags,values=A.view.get_model_data(view,0)
         @test types==["NodeData"] && tags==UInt64[1,2,3,4]
@@ -132,7 +132,7 @@ end
         A.view.add_model_data(view,0,"partial","ElementNodeData",[11],
             [[1.,2.,3.]],0.0,2)
         before=A.view.get_model_data(view,0)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         @test_throws ArgumentError A.plugin.run("Smooth")
         @test A.view.get_model_data(view,0)==before
     end
@@ -149,7 +149,7 @@ end
         A.view.add_model_data(view,0,"partial element","ElementData",[11],
             [[1.,2.,3.]],0.0,2)
         before=A.view.get_model_data(view,0)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         @test_throws ArgumentError A.plugin.run("Smooth")
         @test A.view.get_model_data(view,0)==before
     end
@@ -170,7 +170,7 @@ end
         A.view.add_model_data(view,9,"second","ElementData",[201],
             [[21.]],2.25,1,3)
         before=(A.mesh.get_nodes(),A.mesh.get_elements(),A.model.get_current())
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         A.plugin.run("Smooth")
         @test A.view.get_model_data(view,0)==(["NodeData"],UInt64[1,2,3,4],
             [1.,2.,2.,3.])
@@ -199,7 +199,7 @@ end
         view=A.view.add("v")
         A.view.add_model_data(view,0,"sparse","ElementData",[11,12,999],
             [[1.],[3.],[99.]],0.0,1)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         A.plugin.run("Smooth")
         first=A.view.get_model_data(view,0)
         @test first==(["NodeData"],UInt64[4,10001,10002,10003],
@@ -220,7 +220,7 @@ end
         view=A.view.add("v")
         A.view.add_model_data(view,0,"smooth","ElementData",[11,12],
             [[1.],[3.]],0.0,1)
-        A.plugin.set_number("Smooth","View",view)
+        A.plugin.set_number("Smooth","View",A.view.get_index(view))
         A.plugin.run("Smooth")
         @test only(first(A.view.probe(view,1/3,1/3,0.)))≈5/3 rtol=1e-14
         @test only(first(A.view.probe(view,2/3,2/3,0.)))≈7/3 rtol=1e-14
@@ -243,7 +243,7 @@ end
         A.view.add_model_data(view,0,"smooth","ElementData",[11,12],
             [[1.],[3.]],0.0,1)
         alias=A.view.add_alias(view)
-        A.plugin.set_number("Smooth","View",alias)
+        A.plugin.set_number("Smooth","View",A.view.get_index(alias))
         A.plugin.run("Smooth")
         expected=(["NodeData"],UInt64[1,2,3,4],[1.,2.,2.,3.])
         @test A.view.get_model_data(view,0)==expected

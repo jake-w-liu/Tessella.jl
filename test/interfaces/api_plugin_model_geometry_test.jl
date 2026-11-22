@@ -41,7 +41,7 @@ end
             values=A.view.get_model_data(view,0)
             elements=A.mesh.get_elements()
             A.model.add("foreign")
-            A.plugin.set_number(plugin,"View",view)
+            A.plugin.set_number(plugin,"View",A.view.get_index(view))
             if plugin=="Transform"
                 A.plugin.set_number(plugin,"A11",2)
                 A.plugin.set_number(plugin,"Tx",.5)
@@ -83,7 +83,7 @@ end
         session() do
             view=shared_model(kind,steps)
             before=[A.view.get_model_data(view,step) for step in 0:steps-1]
-            A.plugin.set_number("Transform","View",view)
+            A.plugin.set_number("Transform","View",A.view.get_index(view))
             A.plugin.set_number("Transform","Tx",.5)
             A.plugin.run("Transform")
             repeat=kind=="NodeData" ? 1 : steps
@@ -100,7 +100,7 @@ end
     for kind in ("NodeData","ElementData","ElementNodeData"), steps in (1,2)
         session() do
             view=shared_model(kind,steps)
-            A.plugin.set_number("Transform","View",view)
+            A.plugin.set_number("Transform","View",A.view.get_index(view))
             A.plugin.set_number("Transform","SwapOrientation",1)
             A.plugin.run("Transform")
             expected=kind=="NodeData" ? UInt64[1,3,2,2,3,4] : UInt64[1,2,3,2,4,3]
@@ -116,13 +116,13 @@ end
         A.view.add_model_data(view,0,name,"NodeData",tags[1:1],[[1.]])
         before=A.mesh.get_nodes()
         for plugin in ("Transform","SphericalRaise")
-            A.plugin.set_number(plugin,"View",view)
+            A.plugin.set_number(plugin,"View",A.view.get_index(view))
             A.plugin.run(plugin)
             @test A.mesh.get_nodes()==before
         end
         full=A.view.add("complete")
         A.view.add_model_data(full,0,name,"NodeData",tags,[[1.],[2.],[3.]])
-        A.plugin.set_number("Transform","View",full)
+        A.plugin.set_number("Transform","View",A.view.get_index(full))
         A.plugin.set_number("Transform","A11",1e308)
         @test_throws ArgumentError A.plugin.run("Transform")
         @test A.mesh.get_nodes()==before
@@ -142,7 +142,7 @@ end
     data=kind=="NodeData" ? [[1.0*10^step],[2.0*10^step],[3.0*10^step]] : kind=="ElementData" ? [[1.0*10^step]] : [[1.0*10^step,2.0*10^step,3.0*10^step]]
     A.view.add_model_data(view,step,"a",kind,tags,data,Float64(step),1)
    end
-   A.plugin.set_number("SphericalRaise","View",view);A.plugin.set_number("SphericalRaise","TimeStep",selected);A.plugin.run("SphericalRaise")
+   A.plugin.set_number("SphericalRaise","View",A.view.get_index(view));A.plugin.set_number("SphericalRaise","TimeStep",selected);A.plugin.run("SphericalRaise")
    expected=kind=="NodeData" ? [2.,0.,0.,4.,0.,0.,3.1213203435596424,3.1213203435596424,0.] : kind=="ElementData" ? [12.,0.,0.,13.,0.,0.,8.778174593052023,8.778174593052023,0.] : [12.,0.,0.,24.,0.,0.,24.33452377915607,24.33452377915607,0.]
    @test A.mesh.get_nodes()[2]≈expected
   finally;A.finalize();end
@@ -170,7 +170,7 @@ end
             view=two_models()
             before_data=[A.view.get_model_data(view,step) for step in (0,1)]
             A.model.add("foreign")
-            A.plugin.set_number(plugin,"View",view)
+            A.plugin.set_number(plugin,"View",A.view.get_index(view))
             if plugin=="Transform"
                 A.plugin.set_number(plugin,"Tx",.5)
             else
@@ -196,7 +196,7 @@ end
         for name in ("a","b")
             A.model.set_current(name);before[name]=A.mesh.get_nodes()
         end
-        A.plugin.set_number("Transform","View",view)
+        A.plugin.set_number("Transform","View",A.view.get_index(view))
         A.plugin.set_number("Transform","A11",1e308)
         @test_throws ArgumentError A.plugin.run("Transform")
         @test A.model.get_current()=="b"
@@ -204,7 +204,7 @@ end
             A.model.set_current(name);@test A.mesh.get_nodes()==before[name]
         end
         A.option("General.AbortOnError",0)
-        A.plugin.set_number("SphericalRaise","View",view)
+        A.plugin.set_number("SphericalRaise","View",A.view.get_index(view))
         A.plugin.set_number("SphericalRaise","TimeStep",4)
         A.plugin.run("SphericalRaise")
         for name in ("a","b")

@@ -234,20 +234,29 @@ function _plugin_run(name)
     end
 end
 
-# `View` < 0 selects the most recently allocated session view, matching the
-# upstream "current view" slot passed to `getView(iView, v)`.
+# A plugin's `View` (and `OtherView`, `AmplitudeView`...) option is an index
+# into PView::list, as in Gmsh's GMSH_PostPlugin::getView(index): 0 is the
+# first view, < 0 the last one; the list holds the views in creation order,
+# which is tag order. Returns the view tag, or `nothing` with Gmsh's message
+# "View[i] does not exist".
+function _plugin_view_index_tag(raw::Real)
+    tags=sort!(collect(keys(SESSION_VIEWS)))
+    index=raw<0 ? length(tags)-1 : Int(raw)
+    0<=index<length(tags) || return nothing,index
+    return tags[index+1],index
+end
+
+function _plugin_view_index(raw::Real,opt::AbstractString,caller::AbstractString)
+    raw<0 || raw==floor(raw) || throw(ArgumentError("$caller: $opt index must be an integer"))
+    tag,index=_plugin_view_index_tag(raw)
+    tag===nothing && throw(ArgumentError(
+        isempty(SESSION_VIEWS) && raw<0 ? "$caller: no views exist to run the plugin on" :
+        "$caller: View[$index] does not exist"))
+    return tag
+end
+
 function _plugin_view(numbers::Dict{String,Float64},caller::AbstractString)
-    raw=numbers["View"]
-    if raw<0
-        isempty(SESSION_VIEWS) && throw(ArgumentError(
-            "$caller: no views exist to run the plugin on"))
-        tag=maximum(keys(SESSION_VIEWS))
-    else
-        raw==floor(raw) || throw(ArgumentError("$caller: View tag must be an integer"))
-        tag=Int(raw)
-        haskey(SESSION_VIEWS,tag) || throw(ArgumentError(
-            "$caller: unknown view tag $tag"))
-    end
+    tag=_plugin_view_index(numbers["View"],"View",caller)
     return tag,_session_view_data(tag,caller)
 end
 
@@ -1819,18 +1828,7 @@ end
 # must be an existing integer tag. (Upstream's `getView(i, v)` contract.)
 function _plugin_view_tag(numbers::Dict{String,Float64},opt::AbstractString,
                           caller::AbstractString)
-    raw=numbers[opt]
-    if raw<0
-        isempty(SESSION_VIEWS) && throw(ArgumentError(
-            "$caller: no views exist to run the plugin on"))
-        tag=maximum(keys(SESSION_VIEWS))
-    else
-        raw==floor(raw) || throw(ArgumentError(
-            "$caller: $opt tag must be an integer"))
-        tag=Int(raw)
-        haskey(SESSION_VIEWS,tag) || throw(ArgumentError(
-            "$caller: unknown view tag $tag"))
-    end
+    tag=_plugin_view_index(numbers[opt],opt,caller)
     return tag,_session_view_data(tag,caller)
 end
 
@@ -2202,11 +2200,7 @@ function _plugin_warp_model!(numbers,tag,view,caller)
     timestep=Int(raw_step)
     raw_other=numbers["OtherView"]
     raw_other<0 && return nothing
-    raw_other==floor(raw_other) || throw(ArgumentError(
-        "$caller: OtherView tag must be an integer"))
-    otag=Int(raw_other)
-    haskey(SESSION_VIEWS,otag) || throw(ArgumentError(
-        "$caller: unknown view tag $otag"))
+    otag=_plugin_view_index(raw_other,"OtherView",caller)
     other=_session_view_data(otag,caller)
     other.model_kind=="NodeData" || throw(ArgumentError(
         "$caller: model Warp requires a NodeData vector OtherView"))
@@ -2278,11 +2272,7 @@ function _plugin_exec_warp(spec::_PluginSpec,caller::AbstractString)
     if raw_other<0
         normals_mode=true;otag=tag;oview=view
     else
-        raw_other==floor(raw_other) || throw(ArgumentError(
-            "$caller: OtherView tag must be an integer"))
-        otag=Int(raw_other)
-        haskey(SESSION_VIEWS,otag) || throw(ArgumentError(
-            "$caller: unknown view tag $otag"))
+        otag=_plugin_view_index(raw_other,"OtherView",caller)
         oview=_session_view_data(otag,caller)
         normals_mode=false
         oview.model_kind===nothing || throw(ArgumentError(
@@ -3528,10 +3518,10 @@ function _plugin_exec_modifycomponents(spec::_PluginSpec,caller::AbstractString)
     otag,oview=tag,view
     if raw_other>=0
         raw_other==floor(raw_other) || throw(ArgumentError(
-            "$caller: OtherView tag must be an integer"))
-        oi=Int(raw_other)
-        if haskey(SESSION_VIEWS,oi)
-            otag,oview=oi,_session_view_data(oi,caller)
+            "$caller: OtherView index must be an integer"))
+        found,oi=_plugin_view_index_tag(raw_other)
+        if found!==nothing
+            otag,oview=found,_session_view_data(found,caller)
         else
             _native_mesh_input_error_locked(
                 "View[$oi] does not exist: using self")

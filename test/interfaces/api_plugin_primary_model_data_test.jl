@@ -28,7 +28,7 @@ function fixture(dir,materialized)
 end
 
 function run_plugin(name,source)
-    A.plugin.set_number(name,"View",source)
+    A.plugin.set_number(name,"View",A.view.get_index(source))
     before=A.view.get_tags()
     A.plugin.run(name)
     return [A.view.get_list_data(tag) for tag in setdiff(A.view.get_tags(),before)]

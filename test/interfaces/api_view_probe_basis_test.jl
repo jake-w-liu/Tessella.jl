@@ -106,7 +106,7 @@ end
   @test A.view.probe(v,9.,0.,0.;numComp=3,distanceMax=100,gradient=true)==([0.,0.,0.,0.,0.,0.,0.,0.,0.],1.)
   # Positive unsupported widths retain the documented component-filter rule.
   @test A.view.probe(v,.25,0.,0.;numComp=2)==(Float64[],-1.)
-  A.plugin.set_number("Probe","View",v);A.plugin.set_number("Probe","X",10.25)
+  A.plugin.set_number("Probe","View",A.view.get_index(v));A.plugin.set_number("Probe","X",10.25)
   A.plugin.set_number("Probe","Y",0.);A.plugin.set_number("Probe","Z",0.)
   A.plugin.run("Probe")
   types,data=A.view.get_list_data(last(A.view.get_tags()))
@@ -192,7 +192,7 @@ end
   @test first(A.view.probe(moving,.25,0.,0.))≈[1.25,11.25]
   @test first(A.view.probe(moving,10.25,0.,0.;step=1))≈[11.25]
   @test first(A.view.probe(moving,.25,0.,0.;gradient=true))≈[1.,0.,0.,1.,0.,0.]
-  A.plugin.set_number("Probe","View",moving)
+  A.plugin.set_number("Probe","View",A.view.get_index(moving))
   for (key,value) in (("X",.25),("Y",0.),("Z",0.));A.plugin.set_number("Probe",key,value);end
   A.plugin.run("Probe")
   @test only(last(A.view.get_list_data(last(A.view.get_tags()))))≈[.25,0.,0.,1.25,11.25]
@@ -296,7 +296,7 @@ end
   A.model.add("translated frame")
   name2,ids2=mesh!(dir,"translated",2,[(10.,0.,0.),(11.,0.,0.),(10.,1.,0.)])
   A.view.add_model_data(v,1,name2,"NodeData",ids2,fill([7.],3))
-  A.plugin.set_number("Probe","View",v)
+  A.plugin.set_number("Probe","View",A.view.get_index(v))
   for (key,value) in (("X",.25),("Y",.25),("Z",0.))
    A.plugin.set_number("Probe",key,value)
   end

@@ -116,7 +116,7 @@ end
         alias=A.view.add_alias(source,false,200)
         owner=A.SESSION_VIEWS[source];alias_object=A.SESSION_VIEWS[alias]
         geo=joinpath(dir,"plugin.geo")
-        write(geo,"Plugin(Probe).View=100;Plugin(Probe).X=0;" *
+        write(geo,"Plugin(Probe).View=0;Plugin(Probe).X=0;" *
             "Plugin(Probe).Y=0;Plugin(Probe).Z=0;Plugin(Probe).Run;Alias View[0];")
         A.merge(geo)
         @test A.view.get_tags()==[100,200,201,202]
@@ -130,7 +130,7 @@ end
         # A fatal script can mutate staged owners and create plugin output;
         # neither operation may detach a held alias or publish partial data.
         before=A.view.get_tags();values=A.view.get_list_data(source)
-        write(geo,"Plugin(Probe).View=100;Plugin(Probe).Run;Delete View[0];Exit 2;")
+        write(geo,"Plugin(Probe).View=0;Plugin(Probe).Run;Delete View[0];Exit 2;")
         @test_throws ArgumentError A.merge(geo)
         @test A.view.get_tags()==before && A.view.get_list_data(source)==values
         @test A.SESSION_VIEWS[alias].alias_of===owner

@@ -63,7 +63,7 @@ end
                 # The selected view keeps its own model when another model
                 # is current; physical ownership must follow that source.
                 A.model.add("foreign")
-                A.plugin.set_number("MathEval","View",source)
+                A.plugin.set_number("MathEval","View",A.view.get_index(source))
                 A.plugin.set_number("MathEval","PhysicalGroup",23)
                 A.plugin.set_string("MathEval","Expression0","v0")
                 types,records=A.view.get_list_data(output("MathEval"))

@@ -25,7 +25,7 @@ function source_view(kind,scale,offset)
 end
 
 function cutgrid(view,point)
-    for (key,value) in (("View",view),("NumPointsU",1),("NumPointsV",1),
+    for (key,value) in (("View",A.view.get_index(view)),("NumPointsU",1),("NumPointsV",1),
                         ("ConnectPoints",0),("X0",point[1]),("Y0",point[2]),("Z0",point[3]))
         A.plugin.set_number("CutGrid",key,value)
     end
@@ -63,8 +63,8 @@ end
         other,_,_=source_view(:quadrangle,1.,1e12)
         target=A.view.add("sampling point")
         A.view.add_list_data(target,"SP",1,[1e12+.25,1e12+.25,0.,0.])
-        A.plugin.set_number("MathEval","View",target)
-        A.plugin.set_number("MathEval","OtherView",other)
+        A.plugin.set_number("MathEval","View",A.view.get_index(target))
+        A.plugin.set_number("MathEval","OtherView",A.view.get_index(other))
         A.plugin.set_number("MathEval","ForceInterpolation",1)
         A.plugin.set_string("MathEval","Expression0","w0")
         A.plugin.run("MathEval")
@@ -78,7 +78,7 @@ end
         vectors=zeros(3,4);vectors[1,:].=1 .+local_x
         vector_view=A.view.add("translated linear flow")
         A.view.add_list_data(vector_view,"VQ",1,vcat(vec(coords[1,:]),vec(coords[2,:]),vec(coords[3,:]),vec(vectors)))
-        for (key,value) in (("View",vector_view),("NumPointsU",1),("NumPointsV",1),
+        for (key,value) in (("View",A.view.get_index(vector_view)),("NumPointsU",1),("NumPointsV",1),
                             ("X0",offset+.25),("Y0",offset+.25),("Z0",0.),
                             ("DT",.1),("MaxIter",3))
             A.plugin.set_number("StreamLines",key,value)

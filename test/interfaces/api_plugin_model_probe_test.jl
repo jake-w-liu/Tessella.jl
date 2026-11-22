@@ -16,7 +16,7 @@ function fixture(dir,name,msh,coords)
     return A.model.get_current(),ids
 end
 function probe(view,point)
-    A.plugin.set_number("Probe","View",view)
+    A.plugin.set_number("Probe","View",A.view.get_index(view))
     for (name,value) in zip(("X","Y","Z"),point)
         A.plugin.set_number("Probe",name,value)
     end
@@ -148,8 +148,8 @@ $EndElements
         A.view.add_model_data(other,0,model,"ElementData",[66,77],[[2.],[10.]])
         source=A.view.add("surface sampling points")
         A.view.add_list_data(source,"ST",1,[.2,.4,.2, .2,.2,.4, 0.,0.,0., 1.,1.,1.])
-        A.plugin.set_number("MathEval","View",source)
-        A.plugin.set_number("MathEval","OtherView",other)
+        A.plugin.set_number("MathEval","View",A.view.get_index(source))
+        A.plugin.set_number("MathEval","OtherView",A.view.get_index(other))
         A.plugin.set_number("MathEval","Dimension",2)
         A.plugin.set_string("MathEval","Expression0","w0")
         A.plugin.run("MathEval")
@@ -159,7 +159,7 @@ $EndElements
 
         unknown=A.view.add("unknown element")
         A.view.add_model_data(unknown,0,model,"ElementData",[1],[[42.]])
-        A.plugin.set_number("Integrate","View",unknown)
+        A.plugin.set_number("Integrate","View",A.view.get_index(unknown))
         A.plugin.run("Integrate")
         _,data=A.view.get_list_data(last(A.view.get_tags()))
         @test last(only(data))==0.0
@@ -169,7 +169,7 @@ $EndElements
         A.model.add("unrelated current model")
         A.plugin.set_number("Integrate","Dimension",2)
         for (view,integral) in ((other,1.0),(nodal,0.5))
-            A.plugin.set_number("Integrate","View",view)
+            A.plugin.set_number("Integrate","View",A.view.get_index(view))
             A.plugin.run("Integrate")
             _,data=A.view.get_list_data(last(A.view.get_tags()))
             @test last(only(data))≈integral
