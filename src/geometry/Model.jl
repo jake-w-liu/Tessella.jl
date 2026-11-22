@@ -961,6 +961,7 @@ include("ModelHomologyNativeNormalForms.jl")
 include("ModelHomologyNativeChains.jl")
 include("ModelHomologyNative.jl")
 include("ModelMeshingAttributes.jl")
+include("ModelClassifyFaces.jl")    # Gmsh's classifyFaces, step by step
 include("ModelMeshOrientationFrontend.jl")
 include("ModelTransforms.jl")
 include("ModelCurved.jl")

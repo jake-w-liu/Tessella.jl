@@ -1607,6 +1607,14 @@ function classify_surfaces!(m::GeoModel;angle=40*pi/180,boundary=true,
     boundary isa Bool || throw(ArgumentError("$caller: boundary must be Bool"))
     for_reparametrization isa Bool || throw(ArgumentError(
         "$caller: for_reparametrization must be Bool"))
+    # Gmsh's own classification (ModelClassifyFaces.jl); the patch cut for
+    # reparametrization is not ported, so that case keeps the code below.
+    if !for_reparametrization &&
+            _classify_faces_gmsh!(m,Float64(angle),boundary,Float64(curve_angle))
+        _cf_publish_new_elements!(m)
+        _classify_republish_mesh!(m)
+        return nothing
+    end
     threshold=cos(Float64(angle))
     cut=Float64(curve_angle)
 

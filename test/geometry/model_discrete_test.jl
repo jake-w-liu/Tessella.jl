@@ -155,7 +155,9 @@ end
         classify_surfaces!(model;angle=15pi/180,boundary=false)
         surfaces=[record for (key,record) in model.discrete if key[1]==2]
         @test length(surfaces)==1
-        @test only(surfaces).element_tags==UInt64.(1:6)
+        # Gmsh 4.15.2 collects a patch's triangles depth first from its
+        # lowest-numbered one: [1, 2, 4, 3, 6, 5].
+        @test only(surfaces).element_tags==UInt64[1,2,4,3,6,5]
     end
 
     model=GeoModel()
@@ -166,7 +168,9 @@ end
     classify_surfaces!(model;angle=pi/4,curve_angle=pi/4)
     segments=sort!([minmax(nodes...) for (key,record) in model.discrete
                    if key[1]==1 for nodes in record.element_nodes])
-    @test segments==[(1,2),(1,4),(2,3),(3,4)]
+    # Gmsh 4.15.2 closes the last piece of a split loop with its first node
+    # again, so the fourth curve holds the lines 4-1 and 1-1.
+    @test segments==[(1,1),(1,2),(1,4),(2,3),(3,4)]
     @test count(key->key[1]==0,keys(model.discrete))==4
     @test count(key->key[1]==1,keys(model.discrete))==4
     @test count(key->key[1]==2,keys(model.discrete))==1
