@@ -126,6 +126,25 @@ function _gopt_volume(state,vertices)
     return determinant*0.166666666666666666
 end
 
+# Whether the cell has negative volume, by the filtered exact predicate.
+function _gopt_negative(state,vertices)
+    a=_gopt_point(state,vertices[1]);b=_gopt_point(state,vertices[2])
+    c=_gopt_point(state,vertices[3]);d=_gopt_point(state,vertices[4])
+    return _orient3_value(a,b,c,d)>0.0
+end
+
+# +1 or -1 when the exact orientation and the Float64 volume `_gopt_finish`
+# orients by agree on the sign of the cell, 0 otherwise.
+function _gopt_orientation(state,vertices)
+    exact=_orient3_value(_gopt_point(state,vertices[1]),_gopt_point(state,vertices[2]),
+        _gopt_point(state,vertices[3]),_gopt_point(state,vertices[4]))
+    float=_gopt_volume(state,vertices)
+    # `_orient3_value` is det(a-d,b-d,c-d), the negative of 6 × the volume.
+    exact<0.0 && float>0.0 && return Int8(1)
+    exact>0.0 && float<0.0 && return Int8(-1)
+    return Int8(0)
+end
+
 @inline _gopt_face(vertices,face)=_sorted_face3(
     vertices[_GOPT_FACES[face][1]],vertices[_GOPT_FACES[face][2]],
     vertices[_GOPT_FACES[face][3]])
@@ -364,20 +383,34 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
     qualities_first=Vector{Float64}(undef,count)
     qualities_last=similar(qualities_first)
     volumes_first=similar(qualities_first);volumes_last=similar(qualities_first)
+    # Orientation of every candidate cell, as the sign shared by its exact
+    # determinant and its Float64 one (0 when they disagree or vanish).
+    signs_first=Vector{Int8}(undef,count);signs_last=similar(signs_first)
     for index in eachindex(triangles)
         slots=triangles[index]
         a=ring[slots[1]];b=ring[slots[2]];c=ring[slots[3]]
         qualities_first[index],volumes_first[index]=_gopt_quality(state,(a,b,c,first))
         qualities_last[index],volumes_last[index]=_gopt_quality(state,(a,b,c,last))
+        signs_first[index]=_gopt_orientation(state,(a,b,c,first))
+        signs_last[index]=_gopt_orientation(state,(c,b,a,last))
     end
     best=-1.0;best_index=1
     for (index,triangulation) in enumerate(triangulations)
         quality=1.0;volume=0.0
+        # Gmsh's gamma and volume test take absolute volumes, so a pattern
+        # holding one flat or inverted cell of near-zero volume passes them
+        # whenever the cavity was already that poor (cone.geo's Volume 2: four
+        # coplanar boundary vertices). A reconnection of a valid cavity orients
+        # every new cell alike; anything else is refused.
+        orientation=signs_first[triangulation[1]]
         for triangle in triangulation
             quality=min(quality,qualities_first[triangle])
             quality=min(quality,qualities_last[triangle])
             volume+=volumes_first[triangle]+volumes_last[triangle]
+            (signs_first[triangle]==orientation && signs_last[triangle]==orientation) ||
+                (orientation=Int8(0))
         end
+        orientation==0 && (quality=-1.0)
         abs(volume-volume_ref)>1e-10*(volume+volume_ref) && (quality=-1.0)
         if quality!=-1.0
             counts=Dict{NTuple{3,Int32},Int}()
@@ -595,7 +628,10 @@ function _gopt_finish(state,mesh,active,swaps,relocations;positive=true)
     output=Matrix{Int32}(undef,4,length(kept));tags=UInt64[];physical=Int32[]
     for (column,index) in enumerate(kept)
         vertices=state.cells[index].vertices
-        if positive && _gopt_volume(state,vertices)<0.0
+        # The exact sign decides: on a cell of near-zero volume the Float64
+        # determinant can have the other sign, and a swap by it inverts the
+        # cell (cone.geo's Volume 2, four almost coplanar boundary vertices).
+        if positive && _gopt_negative(state,vertices)
             vertices=(vertices[2],vertices[1],vertices[3],vertices[4])
         end
         for slot in 1:4

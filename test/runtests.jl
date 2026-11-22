@@ -376,6 +376,8 @@ end
         "structured/transfinite_ordinary_curves_test.jl",
         "structured/quadtotri_general_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
+        "meshing/optimize_exact_orientation_test.jl",
+    )
         println("Testing ", path, "...")
         flush(stdout)
         elapsed = @elapsed include(path)
