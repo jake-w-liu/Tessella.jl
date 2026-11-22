@@ -85,7 +85,7 @@ function _model_transfinite_surface_production(m,t,kernel,mesh,input,high_water,
             tag=data.external_node_tags[source_row]
             tags[row] in (0,tag) || throw(ArgumentError(
                 "$caller: transfinite junction has conflicting actual node identities"))
-            isequal(mesh.coords[:,row],source.mesh.coords[:,source_row]) || throw(ArgumentError(
+            all(axis->isequal(mesh.coords[axis,row],source.mesh.coords[axis,source_row]),1:3) || throw(ArgumentError(
                 "$caller: transfinite source node $tag changed its actual coordinates"))
             tags[row]=tag;owners[row]=data.node_entities[source_row]
             parameters[row]=data.node_parametric[source_row]
