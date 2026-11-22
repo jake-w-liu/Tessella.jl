@@ -178,33 +178,47 @@ function _gmsh3_birth_maximum(value,numbers,caller,kind)
     return UInt64(value)
 end
 
+# The insertion's triangulation of `mesh`, the region tag of every cell and
+# the faces that belong to one cell only (sorted vertex triples). Faces are
+# paired by sorting one record per cell face, not through a hash table: a
+# face of two cells bonds them, a face of three or more is an error.
 function _gmsh3_triangulation(mesh)
-    T=Triangulation3(collect(mesh.coords[1,:]),collect(mesh.coords[2,:]),
-                     collect(mesh.coords[3,:]))
-    tags=Int32[]
-    for column in axes(mesh.tets,2)
-        a,b,c,d=mesh.tets[:,column]
+    T=Triangulation3(mesh.coords[1,:],mesh.coords[2,:],mesh.coords[3,:])
+    nt=size(mesh.tets,2)
+    sizehint!(T.tv,4nt);sizehint!(T.tn,4nt);sizehint!(T.alive,nt)
+    tags=Vector{Int32}(undef,nt)
+    @inbounds for column in 1:nt
+        a=mesh.tets[1,column];b=mesh.tets[2,column];c=mesh.tets[3,column];d=mesh.tets[4,column]
         orient3(_pt(T,a),_pt(T,b),_pt(T,c),_pt(T,d))<0 && ((c,d)=(d,c))
         _newtet!(T,a,b,c,d)
-        push!(tags,isempty(mesh.tet_tag) ? Int32(0) : mesh.tet_tag[column])
+        tags[column]=isempty(mesh.tet_tag) ? Int32(0) : mesh.tet_tag[column]
     end
-    faces=Dict{NTuple{3,Int32},Tuple{Int32,Int}}()
-    complete=Set{NTuple{3,Int32}}()
-    for t in eachindex(T.alive),slot in 1:4
-        face=_face(T,t,slot);key=_sort3t(face...)
-        key in complete && throw(ArgumentError(
-            "native 3-D Delaunay insertion: a face has more than two incident tetrahedra"))
-        previous=pop!(faces,key,nothing)
-        if previous===nothing
-            faces[key]=(Int32(t),slot)
-        else
-            neighbour,other_slot=previous
-            _setn!(T,t,slot,neighbour);_setn!(T,neighbour,other_slot,t)
-            push!(complete,key)
+    records=Vector{Tuple{NTuple{3,Int32},Int32,Int8}}(undef,4nt)
+    @inbounds for t in 1:nt,slot in 1:4
+        records[4(t-1)+slot]=(_sort3t(_face(T,t,slot)...),Int32(t),Int8(slot))
+    end
+    sort!(records)
+    exterior=NTuple{3,Int32}[]
+    position=1;total=length(records)
+    @inbounds while position<=total
+        key,t,slot=records[position]
+        next=position+1
+        while next<=total && records[next][1]==key
+            next+=1
         end
+        run=next-position
+        run>2 && throw(ArgumentError(
+            "native 3-D Delaunay insertion: a face has more than two incident tetrahedra"))
+        if run==1
+            push!(exterior,key)
+        else
+            _,neighbour,other_slot=records[position+1]
+            _setn!(T,t,slot,neighbour);_setn!(T,neighbour,other_slot,t)
+        end
+        position=next
     end
     isempty(T.alive) || (T.last=Int32(1))
-    return T,tags,faces
+    return T,tags,exterior
 end
 
 @inline function _gmsh3_update_size!(sizes,a,b,T,minimize,native_arithmetic=false)
@@ -226,7 +240,10 @@ function _gmsh3_initial_sizes(T,mesh,exterior,minimize,embedded_sizes;native_ari
             "native 3-D Delaunay insertion: embedded size must be finite and positive"))
         sizes[node]=value
     end
-    for face in keys(exterior)
+    # `exterior`: the one-cell faces, as `_gmsh3_triangulation` lists them (or
+    # the keys of a table of them). The updates are minima or maxima, so
+    # their order does not matter.
+    for face in (exterior isa AbstractDict ? keys(exterior) : exterior)
         for node in face;boundary[node]=true;end
         for (i,j) in ((1,2),(2,3),(3,1))
             _gmsh3_update_size!(sizes,face[i],face[j],T,minimize,native_arithmetic)

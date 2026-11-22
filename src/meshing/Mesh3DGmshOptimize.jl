@@ -286,13 +286,101 @@ function _gopt_connect_merge_sorted!(state,indices::AbstractUnitRange)
     return nothing
 end
 
+# Containers of one edge swap, emptied and refilled by every attempt instead
+# of allocated by it: a swap looks at a ring of three to seven cells, so its
+# face tables are short vectors searched in order rather than hash tables.
+struct _GoptSwapScratch
+    cavity::Vector{Int32}
+    ring::Vector{Int32}
+    outside::Vector{Int32}
+    faces::Vector{NTuple{3,Int32}}      # distinct faces of the cavity cells
+    face_count::Vector{Int}
+    face_apex::Vector{Int32}
+    candidate::Vector{NTuple{3,Int32}}  # distinct faces of one reconnection
+    candidate_count::Vector{Int}
+    qualities_first::Vector{Float64}
+    qualities_last::Vector{Float64}
+    volumes_first::Vector{Float64}
+    volumes_last::Vector{Float64}
+    signs_first::Vector{Int8}
+    signs_last::Vector{Int8}
+    records::Vector{Tuple{NTuple{3,Int32},Int32,Int8}}
+    # vertex relocation: the cells around a vertex, the walk's frames and
+    # the trial qualities
+    star::Vector{Int32}
+    frames::Vector{Tuple{Int32,Int}}
+    qualities::Vector{Float64}
+end
+_GoptSwapScratch()=_GoptSwapScratch(Int32[],Int32[],Int32[],NTuple{3,Int32}[],Int[],Int32[],
+    NTuple{3,Int32}[],Int[],Float64[],Float64[],Float64[],Float64[],Int8[],Int8[],
+    Tuple{NTuple{3,Int32},Int32,Int8}[],Int32[],Tuple{Int32,Int}[],Float64[])
+
+# Position of `key` in `keys`, 0 when absent.
+@inline function _gopt_find(keys::Vector{NTuple{3,Int32}},key::NTuple{3,Int32})
+    @inbounds for index in eachindex(keys)
+        keys[index]==key && return index
+    end
+    return 0
+end
+
+# `_gopt_connect!` for the few cells around one swap, without a hash table:
+# the faces are put in order by a stable insertion sort, so every later owner
+# of a face bonds with its first owner exactly as the hashed pass does.
+function _gopt_connect_small!(state,indices,scratch::_GoptSwapScratch)
+    records=scratch.records
+    empty!(records)
+    embedded=!isempty(state.embedded_faces)
+    @inbounds for index in indices
+        cell=state.cells[index]
+        cell.deleted && continue
+        for face in 1:4
+            key=_gopt_face(cell.vertices,face)
+            embedded && key in state.embedded_faces && continue
+            push!(records,(key,Int32(index),Int8(face)))
+        end
+    end
+    @inbounds for i in 2:length(records)
+        record=records[i];j=i-1
+        while j>=1 && records[j][1]>record[1]
+            records[j+1]=records[j];j-=1
+        end
+        records[j+1]=record
+    end
+    position=1;total=length(records)
+    @inbounds while position<=total
+        head=records[position];next=position+1
+        while next<=total && records[next][1]==head[1]
+            other=records[next]
+            if other[2]!=head[2]
+                _gopt_set_neighbor!(state.cells,head[2],Int(head[3]),other[2])
+                _gopt_set_neighbor!(state.cells,other[2],Int(other[3]),head[2])
+            end
+            next+=1
+        end
+        position=next
+    end
+    return nothing
+end
+
 function _gopt_edge_cavity(state,start,edge)
+    scratch=_GoptSwapScratch()
+    found=_gopt_edge_cavity!(scratch,state,start,edge)
+    found===nothing && return nothing
+    return found[1],found[2],scratch.cavity,scratch.outside,scratch.ring
+end
+
+# The cells around the edge `edge` of cell `start`, the ring of vertices
+# opposite it and the cells next to that cavity, into `scratch`; returns the
+# edge's two vertices, or `nothing` when the ring does not close.
+function _gopt_edge_cavity!(scratch::_GoptSwapScratch,state,start,edge)
     cell=state.cells[start]
     local_edge=_GOPT_EDGE_PERMUTATION[edge]
     first=cell.vertices[_GOPT_EDGES[local_edge][1]]
     last=cell.vertices[_GOPT_EDGES[local_edge][2]]
     last_in_ring=cell.vertices[_GOPT_EDGES[7-local_edge][1]]
-    cavity=Int32[Int32(start)];ring=Int32[last_in_ring]
+    cavity=scratch.cavity;ring=scratch.ring
+    empty!(cavity);empty!(ring);empty!(scratch.outside)
+    push!(cavity,Int32(start));push!(ring,last_in_ring)
     current=Int32(start)
     while true
         vertices=state.cells[current].vertices
@@ -323,11 +411,11 @@ function _gopt_edge_cavity(state,start,edge)
         local_edge==0 && return nothing
         length(cavity)>1000 && return nothing
     end
-    outside=Int32[]
+    outside=scratch.outside
     for index in cavity, neighbor in state.cells[index].neighbors
         neighbor==0 || neighbor in outside || neighbor in cavity || push!(outside,neighbor)
     end
-    return first,last,cavity,outside,ring
+    return first,last
 end
 
 function _gopt_new_cell!(state,vertices,quality,physical)
@@ -340,45 +428,58 @@ function _gopt_new_cell!(state,vertices,quality,physical)
     return Int32(length(state.cells))
 end
 
-function _gopt_swap_edge!(state,new_cells,start,edge)
-    found=_gopt_edge_cavity(state,start,edge)
+function _gopt_swap_edge!(state,new_cells,start,edge,scratch::_GoptSwapScratch=_GoptSwapScratch())
+    found=_gopt_edge_cavity!(scratch,state,start,edge)
     found===nothing && return false
-    first,last,cavity,outside,ring=found
+    first,last=found
+    cavity=scratch.cavity;outside=scratch.outside;ring=scratch.ring
     pattern=get(_GOPT_SWAP_TABLE,length(ring),nothing)
     pattern===nothing && return false
     # Embedded entities are hard constraints. Faces/edges carried by a cell
     # outside the cavity survive regardless; an entity whose every carrier is
-    # deleted must be reproduced by the chosen reconnection.
-    constrained_faces=Dict{NTuple{3,Int32},Int}()
-    constrained_edges=Dict{Tuple{Int32,Int32},Int}()
-    for index in cavity
-        vertices=state.cells[index].vertices
-        for face in 1:4
-            key=_gopt_face(vertices,face)
-            haskey(state.embedded_face_carriers,key) &&
-                (constrained_faces[key]=get(constrained_faces,key,0)+1)
+    # deleted must be reproduced by the chosen reconnection. (Without any
+    # embedded entity there is nothing to collect.)
+    constrained=!isempty(state.embedded_face_carriers) ||
+        !isempty(state.embedded_edge_carriers)
+    constrained_faces=constrained ? Dict{NTuple{3,Int32},Int}() : nothing
+    constrained_edges=constrained ? Dict{Tuple{Int32,Int32},Int}() : nothing
+    if constrained
+        for index in cavity
+            vertices=state.cells[index].vertices
+            for face in 1:4
+                key=_gopt_face(vertices,face)
+                haskey(state.embedded_face_carriers,key) &&
+                    (constrained_faces[key]=get(constrained_faces,key,0)+1)
+            end
+            for e in _GOPT_EDGES
+                key=_gopt_edge(vertices[e[1]],vertices[e[2]])
+                haskey(state.embedded_edge_carriers,key) &&
+                    (constrained_edges[key]=get(constrained_edges,key,0)+1)
+            end
         end
-        for e in _GOPT_EDGES
-            key=_gopt_edge(vertices[e[1]],vertices[e[2]])
-            haskey(state.embedded_edge_carriers,key) &&
-                (constrained_edges[key]=get(constrained_edges,key,0)+1)
-        end
+        filter!(pair->state.embedded_face_carriers[pair[1]]==pair[2],
+                constrained_faces)
+        filter!(pair->state.embedded_edge_carriers[pair[1]]==pair[2],
+                constrained_edges)
     end
-    filter!(pair->state.embedded_face_carriers[pair[1]]==pair[2],
-            constrained_faces)
-    filter!(pair->state.embedded_edge_carriers[pair[1]]==pair[2],
-            constrained_edges)
     volume_ref=0.0;quality_ref=1.0
-    incidence=Dict{NTuple{3,Int32},Int}()
-    apexof=Dict{NTuple{3,Int32},Int32}()
+    # Face incidence of the cavity: each distinct face, how many cavity cells
+    # carry it and the apex opposite it in the last of them.
+    faces=scratch.faces;incidence=scratch.face_count;apexof=scratch.face_apex
+    empty!(faces);empty!(incidence);empty!(apexof)
     for index in cavity
         cell=state.cells[index]
         volume_ref+=abs(_gopt_volume(state,cell.vertices))
         quality_ref=min(quality_ref,cell.quality)
         for face in 1:4
             key=_gopt_face(cell.vertices,face)
-            incidence[key]=get(incidence,key,0)+1
-            apexof[key]=cell.vertices[_GOPT_FACE_APEX[face]]
+            apex=cell.vertices[_GOPT_FACE_APEX[face]]
+            position=_gopt_find(faces,key)
+            if position==0
+                push!(faces,key);push!(incidence,1);push!(apexof,apex)
+            else
+                incidence[position]+=1;apexof[position]=apex
+            end
         end
     end
     # Face incidence inside the cavity defines the certificate a reconnection
@@ -391,17 +492,18 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
     # duplicates and folded-over output both enter through that path.
     # Upstream patterns on a complete convex star always satisfy the whole
     # certificate, so a refusal here only ever rejects a corrupting pattern.
-    any(count->count>2,values(incidence)) && return false
-    boundary_faces=Set{NTuple{3,Int32}}(key for (key,count) in incidence if count==1)
-    boundary_apex=Dict{NTuple{3,Int32},Int32}(key=>apexof[key] for key in boundary_faces)
+    any(count->count>2,incidence) && return false
+    # The boundary faces are the faces carried once (incidence 1).
+    no_boundary=!any(==(1),incidence)
     triangles,triangulations=pattern
     count=length(triangles)
-    qualities_first=Vector{Float64}(undef,count)
-    qualities_last=similar(qualities_first)
-    volumes_first=similar(qualities_first);volumes_last=similar(qualities_first)
+    qualities_first=resize!(scratch.qualities_first,count)
+    qualities_last=resize!(scratch.qualities_last,count)
+    volumes_first=resize!(scratch.volumes_first,count)
+    volumes_last=resize!(scratch.volumes_last,count)
     # Orientation of every candidate cell, as the sign shared by its exact
     # determinant and its Float64 one (0 when they disagree or vanish).
-    signs_first=Vector{Int8}(undef,count);signs_last=similar(signs_first)
+    signs_first=resize!(scratch.signs_first,count);signs_last=resize!(scratch.signs_last,count)
     for index in eachindex(triangles)
         slots=triangles[index]
         a=ring[slots[1]];b=ring[slots[2]];c=ring[slots[3]]
@@ -429,29 +531,37 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
         orientation==0 && (quality=-1.0)
         abs(volume-volume_ref)>1e-10*(volume+volume_ref) && (quality=-1.0)
         if quality!=-1.0
-            counts=Dict{NTuple{3,Int32},Int}()
+            counts=scratch.candidate_count;keys_=scratch.candidate
+            empty!(counts);empty!(keys_)
             for triangle in triangulation
                 slots=triangles[triangle]
                 a=ring[slots[1]];b=ring[slots[2]];c=ring[slots[3]]
                 for vertices in ((a,b,c,first),(c,b,a,last)),face in 1:4
                     key=_gopt_face(vertices,face)
-                    counts[key]=get(counts,key,0)+1
+                    position=_gopt_find(keys_,key)
+                    if position==0
+                        push!(keys_,key);push!(counts,1)
+                    else
+                        counts[position]+=1
+                    end
                 end
             end
-            tiling=isempty(boundary_faces)
-            for (key,count) in counts
-                if count==1
-                    tiling=key in boundary_faces
-                elseif count==2
-                    tiling=!(key in boundary_faces)
-                else
-                    tiling=false
-                end
+            # A tiling of the cavity: each face of the new cells carried once
+            # is a cavity boundary face, each carried twice is not, and every
+            # boundary face is carried exactly once.
+            tiling=isempty(keys_) ? no_boundary : true
+            for (position,key) in enumerate(keys_)
+                where=_gopt_find(faces,key)
+                boundary=where!=0 && incidence[where]==1
+                tiling=counts[position]==1 ? boundary :
+                    counts[position]==2 ? !boundary : false
                 tiling || break
             end
             if tiling
-                for key in boundary_faces
-                    get(counts,key,0)==1 || (tiling=false;break)
+                for (where,key) in enumerate(faces)
+                    incidence[where]==1 || continue
+                    position=_gopt_find(keys_,key)
+                    (position!=0 && counts[position]==1) || (tiling=false;break)
                 end
             end
             if tiling
@@ -460,8 +570,9 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
                     a=ring[slots[1]];b=ring[slots[2]];c=ring[slots[3]]
                     for vertices in ((a,b,c,first),(c,b,a,last)),face in 1:4
                         key=_gopt_face(vertices,face)
-                        interior=get(boundary_apex,key,nothing)
-                        interior===nothing && continue
+                        where=_gopt_find(faces,key)
+                        (where!=0 && incidence[where]==1) || continue
+                        interior=apexof[where]
                         fa=_gopt_point(state,key[1]);fb=_gopt_point(state,key[2])
                         fc=_gopt_point(state,key[3])
                         s_new=_orient3_value(fa,fb,fc,
@@ -475,10 +586,13 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
             tiling || (quality=-1.0)
         end
         if quality!=-1.0 &&
-                !(isempty(constrained_faces) && isempty(constrained_edges) &&
+                !((constrained_faces===nothing || isempty(constrained_faces)) &&
+                  (constrained_edges===nothing || isempty(constrained_edges)) &&
                   isempty(state.embedded_verts))
-            uncovered_faces=Set(keys(constrained_faces))
-            uncovered_edges=Set(keys(constrained_edges))
+            uncovered_faces=constrained_faces===nothing ? Set{NTuple{3,Int32}}() :
+                Set(keys(constrained_faces))
+            uncovered_edges=constrained_edges===nothing ? Set{Tuple{Int32,Int32}}() :
+                Set(keys(constrained_edges))
             violation=false
             for triangle in triangulation
                 slots=triangles[triangle]
@@ -522,15 +636,23 @@ function _gopt_swap_edge!(state,new_cells,start,edge)
         _gopt_delete!(state.cells,index)
         _gopt_note_carriers!(state,state.cells[index].vertices,-1)
     end
-    _gopt_connect!(state,outside)
+    _gopt_connect_small!(state,outside,scratch)
     return true
 end
 
 # Use a stack of continuation frames to retain native depth-first visitation
 # order without imposing the native recursion's process-stack limit.
 function _gopt_vertex_cavity(state,start,vertex)
-    cavity=Int32[Int32(start)];seen=Set(cavity)
-    frames=Tuple{Int32,Int}[(Int32(start),1)]
+    cavity=Int32[];frames=Tuple{Int32,Int}[]
+    return _gopt_vertex_cavity!(cavity,frames,state,start,vertex)
+end
+
+# The same walk into reused vectors. The cells around one vertex are a few
+# dozen, so "already seen" is a search of `cavity` rather than a hash set.
+function _gopt_vertex_cavity!(cavity::Vector{Int32},frames::Vector{Tuple{Int32,Int}},
+                              state,start,vertex)
+    empty!(cavity);empty!(frames)
+    push!(cavity,Int32(start));push!(frames,(Int32(start),1))
     while !isempty(frames)
         index,position=pop!(frames)
         cell=state.cells[index]
@@ -540,19 +662,19 @@ function _gopt_vertex_cavity(state,start,vertex)
         position>3 && continue
         push!(frames,(index,position+1))
         neighbor=cell.neighbors[_GOPT_VERTEX_FACES[role][position]]
-        neighbor==0 || neighbor in seen || begin
-            push!(seen,neighbor);push!(cavity,neighbor);push!(frames,(neighbor,1))
+        neighbor==0 || neighbor in cavity || begin
+            push!(cavity,neighbor);push!(frames,(neighbor,1))
         end
     end
     return cavity
 end
 
-function _gopt_smooth_vertex!(state,index,role)
+function _gopt_smooth_vertex!(state,index,role,scratch::_GoptSwapScratch=_GoptSwapScratch())
     cell=state.cells[index]
     cell.deleted && return false
     vertex=cell.vertices[role]
     state.movable[vertex] || return false
-    cavity=_gopt_vertex_cavity(state,index,vertex)
+    cavity=_gopt_vertex_cavity!(scratch.star,scratch.frames,state,index,vertex)
     cavity===nothing && return false
     x=0.0;y=0.0;z=0.0;volume_total=0.0;worst=1.0
     for index in cavity
@@ -572,7 +694,7 @@ function _gopt_smooth_vertex!(state,index,role)
     state.coords[2,vertex]=y/volume_total
     state.coords[3,vertex]=z/volume_total
     worst_after=1.0;volume_after=0.0
-    qualities=Vector{Float64}(undef,length(cavity))
+    qualities=resize!(scratch.qualities,length(cavity))
     for (position,index) in enumerate(cavity)
         quality,volume=_gopt_quality(state,state.cells[index].vertices)
         qualities[position]=quality;volume_after+=volume
@@ -617,7 +739,9 @@ function _gopt_ingest(mesh::Mesh,element_numbers,element_high_water,movable,
         BitVector(movable)
     end
     cells=_GmshOptimizeTet[]
-    sizehint!(cells,size(mesh.tets,2))
+    # Swaps append the cells they make; room for them saves copying the
+    # whole vector when it would otherwise double.
+    sizehint!(cells,size(mesh.tets,2)+size(mesh.tets,2)>>2)
     face_carriers=Dict(key=>0 for key in embedded_faces)
     edge_carriers=Dict(key=>0 for key in embedded_edges)
     embedded_verts=Set{Int32}(v for f in embedded_faces for v in f)
@@ -672,6 +796,7 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
         embedded_faces,embedded_edges)
     cells=state.cells
     swaps=0;relocations=0;previous_worst=0.0
+    scratch=_GoptSwapScratch()
     if threshold>0.0
         while true
             new_cells=Int32[]
@@ -683,7 +808,7 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
                         slots=_GOPT_EDGES[_GOPT_EDGE_PERMUTATION[edge]]
                         key=_gopt_edge(cell.vertices[slots[1]],cell.vertices[slots[2]])
                         key in state.embedded_edges && continue
-                        if _gopt_swap_edge!(state,new_cells,index,edge)
+                        if _gopt_swap_edge!(state,new_cells,index,edge,scratch)
                             swaps+=1
                             break
                         end
@@ -702,7 +827,7 @@ function _gmsh_optimize_tetrahedra(mesh::Mesh;
                     cell.deleted && continue
                     if cell.quality<threshold
                         for role in 1:4
-                            _gopt_smooth_vertex!(state,index,role) && (relocations+=1)
+                            _gopt_smooth_vertex!(state,index,role,scratch) && (relocations+=1)
                         end
                     end
                 end
@@ -813,6 +938,7 @@ function _netgen_optimize_tetrahedra(mesh::Mesh;
         embedded_faces,embedded_edges)
     cells=state.cells
     swaps=0;relocations=0
+    scratch=_GoptSwapScratch()
     for _ in 1:rounds
         changed=false
         new_cells=Int32[]
@@ -830,7 +956,7 @@ function _netgen_optimize_tetrahedra(mesh::Mesh;
                 slots=_GOPT_EDGES[_GOPT_EDGE_PERMUTATION[edge]]
                 key=_gopt_edge(cell.vertices[slots[1]],cell.vertices[slots[2]])
                 key in state.embedded_edges && continue
-                _gopt_swap_edge!(state,new_cells,index,edge) &&
+                _gopt_swap_edge!(state,new_cells,index,edge,scratch) &&
                     (swaps+=1;changed=true;break)
             end
         end
