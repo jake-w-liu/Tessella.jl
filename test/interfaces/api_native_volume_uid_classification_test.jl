@@ -83,7 +83,10 @@ function interior_births()
     A.initialize()
     try
         A.option("Mesh.Renumber",0);tetrahedron!()
-        A.mesh.set_size([(0,tag) for tag in (2,5,7,10)],.3);A.mesh.generate(2)
+        # At size .3 Gmsh 4.15.2 births no interior node in this tetrahedron
+        # (49 nodes, 100 tets, as Tessella); at .2 it births one (95 nodes,
+        # 219 tets, as Tessella), which is what this contract needs.
+        A.mesh.set_size([(0,tag) for tag in (2,5,7,10)],.2);A.mesh.generate(2)
         model=A._with_model() do current;deepcopy(current);end
         input=model.meshing.mesh_authority;assembly=assembled(model,input)
         production=Tessella.Model.mesh_model_volume(model,40;_mesh_input=input,_return_volume_production=true,
