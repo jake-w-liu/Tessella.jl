@@ -396,15 +396,18 @@ function remove_slivers(m::Mesh; max_rounds::Integer=8, sliver_deg::Real=10.0)
     nrounds = _opt_count(max_rounds,"remove_slivers","max_rounds")
     q0 = mesh_quality(m; sliver_deg=sliver_deg)
     best = _copy_mesh(m); bestn = q0.n_slivers
+    # The report of the returned mesh is the one already taken of it: `q0`
+    # for the copy of the input, `q` for an accepted candidate. Measuring it
+    # again validated the whole mesh a second time.
+    qf = q0
     for _ in 1:nrounds
         bestn == 0 && break
         cand = smooth_optimize(best; iters=4, sliver_deg=sliver_deg)
         (validate(cand).ok) || break
         q = mesh_quality(cand; sliver_deg=sliver_deg)
         (q.n_slivers < bestn) || break                # converged / no further gain
-        best = cand; bestn = q.n_slivers
+        best = cand; bestn = q.n_slivers; qf = q
     end
-    qf = mesh_quality(best; sliver_deg=sliver_deg)
     return best, (slivers_before = q0.n_slivers, slivers_after = qf.n_slivers,
                   min_dihedral_before = q0.min_dihedral_deg, min_dihedral_after = qf.min_dihedral_deg)
 end

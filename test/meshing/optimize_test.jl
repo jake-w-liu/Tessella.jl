@@ -8,6 +8,7 @@
 # Robustness   : slivery Delaunay-of-random-cloud input, boundary nodes pinned.
 # Completeness  : no tet inverted (positive-volume guard), tags preserved.
 
+module OptimizeTest
 using Test
 import Tessella
 using Tessella.Mesh3D
@@ -145,6 +146,8 @@ function _optimize_warmed_allocation(operation,mesh)
     return minimum_bytes
 end
 
+# Allocation counts are those of compiled code; the interpreted suite skips them.
+Base.JLOptions().compile_enabled == 1 &&
 @testset "optimization allocation budgets for tagged boundary meshes" begin
     for count in (1000,2000,4000)
         mesh=_optimize_allocation_mesh(count)
@@ -157,14 +160,20 @@ end
         # Warmed Julia 1.12/1.13 measurements at 1k/2k/4k cells establish these
         # linear budgets with fixed setup slack. Reintroducing the old full
         # connectivity/tag pre-copy exceeds each unchanged budget at every size.
+        # Each operation validates its input exactly once; that validation is
+        # `validate`'s own cost (its tetrahedron topology certificate came
+        # after these budgets) and is measured here rather than budgeted. A
+        # second validation (remove_slivers used to measure its result again)
+        # exceeds the budget at every size.
+        checked=_optimize_warmed_allocation(validate,mesh)
         @test _optimize_warmed_allocation(
-            m->smooth_laplacian(m;iters=1),mesh)<=2660count+16384
+            m->smooth_laplacian(m;iters=1),mesh)<=checked+2660count+16384
         @test _optimize_warmed_allocation(
-            m->smooth_odt(m;iters=1),mesh)<=1260count+16384
+            m->smooth_odt(m;iters=1),mesh)<=checked+1260count+16384
         @test _optimize_warmed_allocation(
-            m->smooth_optimize(m;iters=1),mesh)<=1260count+16384
+            m->smooth_optimize(m;iters=1),mesh)<=checked+1260count+16384
         @test _optimize_warmed_allocation(
-            m->remove_slivers(m;max_rounds=1),mesh)<=300count+16384
+            m->remove_slivers(m;max_rounds=1),mesh)<=checked+300count+16384
     end
 end
 
@@ -396,3 +405,4 @@ end
         @test mesh_crc(smooth_odt(m;iters=0)).sha==mesh_crc(m).sha
     end
 end
+end # module
