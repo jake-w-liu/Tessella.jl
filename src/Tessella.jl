@@ -57,6 +57,7 @@ include("meshing/Mesh3D.jl")      # 3-D Delaunay + volume filling (+ multi-regio
 include("meshing/BoundaryRecovery.jl") # flip-based boundary recovery for closed surfaces
 include("meshing/RecoverCDT.jl")  # general conforming-Delaunay boundary recovery (exact)
 include("meshing/Optimize.jl")    # tet quality report + Laplacian smoothing
+include("meshing/Hxt.jl")         # HXT tetrahedral mesher (Mesh.Algorithm3D = 10)
 include("geometry/Heal.jl")       # surface-defect detection ("heal, don't fail")
 include("geometry/Geometry.jl")   # native constructive primitive surfaces
 include("geometry/CAD.jl")        # native analytical geometry (surfaces + exact imprints), no OCC
