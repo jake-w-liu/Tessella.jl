@@ -13,7 +13,11 @@ function receive_frame(peer)
     return kind,String(read(peer,count))
 end
 
-function with_remote(action,handler;timeout=1.,small_buffer=false)
+# The deadline under test applies once the session is connected. The handshake
+# itself waits for the fixture's server task, which a loaded machine running the
+# interpreted suite may not schedule within a deadline of 0.15 s (one CI run
+# failed there); it gets ten seconds.
+function with_remote(action,handler;timeout=1.,small_buffer=false,handshake=max(timeout,10.))
     listener=listen(Sockets.localhost,0);peer_ref=Ref{Any}(nothing)
     if small_buffer
         buffer=Ref{Cint}(4096)
@@ -41,7 +45,8 @@ function with_remote(action,handler;timeout=1.,small_buffer=false)
     end
     session=nothing
     try
-        session=A._onelab_remote_begin("fixture",address;timeout)
+        session=A._onelab_remote_begin("fixture",address;timeout=handshake)
+        session.timeout=timeout
         return action(session)
     finally
         session===nothing || A._onelab_remote_end!(session;notify=false)
