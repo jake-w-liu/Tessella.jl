@@ -793,6 +793,24 @@ function _geo_exec_statements(stream::Base.IO)
     return statements,locs
 end
 
+# The `GeoParams` of a `.geo` run, from the run itself: the option writes it
+# made (`context.scan_options`), its named physical groups, and its fields.
+function _geo_execution_params(model,context,params)
+    options=something(context.scan_options,Dict{String,Float64}())
+    get_option(key,default)=get(options,key,default)
+    seed=haskey(options,"Mesh.RandomSeed") ? _gmsh_random_seed(options["Mesh.RandomSeed"]) : 0
+    fan=5
+    for key in ("Mesh.BoundaryLayerFanElements","Mesh.BoundaryLayerFanPoints")
+        haskey(options,key) && (fan=_gmsh_int_option(options[key],key))
+    end
+    groups=Dict{Tuple{Int,Int},String}(key=>name for (key,name) in model.physical_names
+        if !isempty(name))
+    return GeoParams(get_option("Mesh.MeshSizeMin",NaN),get_option("Mesh.MeshSizeMax",NaN),
+        get_option("Mesh.MeshSizeFactor",1.0),seed,groups,params.fields,
+        something(context.background_field,0),copy(context.boundary_layer_fields),
+        get_option("Geometry.Tolerance",NaN),fan,String[],String[],0)
+end
+
 """
     execute_geo(path; mesh_dim=0) -> GeoExecution
 
@@ -870,24 +888,6 @@ explicit blockers.
 An allocator read after an untracked topology-changing declaration is rejected;
 tracked `Boolean` operand `Delete` and `SetMaxTag` counters stay live.
 """
-# The `GeoParams` of a `.geo` run, from the run itself: the option writes it
-# made (`context.scan_options`), its named physical groups, and its fields.
-function _geo_execution_params(model,context,params)
-    options=something(context.scan_options,Dict{String,Float64}())
-    get_option(key,default)=get(options,key,default)
-    seed=haskey(options,"Mesh.RandomSeed") ? _gmsh_random_seed(options["Mesh.RandomSeed"]) : 0
-    fan=5
-    for key in ("Mesh.BoundaryLayerFanElements","Mesh.BoundaryLayerFanPoints")
-        haskey(options,key) && (fan=_gmsh_int_option(options[key],key))
-    end
-    groups=Dict{Tuple{Int,Int},String}(key=>name for (key,name) in model.physical_names
-        if !isempty(name))
-    return GeoParams(get_option("Mesh.MeshSizeMin",NaN),get_option("Mesh.MeshSizeMax",NaN),
-        get_option("Mesh.MeshSizeFactor",1.0),seed,groups,params.fields,
-        something(context.background_field,0),copy(context.boundary_layer_fields),
-        get_option("Geometry.Tolerance",NaN),fan,String[],String[],0)
-end
-
 function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_mesh_algorithms=(algorithm_2d=6,algorithm_3d=1),
                      _initial_context_lc::Float64=1.0,
