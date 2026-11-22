@@ -1337,10 +1337,13 @@ function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     ra,_,_=_model_occ_revol_rh(pa,p,n)
     rb,_,_=_model_occ_revol_rh(pb,p,n)
     full=a==_OCC_TWO_PI
-    kind===:spline || _model_occ_revol_edge_order!(
+    kind in (:spline,:conic) || _model_occ_revol_edge_order!(
         sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     if kind===:spline
         face_id=_model_occ_revol_spline!(
+            sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
+    elseif kind===:conic
+        face_id=_model_occ_revol_curved!(
             sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     elseif kind===:annulus
         # Standalone swept-face normal follows the profile's radial
@@ -1361,7 +1364,8 @@ function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
     for vid in (a_id,b_id)
         eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
         # Gmsh also lists the collapsed parallel of a vertex on the axis
-        eid==0 && kind===:spline && (eid=get(sw.lmap,vid,zero(UInt64)))
+        eid==0 && kind in (:spline,:conic) &&
+            (eid=get(sw.lmap,vid,zero(UInt64)))
         eid!=0 && push!(laterals,
             _model_occ_sweep_tag_of(sw,kernel,eid,caller))
     end
@@ -1737,9 +1741,17 @@ function _model_occ_revol_check_line(kernel,src_id,p,n,caller)
         end
         return :spline
     end
+    if g.kind in (:circle,:ellipse)
+        # a conic arc in an axial plane: its exact tensor surface of
+        # revolution; it may end on the axis, not cross it
+        geo=g.geometry
+        abs(_dot3(geo.n,n))<=1.0e-10 || throw(ArgumentError(
+            "$caller: revolve profile is not planar with the revolution axis"))
+        return :conic
+    end
     g.kind===:line || throw(ArgumentError(
         "$caller: revolution of a $(g.kind) profile is not yet " *
-        "supported — only line and spline curves are"))
+        "supported — only line, conic and spline curves are"))
     a_id,b_id=source.children
     pa=kernel.shapes[a_id].geometry.point
     pb=kernel.shapes[b_id].geometry.point

@@ -5924,6 +5924,31 @@ function _geo_occ_bind_shell!(m::GeoModel,tag::Int,kernel,caller)
     return sid
 end
 
+function _geo_occ_sewn_loop!(m::GeoModel,t::Int,surfaces,
+                             context::_GeoNumericContext,caller)
+    kernel=_geo_occ_prepare_kernel!(m)
+    try
+        _geo_occ_bind_entities!(m,[(2,abs(Int(s))) for s in surfaces],
+                                kernel,caller)
+        Model._model_occ_add_surface_loop!(m,[abs(Int(s)) for s in surfaces];
+                                           tag=t,sewing=true)
+    catch err
+        err isa InterruptException && rethrow()
+        err isa ArgumentError || rethrow()
+        _geo_occ_fail!(context,err,"Could not add surface loop")
+        return nothing
+    end
+    _geo_occ_finish!(m,context)
+    sid=kernel.bindings[(-2,t)]
+    # the GEO loop of this tag is the sewn shell (a later `Volume` binds it)
+    old=get(kernel.shell_loops,sid,nothing)
+    old===nothing || old==t || delete!(m.surface_loops,old)
+    m.surface_loops[t]=Int[(r ? -1 : 1)*Model._model_occ_shape_tag(kernel,f,caller)
+                           for (f,r) in kernel.shapes[sid].geometry.uses]
+    kernel.shell_loops[sid]=t
+    return nothing
+end
+
 # Bind a `.geo` `Volume` into the kernel as a solid at its own tag — each
 # member `Surface Loop` becomes a bound shell.
 function _geo_occ_bind_volume!(m::GeoModel,tag::Int,kernel,caller)
@@ -8744,6 +8769,16 @@ function _exec_line!(m::GeoModel,line::AbstractString,
                          allocator_state) && return
         t=Base.inferencebarrier(_alloc_surface_loop_tag)(m,Base.inferencebarrier(_tag)(tag,caller,2),caller;
                                   literal_zero=zero_literal)
+        if occursin(r"\bUsing\s+Sewing\s*;$",line) &&
+                allocator_state!==nothing &&
+                allocator_state.factory===:opencascade
+            # `addSurfaceLoop(tag, surfaces, sewing=true)`: the faces are
+            # sewn into a new shell of new faces (BRepBuilderAPI_Sewing);
+            # the loop is that shell.
+            Base.inferencebarrier(_geo_occ_sewn_loop!)(m,t,surfaces,
+                context,caller)
+            return
+        end
         m.surface_loops[t]=copy(surfaces)
         return
     elseif (mm=match(
