@@ -48,10 +48,8 @@ Extrude {{0,0,1}, {0,0,0}, Pi/2} { Surface{5}; }
             on_line = [uv[2i] for (i, tag) in enumerate(tags) if tag in line_nodes]
             @test length(on_line) == length(line_nodes) > 0
             @test all(v -> abs(v - 1) <= 1e-9, on_line)
-            # The flat sector: Gmsh 10 triangles, Tessella 8. Same boundary
-            # parametrization and lift (Gmsh's getValue agrees), the 2-D
-            # frontal mesher places one interior node where Gmsh places two.
-            @test_broken count(16) == 10
+            # The flat sector, whose u=0 side is the axis point: Gmsh 10.
+            @test count(16) == 10
         end
     finally
         api.finalize()
