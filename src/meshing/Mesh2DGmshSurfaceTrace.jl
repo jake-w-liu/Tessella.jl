@@ -50,7 +50,7 @@ function _gmsh_surface_trace_radius(trace,T,nodes,lc)
     return _gmsh_norm3(_gmsh_sub3(first,center))/lc
 end
 function _gmsh_surface_trace(T,inside,world,lift,high_water,sizes,background,extend;
-                             temporary_cells=0,metric=(1.0,0.0,1.0))
+                             temporary_cells=0,metric=(1.0,0.0,1.0),initial=nothing)
     0<=high_water<=typemax(UInt64) || throw(ArgumentError(
         "native Surface element high water must be UInt64 representable"))
     length(world)==T.nreal || throw(ArgumentError(
@@ -66,9 +66,13 @@ function _gmsh_surface_trace(T,inside,world,lift,high_water,sizes,background,ext
     for _ in 1:temporary_cells
         _gmsh_surface_trace_next_element!(trace)
     end
-    for triangle in eachindex(T.alive)
-        inside[triangle] || continue
-        nodes=(_vert(T,triangle,1),_vert(T,triangle,3),_vert(T,triangle,2))
+    # `initial` lists the cells as BDS2GMSH constructs them after
+    # `delaunayizeBDS` — (slot, MTriangle node order) — when that pass may have
+    # swapped edges; otherwise the slots are the recovered PolyMesh faces.
+    cells=initial===nothing ?
+        ((triangle,(_vert(T,triangle,1),_vert(T,triangle,3),_vert(T,triangle,2)))
+         for triangle in eachindex(T.alive) if inside[triangle]) : initial
+    for (triangle,nodes) in cells
         trace.triangles[triangle]=nodes
         trace.elements[triangle]=_gmsh_surface_trace_next_element!(trace)
         a,b,c=nodes
@@ -91,6 +95,25 @@ end
 @inline _gmsh_trace_metric(metric::NTuple{3,Float64},pu,pv,pw)=metric
 @inline _gmsh_trace_metric(metric,pu,pv,pw)=metric(
     (pu[1]+pv[1]+pw[1])/3.0,(pu[2]+pv[2]+pw[2])/3.0)
+
+# `buildMetric(gf, uv)` of a curved chart: the first fundamental form
+# `(E,F,G)` of `form(u,v)`. Its cells read it at the centroid exactly as
+# `optimalPointFrontal` and `inCircumCircleAniso` form it, `* ONE_THIRD`; the
+# frontal point then lies on the surface (`optimalPointFrontalB`) and every
+# test of one insertion uses the seed cell's tensor (`metricb`).
+struct _GmshFirstFundamental{F}
+    form::F
+end
+(metric::_GmshFirstFundamental)(u,v)=metric.form(u,v)
+const _GMSH_ONE_THIRD=1.0/3.0
+@inline _gmsh_trace_metric(metric::_GmshFirstFundamental,pu,pv,pw)=metric.form(
+    (pu[1]+pv[1]+pw[1])*_GMSH_ONE_THIRD,(pu[2]+pv[2]+pw[2])*_GMSH_ONE_THIRD)
+@inline _gmsh_trace_curved(trace)=false
+@inline _gmsh_trace_curved(trace::_GmshSurfaceTrace)=trace.metric isa _GmshFirstFundamental
+# The tensor every cavity test of one insertion uses on a curved chart, or
+# `nothing` where each cell reads its own (a constant tensor makes both equal).
+@inline _gmsh_seed_metric(trace,T,a,b,c)=_gmsh_trace_curved(trace) ?
+    _gmsh_surface_metric(trace,_pt(T,a),_pt(T,b),_pt(T,c)) : nothing
 @inline _gmsh_surface_delaunay_point(T,a,b,c,::Nothing)=
     _gmsh_circumcenter_xy(_pt(T,a),_pt(T,b),_pt(T,c))
 @inline function _gmsh_surface_delaunay_point(T,a,b,c,trace::_GmshSurfaceTrace)

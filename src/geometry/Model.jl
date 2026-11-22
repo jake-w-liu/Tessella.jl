@@ -7942,9 +7942,24 @@ function _mesh_model_surface_unstructured_once(m::GeoModel,t::Int,forced,min_ang
         geometry!==nothing && hasproperty(geometry,:occ) && geometry.occ===:plane)
     fullquad=_model_surface_recombined(m,t) && m.meshing.recombine_algo in (2,3)
     experimental=_model_surface_recombined(m,t) && m.meshing.recombine_algo==4
-    if algorithm==3 || (native_plane && (fullquad || experimental)) || (_return_surface_production && native_plane)
+    # Every consumer of actual lower products — the plain surface pass and a
+    # structured region meshing its source (`_mesh_input`) — gets the same
+    # native producer, so a source surface is the mesh Gmsh gives it.
+    native_input=_return_surface_production || _mesh_input!==nothing
+    if algorithm==3 || (native_plane && (fullquad || experimental)) || (native_input && native_plane)
         options=_model_algorithm_size_options(m,_mesh1d_options,caller)
         production=_gmsh_native_initial_surface(m,t,options,_mesh_input,
+            _mesh_node_high_water,caller;algorithm,size_field,
+            element_high_water=_mesh_element_high_water,forced,
+            _periodic_positions)
+        return production,get(m.embeds,(2,t),NTuple{2,Int}[])
+    end
+    # A declared `Surface` is a `RuledSurface` GFace in Gmsh whether or not its
+    # boundary is coplanar: `meshGenerator` meshes its own ruled parameters.
+    if native_input && _surface_type(m,t) in (:ruled,:tric) &&
+       _gmsh_native_ruled_admitted(m,t,algorithm)
+        options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+        production=_gmsh_native_ruled_surface(m,t,options,_mesh_input,
             _mesh_node_high_water,caller;algorithm,size_field,
             element_high_water=_mesh_element_high_water,forced,
             _periodic_positions)

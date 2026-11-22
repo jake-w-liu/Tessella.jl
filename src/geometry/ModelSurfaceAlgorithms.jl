@@ -850,6 +850,13 @@ function _occ_curved_surface_refine!(m::GeoModel,t::Int,geometry,T,
     ground=(u,v)->_occ_surface_ground(geometry,Float64(u),Float64(v))
     bounds=(minimum(xs),maximum(xs),minimum(ys),maximum(ys))
     trace=Mesh2D._GmshSurfaceMetricCarrier(world,lift,metric,ground,true,bounds)
+    # `meshGenerator` makes a face without seam or pole Delaunay in its first
+    # fundamental form (`delaunayizeBDS`) before any point is inserted. The
+    # parameter-plane triangulation of a long swept strip fans across the
+    # strip; left alone, its cells span the sweep and the lifted surface
+    # crosses itself (examples/boolean/pipe.geo). Charts with a seam or a
+    # collapsed row keep their established construction.
+    allunique(world) && Mesh2D._gmsh_delaunayize_initial!(T,ground,interior)
     sizes=_ruled_vertex_sizes(T,xs,ys,segs,Float64[],Int[],world;interior)
     extend=_resolved_extend_from_boundary(m,2,t)
     return refine!(T;min_angle_deg=0,gmsh_insertion=true,

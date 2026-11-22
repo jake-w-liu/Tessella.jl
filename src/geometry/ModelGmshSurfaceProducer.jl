@@ -43,6 +43,54 @@ function _gmsh_native_plane_frame(samples,tolerance,characteristic_length)
     return nothing
 end
 
+# The parametrization of a built-in ruled `Surface` (`gmshFace` with
+# `MSH_SURF_REGL`/`MSH_SURF_TRIC`): `lift(u,v)` is `GFace::point`, boundary
+# nodes take their parameters from `reparamOnFace`, and `form` is
+# `buildMetric`'s first fundamental form. `occ` is always false; it answers the
+# plane frame's question in the code both share.
+struct _GmshRuledChart{L,F}
+    lift::L
+    form::F
+    tag::Int
+    lc::Float64
+    occ::Bool
+end
+
+@inline _surface_metric_lift(chart::_GmshRuledChart,u,v)=chart.lift(Float64(u),Float64(v))
+_native_frame_lift(chart::_GmshRuledChart)=chart.lift
+_native_smoothing_metric(chart::_GmshRuledChart)=chart.form
+
+# `buildMetric`: `firstDer` dot products, `(du.du, dv.du, dv.dv)`.
+struct _GmshRuledFirstForm{L}
+    lift::L
+end
+function (form::_GmshRuledFirstForm)(u,v)
+    u=Float64(u);v=Float64(v)
+    du,dv=_ruled_jacobian(form.lift,form.lift(u,v),u,v)
+    return (Mesh2D._gmsh_dot3(du,du),Mesh2D._gmsh_dot3(dv,du),
+            Mesh2D._gmsh_dot3(dv,dv))
+end
+
+function _gmsh_ruled_chart(m::GeoModel,tag::Int,caller)
+    lift=_ruled_surface_evaluator(m,tag,caller)
+    return _GmshRuledChart(lift,_GmshRuledFirstForm(lift),tag,_model_lc(m),false)
+end
+
+# `reparamMeshVertexOnFace` of a source node on the ruled chart.
+function _gmsh_ruled_source_parameters(m::GeoModel,chart::_GmshRuledChart,
+                                       owner,parameter,point,caller)
+    silent=Returns(nothing)
+    if owner[1]==0 && haskey(m.points,Int(owner[2]))
+        return _ruled_vertex_parameters(m,chart.tag,Int(owner[2]),chart.lc,
+            false,silent,silent,caller,false)
+    elseif owner[1]==1 && haskey(m.curves,Int(owner[2]))
+        value=parameter===nothing || isempty(parameter) ? 0.0 : parameter[1]
+        return _ruled_curve_parameters(m,chart.tag,Int(owner[2]),value,chart.lc,
+            false,silent,silent,caller,false)
+    end
+    throw(ArgumentError("$caller: Surface[$(chart.tag)] source node has no ruled parameters"))
+end
+
 @inline function _gmsh_native_surface_parameters(frame::_GmshNativePlaneFrame,point)
     offset=Mesh2D._gmsh_sub3(point,frame.origin)
     return (Mesh2D._gmsh_dot3(offset,frame.first),
@@ -164,7 +212,9 @@ function _gmsh_native_surface_add_source!(source,m,mesh,row,frame,caller;
     # Their actual mesh coordinates can have been edited independently of U.
     # Native GEO Points on a Plane and discrete Curve vertices instead use
     # their actual coordinates (MVertex.cpp reparamMeshVertexOnFace).
-    u,v=if frame.occ && owner[1]==1 && haskey(m.curves,Int(owner[2]))
+    u,v=if frame isa _GmshRuledChart
+        _gmsh_ruled_source_parameters(m,frame,owner,parameter,point,caller)
+    elseif frame.occ && owner[1]==1 && haskey(m.curves,Int(owner[2]))
         value=parameter===nothing || isempty(parameter) ? 0.0 : parameter[1]
         _occ_edge_reparam_on_face(m,m.surface_geometry[surface_tag],
             Int(owner[2]),value,1,ctx_lc,caller)
@@ -268,7 +318,10 @@ function _gmsh_native_surface_forced_vertex!(source::_ModelSurfaceSource,m,
         matched=position;matched_tag=point_tag
     end
     matched!=0 && return matched
-    u,v=if frame.occ && haskey(m.curves,curve)
+    u,v=if frame isa _GmshRuledChart
+        _gmsh_ruled_source_parameters(m,frame,(1,Int32(curve)),[parameter],
+            point,caller)
+    elseif frame.occ && haskey(m.curves,curve)
         _occ_edge_reparam_on_face(m,m.surface_geometry[surface_tag],
             curve,parameter,1,ctx_lc,caller)
     else
@@ -1279,3 +1332,5 @@ function _model_periodic_surface_production(m::GeoModel,
     return _ModelSurfaceProduction(mesh,tags,owners,parameters,retained,limit,
         cell_tags,cell_limit)
 end
+
+include("ModelGmshRuledProducer.jl")

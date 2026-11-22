@@ -2233,6 +2233,10 @@ function _refine_gmsh_queue!(T::Triangulation,queue::_GmshTriangleQueue,
         candidate=algorithm===:frontal ?
             _gmsh_frontal_point(T,t,active_edge,gsizes,extend_boundary) :
             _gmsh_surface_delaunay_point(T,a,b,c,trace)
+        # insertAPoint's `metricb`: on a curved chart every cavity test of
+        # this candidate reads the seed cell's tensor.
+        seed=_gmsh_seed_metric(trace,T,a,b,c)
+        circle_test.metric[]=seed
         if candidate===nothing
             push!(skipped,_trikey(T,t))
             continue
@@ -2259,7 +2263,7 @@ function _refine_gmsh_queue!(T::Triangulation,queue::_GmshTriangleQueue,
                     stored_point_key=true
                 end
                 if circle_test(T,t,vid)
-                    cavity,boundary=_gmsh_delaunay_cavity(T,t,vid,trace)
+                    cavity,boundary=_gmsh_delaunay_cavity(T,t,vid,trace,seed)
                     ptin=_cavity_container(T,cavity,cc;native_semantics=true,
                                            trace=trace)
                 else
@@ -2267,7 +2271,7 @@ function _refine_gmsh_queue!(T::Triangulation,queue::_GmshTriangleQueue,
                     if tc!=0 && tc<=length(interior) && interior[tc] &&
                        !_is_ghost_tri(T,tc)
                         ptin=tc
-                        cavity,boundary=_gmsh_delaunay_cavity(T,ptin,vid,trace)
+                        cavity,boundary=_gmsh_delaunay_cavity(T,ptin,vid,trace,seed)
                     end
                 end
                 if ptin!=0

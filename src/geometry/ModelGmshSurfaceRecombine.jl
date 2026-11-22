@@ -24,8 +24,18 @@ function _native_recombine_state(product,world,frame,caller)
         NTuple{3,Int32}[(mesh.tris[1,i],mesh.tris[2,i],mesh.tris[3,i])
                         for i in axes(mesh.tris,2)],
         copy(product.element_tags),NTuple{4,Int32}[],UInt64[],trues(nnodes(mesh)),
-        product.element_high_water,_GmshNativeSurfaceLift(frame),String(caller))
+        product.element_high_water,_native_frame_lift(frame),String(caller))
 end
+
+_native_frame_lift(frame::_GmshNativePlaneFrame)=_GmshNativeSurfaceLift(frame)
+# `buildMetric` as `laplaceSmoothing` reads it at a neighbour's parameters:
+# one constant tensor on a plane, the first fundamental form on a chart.
+_native_smoothing_metric(frame::_GmshNativePlaneFrame)=
+    (Mesh2D._gmsh_dot3(frame.first,frame.first),
+     Mesh2D._gmsh_dot3(frame.second,frame.first),
+     Mesh2D._gmsh_dot3(frame.second,frame.second))
+@inline _native_smoothing_metric_at(metric::NTuple{3,Float64},adj)=metric
+@inline _native_smoothing_metric_at(metric,adj)=metric(adj[1],adj[2])
 
 # The parametric-front variant: the state's relocation lift is the chart's own
 # `lift(u,v)` — a built-in ruled patch carries no plane frame to wrap. Node
@@ -549,9 +559,7 @@ function _native_recombine_laplace_triangles!(s,iterations,frame)
     end
     order=_native_recombine_node_order(s)
     tags=s.node_tags
-    metric=(Mesh2D._gmsh_dot3(frame.first,frame.first),
-        Mesh2D._gmsh_dot3(frame.second,frame.first),
-        Mesh2D._gmsh_dot3(frame.second,frame.second))
+    metric_source=_native_smoothing_metric(frame)
     neighbors=Int32[]
     @inbounds for _ in 1:iterations,node in order
         s.alive[node] && s.owners[node][1]==2 || continue
@@ -578,6 +586,7 @@ function _native_recombine_laplace_triangles!(s,iterations,frame)
         for neighbor in neighbors
             adj=(s.uv[1,neighbor],s.uv[2,neighbor])
             direction=_native_recombine_unit((adj[1]-before[1],adj[2]-before[2],0.0))
+            metric=_native_smoothing_metric_at(metric_source,adj)
             weight=sqrt(metric[1]*direction[1]*direction[1]+
                 2.0*metric[2]*direction[1]*direction[2]+
                 metric[3]*direction[2]*direction[2])
@@ -617,9 +626,7 @@ end
 function _native_recombine_laplace_general!(s,iterations,frame)
     adjacency=_native_recombine_adjacency(s)
     order=_native_recombine_node_order(s)
-    metric=(Mesh2D._gmsh_dot3(frame.first,frame.first),
-        Mesh2D._gmsh_dot3(frame.second,frame.first),
-        Mesh2D._gmsh_dot3(frame.second,frame.second))
+    metric_source=_native_smoothing_metric(frame)
     for _ in 1:iterations,node in order
         s.alive[node] && s.owners[node][1]==2 || continue
         incident=adjacency[node];isempty(incident) && continue
@@ -636,6 +643,7 @@ function _native_recombine_laplace_general!(s,iterations,frame)
         for neighbor in neighbors
             adj=(s.uv[1,neighbor],s.uv[2,neighbor])
             direction=_native_recombine_unit((adj[1]-before[1],adj[2]-before[2],0.0))
+            metric=_native_smoothing_metric_at(metric_source,adj)
             weight=sqrt(metric[1]*direction[1]*direction[1]+
                 2.0*metric[2]*direction[1]*direction[2]+
                 metric[3]*direction[2]*direction[2])

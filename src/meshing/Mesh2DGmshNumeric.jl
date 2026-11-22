@@ -335,3 +335,48 @@ function _gmsh_surface_circle_intersection(fast,lift,wa,wb,wc;radius=nothing)
     end
     return fast
 end
+
+# `optimalPointFrontalB` as written: the circle of radius `d` (the length
+# `optimalPointFrontal` returned) about the world midpoint of the active edge
+# `v1 v2`, in the plane normal to the edge, oriented by the third vertex; the
+# surface point on it is solved by `intersectCurveSurface` from the fast
+# point at angle zero. The normals keep Gmsh's operation order: `n2` is formed
+# from the unnormalized `n1`, and each is scaled by its reciprocal norm. A
+# degenerate seed cell or a failed solve keeps the fast point.
+function _gmsh_frontal_surface_point(fast,lift,v1,v2,v3,d)
+    middle=((v1[1]+v2[1])*0.5,(v1[2]+v2[2])*0.5,(v1[3]+v2[3])*0.5)
+    edge=_gmsh_sub3(v2,v1)
+    toward=_gmsh_sub3(v3,middle)
+    n1=_gmsh_cross3(edge,toward)
+    _gmsh_norm3(n1)<1e-12 && return fast
+    n2=_gmsh_cross3(n1,edge)
+    n1=_gmsh_normalize3(n1);n2=_gmsh_normalize3(n2)
+    x=Float64[fast[1],fast[2],0.0]
+    residual=zeros(3);perturbed=similar(residual);step=similar(residual)
+    _gmsh_surface_circle_residual!(residual,x,lift,middle,n2,n1,d)
+    _gmsh_norm3(residual)<d*1e-8 && return fast
+    qr=Matrix{Float64}(undef,3,3);h=similar(residual)
+    norms=similar(residual);direct=similar(residual)
+    permutation=Vector{Int}(undef,3)
+    for _ in 1:100
+        _gmsh_norm3(x)>1e6 && return fast
+        _gmsh_surface_circle_residual!(residual,x,lift,middle,n2,n1,d)
+        all(iszero,residual) && return fast
+        for column in 1:3
+            difference=1e-4*abs(x[column])
+            difference==0.0 && (difference=1e-4)
+            x[column]+=difference
+            _gmsh_surface_circle_residual!(perturbed,x,lift,middle,n2,n1,d)
+            for row in 1:3
+                qr[row,column]=(perturbed[row]-residual[row])/difference
+            end
+            x[column]-=difference
+        end
+        _gmsh_qr_solve3!(qr,residual,step,h,norms,direct,permutation)
+        for row in 1:3
+            x[row]-=step[row]
+        end
+        _gmsh_norm3(step)<1e-6 && return (x[1],x[2])
+    end
+    return fast
+end

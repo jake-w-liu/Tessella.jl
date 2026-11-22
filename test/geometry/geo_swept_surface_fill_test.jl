@@ -66,15 +66,21 @@ end
         @test maximum(abs(hypot(xyz[3k-2], xyz[3k-1]) - 0.1) for k in 1:7) > 1e-5
         # The caps are Gmsh's; every strip gets interior points (Gmsh: 29, 31, 29, 29 triangles, 93 nodes).
         @test all(_count(2, tag) == 14 for tag in caps)
+        # The strips are meshed as Gmsh meshes them (PolyMesh initial mesh,
+        # delaunayizeBDS, frontal points on the surface): the same counts.
         @test all(!isempty(A.mesh.get_nodes(2, tag)[1]) for tag in laterals)
-        @test all(27 <= _count(2, tag) <= 33 for tag in laterals)
-        @test abs(length(A.mesh.get_nodes()[1]) - 93) <= 3
+        if Sys.ARCH === :x86_64
+            @test [_count(2, tag) for tag in laterals] == [29, 31, 29, 29]
+            @test length(A.mesh.get_nodes()[1]) == 93
+        else
+            @test all(27 <= _count(2, tag) <= 33 for tag in laterals)
+            @test abs(length(A.mesh.get_nodes()[1]) - 93) <= 3
+        end
         surface_cells = _count(2)
         A.mesh.generate(3)
         # The volume fills from that boundary and leaves it alone (Gmsh: 151 tetrahedra).
         @test _count(2) == surface_cells
-        @test 130 <= _count(3) <= 170
-        @test abs(length(A.mesh.get_nodes()[1]) - 93) <= 3
+        Sys.ARCH === :x86_64 ? (@test _count(3) == 151) : (@test 130 <= _count(3) <= 170)
     end
 end
 
@@ -181,11 +187,17 @@ Curve Loop(27) = {-4,12,-6}; Surface(28) = {27};
 @testset "A scalar size on a ruled patch is measured on the surface" begin
     _with_geo(_SPHERE) do
         A.mesh.generate(2)
-        # Gmsh: 112 triangles and 59 nodes, 13 to 15 triangles a patch. Reading
+        # Gmsh: 112 triangles and 59 nodes, 13 or 15 triangles a patch. Reading
         # lengths through the patch's tensor at one point of each cell gave 152.
-        @test 104 <= _count(2) <= 120
-        @test abs(length(A.mesh.get_nodes()[1]) - 59) <= 4
-        @test all(12 <= _count(2, tag) <= 16 for (_, tag) in A.model.get_entities(2))
+        if Sys.ARCH === :x86_64
+            @test [_count(2, tag) for (_, tag) in A.model.get_entities(2)] ==
+                  [13, 15, 15, 15, 13, 13, 15, 13]
+            @test length(A.mesh.get_nodes()[1]) == 59
+        else
+            @test 104 <= _count(2) <= 120
+            @test abs(length(A.mesh.get_nodes()[1]) - 59) <= 4
+            @test all(12 <= _count(2, tag) <= 16 for (_, tag) in A.model.get_entities(2))
+        end
         # Every node is on the unit sphere, but for the arcs' center.
         _, xyz, _ = A.mesh.get_nodes()
         radii = [hypot(xyz[3k-2], xyz[3k-1], xyz[3k]) for k in 1:length(xyz)÷3]

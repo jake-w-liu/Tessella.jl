@@ -5,16 +5,17 @@ const _GMSH_SURFACE_RADIUS_LIMIT=sqrt(2.0)/2.0
 
 include("Mesh2DGmshNumeric.jl")
 include("Mesh2DGmshSurfaceTrace.jl")
+include("Mesh2DGmshBDS.jl")
 
 # The MTriangle overload of inCircumCircleAniso used by insertAPoint and
 # recurFindCavityAniso compares UV metric squared distances strictly. A
 # cocircular point is outside; symbolic tie breaking belongs to the generic
 # CDT constructor and cannot enlarge this native insertion cavity.
-@inline function _gmsh_in_circumcircle(T,t,vid,trace=nothing)
+@inline function _gmsh_in_circumcircle(T,t,vid,trace=nothing,seed=nothing)
     _is_ghost_tri(T,t) && return false
     first,second,third=_gmsh_surface_triangle_nodes(T,t,trace)
     a=_pt(T,first);b=_pt(T,second);c=_pt(T,third)
-    metric=_gmsh_surface_metric(trace,a,b,c)
+    metric=seed===nothing ? _gmsh_surface_metric(trace,a,b,c) : seed
     center,radius=_gmsh_circumcenter_metric(a,b,c,metric)
     point=_pt(T,vid)
     distance=_gmsh_metric_distance2(center,point,metric)
@@ -25,7 +26,7 @@ end
 # Each explicit frame stores the next incoming edge; visiting a neighbour
 # finishes its traversal before the current triangle continues. The generic
 # CDT constructor retains its own cavity traversal.
-function _gmsh_delaunay_cavity(T::Triangulation,t0,vid,trace=nothing)
+function _gmsh_delaunay_cavity(T::Triangulation,t0,vid,trace=nothing,seed=nothing)
     root=Int32(t0)
     # The cavity is its own visited list: every visited cell is a member, and
     # a cavity has a handful of cells, so a hash set per insertion cost more
@@ -46,7 +47,7 @@ function _gmsh_delaunay_cavity(T::Triangulation,t0,vid,trace=nothing)
         if neighbour==0 || _constrained_edge(T,_skey(a,b))
             push!(boundary,(a,b,neighbour))
         elseif !(neighbour in cavity)
-            if _gmsh_in_circumcircle(T,neighbour,vid,trace)
+            if _gmsh_in_circumcircle(T,neighbour,vid,trace,seed)
                 push!(cavity,neighbour)
                 push!(stack,(neighbour,Int8(1)))
             else
@@ -591,6 +592,12 @@ function _gmsh_frontal_point(T,t,slot,gsizes,extend_boundary)
     fast=(midpoint[1]+distance*dirx/ratio,
           midpoint[2]+distance*diry/ratio)
     opposite=_pt(T,_vert(T,t,slot))
+    if _gmsh_trace_curved(gsizes.trace)
+        return _gmsh_frontal_surface_point(fast,gsizes.trace.lift,
+            _gmsh_surface_world(gsizes.trace,T,u),
+            _gmsh_surface_world(gsizes.trace,T,v),
+            _gmsh_surface_world(gsizes.trace,T,_vert(T,t,slot)),distance)
+    end
     if gsizes.trace isa _GmshSurfaceMetricCarrier
         # optimalPointFrontalB's real surface circle: the circle is built in
         # world space from the lifted vertices, not in the parametric plane.
