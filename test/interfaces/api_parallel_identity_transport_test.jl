@@ -149,10 +149,12 @@ end
             @test tseed>=1                        # a consuming produce adopted
             scrc==tcrc && sbytes==tbytes ||
                 println("PARALLEL-DIFFERS: $name")
-            # Eligibility pin: the explicit-PLC Region is predicted a
-            # consumer (`may_consume`), the factory Boxes are not; the
-            # predicted-draw table assigns the PLC fill its `3*count+1`
-            # lower bound and the Boxes a provable zero.
+            # Eligibility pin: every Region is predicted a consumer
+            # (`may_consume`). The Boxes are filled from their face meshes
+            # through the native PLC path, whose initial Delaunay perturbs
+            # each input vertex with three rand() draws, as Gmsh's
+            # delaunayTriangulation does for every Region; the predicted-draw
+            # table assigns each fill its lower bound.
             plan=A._parallel_volume_prepare(tmodel,
                 sort!(collect(keys(tmodel.volumes))),
                 tmodel.meshing.mesh_authority,"test";
@@ -161,8 +163,7 @@ end
             @test plan!==nothing
             prepared,pos_draws=plan
             works=Any[w for w in prepared if w!==nothing]
-            @test any(w->w.may_consume,works)
-            @test any(w->!w.may_consume,works)
+            @test all(w->w.may_consume,works)
             @test all(i->prepared[i]===nothing ||
                           (prepared[i].may_consume ==
                            (pos_draws[i]===nothing || pos_draws[i]>0)),
