@@ -16,6 +16,8 @@
 #                physical tags; `API.merge` renumbers file-local labels into
 #                fresh session UIDs and preserves the existing model.
 
+module IOSu2BdfTest
+
 using Test
 import Tessella
 using Tessella.Elements: MixedMesh, ElementBlock, SpecialElementBlock,
@@ -485,29 +487,28 @@ end
                         @test re_cells[msh] == source_cells[msh]
                     end
                     @test !haskey(re_cells, Int32(15))
-                    groups = _SU2_BDF_API.model.get_physical_groups()
-                    @test (2, 6) in groups && (3, 5) in groups
-                    # property ids carry no names
+                    # Gmsh's writeBDF stores the elementary tag as PID and
+                    # its readBDF makes no physical group.
+                    @test isempty(_SU2_BDF_API.model.get_physical_groups())
                     @test _SU2_BDF_API.model.get_physical_name(3, 5) == ""
                 end
-                # SU2 keeps tets and boundary tris only; physical groups come
-                # back as markers (sorted by tag: the unmarked boundary first,
-                # then `side`), with marker names preserved.
+                # Gmsh writes the tetrahedra and one marker per physical
+                # surface (no unmarked boundary) and cannot read .su2; the
+                # reader takes Gmsh's NELEM-before-NPOIN layout back.
                 _SU2_BDF_API.model.add("resu2")
                 @test _SU2_BDF_API.open(joinpath(dir, "box.su2")) === nothing
                 re_nodes = _SU2_BDF_API.mesh.get_nodes()
                 @test re_nodes[2] == source_nodes[2]              # coordinates
                 re_coord_cells = _cells_coord_sets(
                     _SU2_BDF_API.mesh.get_elements(), re_nodes[1], re_nodes[2])
-                @test re_coord_cells[Int32(2)] == source_coord_cells[Int32(2)]
+                @test length(re_coord_cells[Int32(2)]) == 8   # the "side" faces
+                @test issubset(re_coord_cells[Int32(2)], source_coord_cells[Int32(2)])
                 @test re_coord_cells[Int32(4)] == source_coord_cells[Int32(4)]
                 @test !haskey(re_coord_cells, Int32(1))
                 @test !haskey(re_coord_cells, Int32(15))
                 groups = _SU2_BDF_API.model.get_physical_groups()
-                @test (2, 1) in groups && (2, 2) in groups
-                @test !((3, 5) in groups)
-                @test _SU2_BDF_API.model.get_physical_name(2, 1) == "unmarked"
-                @test _SU2_BDF_API.model.get_physical_name(2, 2) == "side"
+                @test groups == [(2, 1)]
+                @test _SU2_BDF_API.model.get_physical_name(2, 1) == "side"
             end
         finally
             _SU2_BDF_API.finalize()
@@ -557,8 +558,9 @@ end
                 @test issubset(after_su2, after_bdf)
                 @test (2, 42) in after_bdf            # BDF property → entity
                 @test (3, 43) in after_bdf
+                # Gmsh's readBDF: the property id is the elementary tag only.
                 groups = _SU2_BDF_API.model.get_physical_groups()
-                @test (2, 42) in groups && (3, 43) in groups
+                @test !((2, 42) in groups) && !((3, 43) in groups)
             end
         finally
             _SU2_BDF_API.finalize()
@@ -640,4 +642,6 @@ MARKER_ELEMS= 1
             _SU2_BDF_API.finalize()
         end
     end
+end
+
 end

@@ -12397,8 +12397,73 @@ function _unv_read_elements!(io::Base.IO,caller::AbstractString,
     return nothing
 end
 
+# Datasets 2477/2452/2435 (groups), as Gmsh's readUNV reads them: a header of
+# eight integers (group number first, member count last), the name (its first
+# word), then member records of four integers, two per line; element members
+# have type 8.
+function _unv_read_groups!(io::Base.IO,groups::Vector{Tuple{Int,String,Vector{Int64}}})
+    while !eof(io)
+        line=readline(io)
+        length(line)<2 && continue
+        _unv_separator(line) && return nothing
+        header=[tryparse(Int64,t) for t in split(line)]
+        (length(header)==8 && all(!isnothing,header)) || return nothing
+        eof(io) && return nothing
+        words=split(readline(io))
+        isempty(words) && return nothing
+        members=Int64[];count=0
+        while count<header[8] && !eof(io)
+            values=[tryparse(Int64,t) for t in split(readline(io))]
+            any(isnothing,values) && return nothing
+            length(values)>=4 || return nothing
+            count+=1;values[1]==8 && push!(members,values[2])
+            if length(values)>=8
+                count+=1;values[5]==8 && push!(members,values[6])
+            end
+            length(values)==4 || length(values)==8 || return nothing
+        end
+        push!(groups,(Int(header[1]),String(words[1]),members))
+    end
+    return nothing
+end
+
+# Gmsh's readUNV with element groups: one new elementary entity per distinct
+# (elementary, physical, groups...) of an element, numbered from 1 in element
+# order across all types; the groups become the entity's physical groups
+# (named), an element in no group keeps its physical tag, shifted past the
+# largest group number when a group has that number. Elements other than
+# lines, triangles, quadrangles, tetrahedra, hexahedra and prisms are dropped.
+function _unv_apply_groups(records::Vector{_TextMeshCell},
+                           groups::Vector{Tuple{Int,String,Vector{Int64}}})
+    names=Dict{Tuple{Int,Int},String}()
+    isempty(groups) && return records,names
+    member=Dict{Int64,Vector{Int}}()
+    for (num,_,labels) in groups,label in labels
+        push!(get!(()->Int[],member,label),num)
+    end
+    group_names=Dict(num=>name for (num,name,_) in groups)
+    maxgroup=maximum(first,groups)
+    entity=Dict{Vector{Int},Int}()
+    kept=_TextMeshCell[]
+    for record in sort(records;by=r->r.label)
+        key=Int[record.elementary,record.physical]
+        append!(key,get(member,record.label,Int[]))
+        tag=get!(entity,key,length(entity)+1)
+        msh_family(record.msh) in (:lin,:tri,:qua,:tet,:hex,:pri) || continue
+        dim=msh_dimension(record.msh)
+        physical=if length(key)>2
+            for g in key[3:end];names[(dim,g)]=group_names[g];end
+            key[3]
+        else
+            p=key[2];haskey(group_names,p) && (p+=maxgroup);p
+        end
+        push!(kept,_TextMeshCell(record.label,record.msh,record.nodes,tag,physical))
+    end
+    return kept,names
+end
+
 function _read_unv(io::Base.IO,caller::AbstractString,node_limit::Int,
-                   element_limit::Int)
+                   element_limit::Int;groups=nothing)
     node_labels=Int64[]
     node_rows=Dict{Int64,Int32}()
     coords=Float64[]
@@ -12422,6 +12487,8 @@ function _read_unv(io::Base.IO,caller::AbstractString,node_limit::Int,
         elseif number==2412
             _unv_read_elements!(io,caller,node_rows,records,warned,
                 next_elementary,element_labels,element_limit)
+        elseif groups!==nothing && number in (2477,2452,2435)
+            _unv_read_groups!(io,groups)
         end
         # Unknown datasets are skipped line-by-line until the next `-1`
         # separator, exactly like the pinned reader.
@@ -12952,13 +13019,17 @@ function _write_foreign_bridge(path,node_labels::Vector{Int64},
     return path
 end
 
+_records_without_physicals(records::Vector{_TextMeshCell})=
+    _TextMeshCell[_TextMeshCell(r.label,r.msh,r.nodes,r.elementary,Int64(0)) for r in records]
+
 function _read_foreign_records(path,caller::AbstractString)
     extension=lowercase(splitext(String(path))[2])
     if extension==".unv"
+        groups=Tuple{Int,String,Vector{Int64}}[]
         node_labels,coords,records=open(path,"r") do io
             try
                 return _read_unv(io,caller,
-                    Int(typemax(Int32)),Int(typemax(Int32)))
+                    Int(typemax(Int32)),Int(typemax(Int32));groups)
             catch err
                 err isa InterruptException && rethrow()
                 err isa EOFError && throw(ArgumentError(
@@ -12966,7 +13037,9 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
-        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+        # Mesh.ReadGroupsOfElements (default 1) in the session reader.
+        records,names=_unv_apply_groups(records,groups)
+        return node_labels,coords,records,names
     elseif extension==".mesh"
         node_labels,coords,records=open(path,"r") do io
             try
@@ -12979,7 +13052,8 @@ function _read_foreign_records(path,caller::AbstractString)
                 rethrow()
             end
         end
-        return node_labels,coords,records,Dict{Tuple{Int,Int},String}()
+        # Gmsh's readMESH makes the ref an elementary tag only.
+        return node_labels,coords,_records_without_physicals(records),Dict{Tuple{Int,Int},String}()
     elseif extension==".meshb"
         node_labels,coords,records=open(path,"r") do io
             try
@@ -13008,8 +13082,10 @@ function _read_foreign_records(path,caller::AbstractString)
     elseif extension in (".bdf",".nas")
         return open(path,"r") do io
             try
-                return _read_bdf(io,caller,
+                labels,coords,records,names=_read_bdf(io,caller,
                     Int(typemax(Int32)),Int(typemax(Int32)))
+                # Gmsh's readBDF makes the property id an elementary tag only.
+                return labels,coords,_records_without_physicals(records),names
             catch err
                 err isa InterruptException && rethrow()
                 err isa EOFError && throw(ArgumentError(
@@ -13844,7 +13920,21 @@ function _read_su2(io::Base.IO,caller::AbstractString,node_limit::Int,
     records=_TextMeshCell[];pnames=Dict{Tuple{Int,Int},String}()
     element_labels=Set{Int64}();points_indexed=nothing
     marker_count=0;marker_index=0;next_label=Ref{Int64}(0)
+    deferred=String[]
     while true
+        if !isempty(deferred) && npoin>0
+            # Resolve NELEM rows read before NPOIN, before any marker.
+            for (i,row) in enumerate(deferred)
+                msh,nodes,index=_su2_element_row(row,caller,point_rows,"element")
+                label=index>=0 ? index+1 : Int64(i)
+                label in element_labels && throw(ArgumentError(
+                    "$caller: duplicate .su2 element index $(label-1)"))
+                push!(element_labels,label)
+                next_label[]=max(next_label[],label)
+                push!(records,_TextMeshCell(label,msh,nodes,Int64(1),Int64(0)))
+            end
+            empty!(deferred)
+        end
         line=_su2_next(io)
         line===nothing && break
         kv=_su2_key(line)
@@ -13901,6 +13991,17 @@ function _read_su2(io::Base.IO,caller::AbstractString,node_limit::Int,
             count=_su2_count(value,caller,"NELEM")
             length(records)+count<=element_limit || throw(ArgumentError(
                 "$caller: .su2 element count exceeds max_elements=$element_limit"))
+            # The SU2 layout Gmsh writes lists NELEM before NPOIN: keep the
+            # rows until the points are known.
+            if npoin==0
+                for i in 1:count
+                    row=_su2_next(io)
+                    row===nothing && throw(ArgumentError(
+                        "$caller: truncated .su2 NELEM section"))
+                    push!(deferred,row)
+                end
+                continue
+            end
             for i in 1:count
                 row=_su2_next(io)
                 row===nothing && throw(ArgumentError(

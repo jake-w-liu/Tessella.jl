@@ -396,6 +396,8 @@ end
         "geometry/geo_occ_boolean_kernel_numbering_test.jl",
         "geometry/geo_occ_boolean_piece_bounds_test.jl",
         "interfaces/api_partition_topology_test.jl",
+        "interfaces/io_su2_bdf_test.jl",
+        "interfaces/io_unv_mesh_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

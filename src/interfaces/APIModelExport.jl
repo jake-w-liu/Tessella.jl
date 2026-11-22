@@ -226,11 +226,17 @@ function _model_export_write(filename)
                         splitext(basename(filename))[1]*"_topology.pro"),target)
             end
         elseif extension==".stl"
-            # STL carries only surface facets: no physical selection applies,
-            # so the export projection always uses SaveAll semantics.
-            target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
-                true,caller)
-            IO.write_stl(filename,target;binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+            # Gmsh's writeSTL saves the surfaces of physical groups (all of
+            # them with Mesh.SaveAll or when there is no group).
+            selected=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
+                save_all,caller)
+            if _gmsh_writer_supported(selected) && iszero(get(OPTIONS,"Mesh.StlOneSolidPerSurface",0.0))
+                _gmsh_write_stl(filename,selected;binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+            else
+                target=_model_export_mesh(model,LAST_MESH[],LAST_MESH_CLASS[],4.1,
+                    true,caller)
+                IO.write_stl(filename,target;binary=!iszero(get(OPTIONS,"Mesh.Binary",0.0)))
+            end
         else
             # The foreign writers use the complete MSH4-style projection:
             # actual UIDs, per-cell physical tags, and block entity ownership.
@@ -256,6 +262,21 @@ function _model_export_write(filename)
             # anyway in case the table grows the key. `trunc` reproduces
             # the `(int)` cast for a raw table write.
             tag_type=trunc(Int,get(OPTIONS,"Mesh.SaveElementTagType",1.0))
+            if _gmsh_writer_supported(target) &&
+                    (extension in (".su2",".bdf",".nas",".unv",".mesh",".inp") ||
+                     (extension==".vtk" && iszero(get(OPTIONS,"Mesh.Binary",0.0))))
+                extension==".su2" ? _gmsh_write_su2(filename,target,model.physical_names) :
+                extension==".unv" ? _gmsh_write_unv(filename,target,model.physical_names;
+                    groups_of_elements=trunc(Int,get(OPTIONS,"Mesh.SaveGroupsOfElements",1.0)),
+                    groups_of_nodes=trunc(Int,get(OPTIONS,"Mesh.SaveGroupsOfNodes",0.0))) :
+                extension==".mesh" ? _gmsh_write_mesh(filename,target;element_tag_type=tag_type) :
+                extension==".vtk" ? _gmsh_write_vtk(filename,target,MODEL_NAME[]) :
+                extension==".inp" ? _gmsh_write_inp(filename,target,model.physical_names;
+                    groups_of_elements=trunc(Int,get(OPTIONS,"Mesh.SaveGroupsOfElements",1.0)),
+                    groups_of_nodes=trunc(Int,get(OPTIONS,"Mesh.SaveGroupsOfNodes",0.0))) :
+                    _gmsh_write_bdf(filename,target)
+                return nothing
+            end
             extension==".unv" ? IO.write_unv(filename,target) :
                 extension==".mesh" ? IO.write_mesh(filename,target) :
                 extension==".meshb" ? IO.write_meshb(filename,target) :

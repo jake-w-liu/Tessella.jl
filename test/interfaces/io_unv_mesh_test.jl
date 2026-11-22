@@ -13,6 +13,8 @@
 #                carried end-to-end; `API.merge` renumbers file-local labels
 #                into fresh session UIDs and preserves the existing model.
 
+module IOUnvMeshTest
+
 using Test
 import Tessella
 using Tessella.Elements: MixedMesh, ElementBlock, SpecialElementBlock
@@ -344,23 +346,52 @@ $(join(["        $i         1         1        11\n   $(Float64(i)) 0.0 0.0" for
             mktempdir() do dir
                 for ext in ("unv", "mesh")
                     path = joinpath(dir, "box." * ext)
+                    # Each format writes the current model (the UNV re-read
+                    # for the second one), as gmsh.write does.
+                    cur_nodes = _UNV_MESH_API.mesh.get_nodes()
+                    cur_cells = _cells_by_type(_UNV_MESH_API.mesh.get_elements())
                     @test _UNV_MESH_API.write(path) === nothing
                     @test isfile(path)
                     _UNV_MESH_API.model.add("re" * ext)
                     @test _UNV_MESH_API.open(path) === nothing
                     @test "box" in _UNV_MESH_API.model.list()
                     re_nodes = _UNV_MESH_API.mesh.get_nodes()
-                    @test re_nodes[1] == source_nodes[1]          # node UIDs
-                    @test re_nodes[2] == source_nodes[2]          # coordinates
                     re_cells = _cells_by_type(_UNV_MESH_API.mesh.get_elements())
+                    if ext == "unv"
+                        # Gmsh 4.15.2 reads the tags and coordinates back; its
+                        # reader regroups the elements by element group, which
+                        # puts nodes 9 and 10 (on the "side" surfaces) last.
+                        @test re_nodes[1] == UInt64[1:8; 11:14; 9; 10]
+                        position = Dict(t => i for (i, t) in enumerate(cur_nodes[1]))
+                        @test re_nodes[2] == reduce(vcat,
+                            [cur_nodes[2][3position[t]-2:3position[t]] for t in re_nodes[1]])
+                        expected = cur_cells
+                    else
+                        # Gmsh's writeMESH numbers the nodes 1..n in entity order.
+                        @test re_nodes[1] == UInt64.(1:14)
+                        @test re_nodes[2] == cur_nodes[2]
+                        renumber = Dict(t => UInt64(i) for (i, t) in enumerate(cur_nodes[1]))
+                        expected = Dict(k => sort!([sort!([renumber[t] for t in c]) for c in v])
+                                        for (k, v) in cur_cells)
+                    end
                     for msh in (Int32(1), Int32(2), Int32(4))
-                        @test re_cells[msh] == source_cells[msh]
+                        @test re_cells[msh] == expected[msh]
                     end
                     # point cells are not representable in either format and
                     # are dropped (descriptor-0 warn+skip / Medit omission)
                     @test !haskey(re_cells, Int32(15))
-                    @test (2, 6) in _UNV_MESH_API.model.get_physical_groups()
-                    @test (3, 5) in _UNV_MESH_API.model.get_physical_groups()
+                    # UNV keeps the groups (element groups; Gmsh also adds the
+                    # physical-0 groups of the ungrouped lines and triangles,
+                    # which Tessella cannot hold). Gmsh's readMESH makes the
+                    # ref an elementary tag only.
+                    groups = _UNV_MESH_API.model.get_physical_groups()
+                    if ext == "unv"
+                        @test (2, 6) in groups && (3, 5) in groups
+                        @test _UNV_MESH_API.model.get_physical_name(2, 6) == "side"
+                        @test_broken (1, 0) in groups && (2, 0) in groups
+                    else
+                        @test isempty(groups)
+                    end
                 end
             end
         finally
@@ -423,7 +454,8 @@ MeshVersionFormatted 2
                 after_mesh = _UNV_MESH_API.model.get_entities()
                 @test issubset(after_unv, after_mesh)
                 @test (2, 30) in after_mesh         # Medit ref → entity tag
-                @test (2, 30) in _UNV_MESH_API.model.get_physical_groups()
+                # Gmsh's readMESH makes the ref an elementary tag only.
+                @test !((2, 30) in _UNV_MESH_API.model.get_physical_groups())
                 types = _UNV_MESH_API.mesh.get_elements()[1]
                 @test Int32(1) in types && Int32(2) in types
             end
@@ -450,4 +482,6 @@ MeshVersionFormatted 2
             _UNV_MESH_API.finalize()
         end
     end
+end
+
 end

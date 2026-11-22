@@ -151,6 +151,7 @@ include("APIPartitionNative.jl")
 include("APIPartitionProducer.jl")
 include("APIPartitionBRep.jl")
 include("APIPartitionGmsh.jl")
+include("APIGmshWriters.jl")
 include("APIPlugins.jl")
 include("APIOnelab.jl")
 

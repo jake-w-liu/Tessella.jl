@@ -123,7 +123,9 @@ end
             @test A.mesh.get_nodes()==nodes && A.mesh.get_elements()==elements
             A.option("Mesh.Binary",0)
             A.write(out)
-            @test startswith(read(out,String),"solid tessella")
+            # Gmsh 4.15.2's writeSTL names the single solid "Created by Gmsh".
+            @test startswith(read(out,String),"solid Created by Gmsh
+")
         finally
             A.finalize()
         end
