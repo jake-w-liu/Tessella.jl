@@ -6,8 +6,13 @@
 # solid") and a one-edge fillet removed the wrong prism. The Gmsh form of
 # `chamfer` takes one surface per curve (the first distance is measured on
 # it) and one distance, one per curve or two per curve; the result takes
-# the lowest free tags (`_fillet` unbinds the volume first). Masses and
-# counts are Gmsh's.
+# the lowest free tags (`_fillet` unbinds the volume first), the volume
+# included. A fillet rebuilt the faces it trimmed with copies of their kept
+# corners and edges, leaving the shell open (21 curves where Gmsh has 15).
+# In a `.geo` file a lazily bound Box reused the kernel wire and shell a
+# fillet had left at its loop tags (examples/boolean/fillet3.geo: "Curve[26]
+# is not an edge shared by two faces of Volume[25]"). Masses and counts
+# are Gmsh's.
 module ApiOccChamferGmshTest
 using Test, Tessella
 
@@ -20,6 +25,8 @@ using Test, Tessella
         @test occ.get_mass(3,1)≈0.98658738521234 rtol=1e-12
         @test length(A.model.get_entities(2))==7
         @test length(A.model.get_entities(1))==15
+        @test length(A.model.get_entities(0))==10
+        @test sort!([t for (_,t) in A.model.get_entities(1)])==collect(1:15)
 
     finally
         A.finalize()
@@ -37,6 +44,31 @@ using Test, Tessella
             0.0583363094478901,0.98,0.281074945521653,0.93875,1.0,0.8]) rtol=1e-12
     finally
         A.finalize()
+    end
+    path=tempname()*".geo"
+    write(path,"""
+        SetFactory("OpenCASCADE");
+        v_out = newv;
+        Box(v_out) = {-0.5,-0.15,-0.5, 1,0.3,1};
+        f_[] = Boundary{ Volume{v_out}; };
+        e_[] = Unique( Boundary{ Surface{f_[]}; } );
+        v_out = Fillet{v_out}{e_[1], e_[3], e_[5], e_[7]}{0.3};
+        v_in = newv;
+        Box(v_in) = {-0.3,-0.15,-0.3, 0.6,0.3,0.6};
+        f_[] = Boundary{ Volume{v_in}; };
+        e_[] = Unique( Boundary{ Surface{f_[]}; } );
+        v_in = Fillet{v_in}{e_[1], e_[3], e_[5], e_[7]}{0.1};
+        """)
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        A.open(path)
+        @test [length(A.model.get_entities(d)) for d in 0:3]==[32,48,20,2]
+        @test occ.get_mass(3,1)≈0.276823001646924 rtol=1e-12
+        @test occ.get_mass(3,2)≈0.105424777960769 rtol=1e-12
+    finally
+        A.finalize()
+        rm(path;force=true)
     end
     A.initialize()
     try

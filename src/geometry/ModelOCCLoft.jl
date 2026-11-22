@@ -1841,6 +1841,59 @@ function _occ_unbind_orphans!(kernel,dead::Set{UInt64})
     return nothing
 end
 
+# `_fillet` unbinds the volume with its sub-shapes and `_multiBind`s the
+# result: every face, curve and point of the new solid takes a fresh tag
+# above the highest one left, in the order `_bind` meets them (faces in shell
+# order, each face's edges, each edge's vertices). Shapes another bound
+# shape still uses keep their tags. Face pcurve and vertex tables are
+# re-keyed; the old tags go to `removed` so the next synchronize replaces
+# the model's records.
+function _occ_retag_result!(kernel,vid,caller)
+    # the solid itself takes the next free volume tag as well
+    vt=kernel.shape_tags[vid][2]
+    _model_occ_entity_map_unbind!(kernel.entity_maps[6],vt)
+    delete!(kernel.bindings,(3,vt)); delete!(kernel.shape_tags,vid)
+    push!(kernel.removed,(3,vt))
+    nvt=maximum((t for (d,t) in keys(kernel.bindings) if d==3);init=0)+1
+    kernel.maxima[6]=nvt-1
+    _model_occ_bind_shape!(kernel,3,nvt,vid,kernel.shapes[vid])
+    order=_model_occ_closure(kernel,UInt64[vid])
+    inside=Set(order)
+    used_outside=Set{UInt64}()
+    for ((d,_),id) in kernel.bindings
+        id in inside && continue
+        for x in _model_occ_closure(kernel,UInt64[id])
+            push!(used_outside,x)
+        end
+    end
+    tagmap=Dict{Int,Int}(); tagmap0=Dict{Int,Int}()
+    for d in (2,1,0)
+        shapes=UInt64[id for id in order if id!=vid &&
+            kernel.shapes[id].dimension==d && haskey(kernel.shape_tags,id) &&
+            !(id in used_outside)]
+        isempty(shapes) && continue
+        olds=Int[kernel.shape_tags[id][2] for id in shapes]
+        for (id,t) in zip(shapes,olds)
+            _model_occ_entity_map_unbind!(kernel.entity_maps[d+3],t)
+            delete!(kernel.bindings,(d,t)); delete!(kernel.shape_tags,id)
+            push!(kernel.removed,(d,t))
+            d==0 && delete!(kernel.mirrored_points,t)
+        end
+        base=maximum((t for (dd,t) in keys(kernel.bindings) if dd==d);init=0)
+        kernel.maxima[d+3]=base
+        for (i,(id,t)) in enumerate(zip(shapes,olds))
+            _model_occ_bind_shape!(kernel,d,base+i,id,kernel.shapes[id])
+            d==1 && (tagmap[t]=base+i)
+            d==0 && (tagmap0[t]=base+i)
+        end
+    end
+    faces=Dict{UInt64,_ModelOCCShape}(id=>kernel.shapes[id] for id in order
+        if kernel.shapes[id].dimension in (1,2))
+    _model_occ_rekey_pcurves!(kernel,faces,tagmap;tagmap0,caller)
+    kernel.changed=true
+    return nvt
+end
+
 # Build a closed solid from an outward half-space set: per-plane
 # polygons of the enumerated body vertices, shared point/line
 # entities, one shell. Returns the surface-loop tag.
@@ -2072,6 +2125,7 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
         sid=kernel.bindings[(-2,shell)]
         kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
         _occ_invalidate_volume_tables!(m,vt)
+        vt=_occ_retag_result!(kernel,vid,caller)
         kernel.changed=true
         push!(out,(3,vt))
     end
@@ -3738,7 +3792,13 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             end
         end
         # ── rebuild geometry ─────────────────────────────────────────
-        ptag=Dict{NTuple{3,Float64},Int}()
+        # Kept corners and edges stay the solid's own: the rebuilt faces
+        # use them instead of coincident copies (a copy left the shell open
+        # along every kept edge of a rebuilt face).
+        ptag=Dict{NTuple{3,Float64},Int}(
+            vert_pos[v]=>_model_occ_shape_tag(kernel,v,caller)
+            for v in keys(vert_pos))
+        arc_centers=Set{Int}()
         function _pt(p)
             get!(ptag,p) do
                 _model_occ_add_point!(m,p[1],p[2],p[3])
@@ -3763,6 +3823,7 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             ic=kernel.bindings[(0,_pt(cen))]
             key=i0<i1 ? (i0,i1,ic) : (i1,i0,ic)
             id=get!(arc_id,key) do
+                push!(arc_centers,_pt(cen))
                 at=_model_occ_add_circle_arc!(m,_pt(p0),_pt(cen),
                                               _pt(p1))
                 kernel.bindings[(1,at)]
@@ -3792,10 +3853,12 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             for (u,rev) in uses
                 ch=kernel.shapes[u].children
                 oa,ob=rev ? (ch[2],ch[1]) : (ch[1],ch[2])
+                kept=false
                 if haskey(tangent,(fid,u))
                     p0=tangent[(fid,u)][oa]
                     p1=tangent[(fid,u)][ob]
                 else
+                    kept=!haskey(trunc,(u,oa)) && !haskey(trunc,(u,ob))
                     p0=get(trunc,(u,oa),vert_pos[oa])
                     p1=get(trunc,(u,ob),vert_pos[ob])
                 end
@@ -3804,7 +3867,7 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                     s=arc_at[(fid,oa)]
                     push!(segs,(:arc,prev_end,p0,s))
                 end
-                push!(segs,(:line,p0,p1))
+                push!(segs,kept ? (:kept,u,rev) : (:line,p0,p1))
                 prev_end=p1
             end
             # Wrap-around gap: last segment end → first segment start.
@@ -3822,7 +3885,9 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             end
             wuses=Tuple{UInt64,Bool}[]
             for seg in segs
-                if seg[1]==:line
+                if seg[1]==:kept
+                    push!(wuses,(seg[2],seg[3]))
+                elseif seg[1]==:line
                     lid,lr=_line(seg[2],seg[3])
                     push!(wuses,(lid,lr))
                 else
@@ -3940,7 +4005,13 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
         sid=kernel.bindings[(-2,shell)]
         kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
         _occ_unbind_orphans!(kernel,Set(old_ids))
+        # the arcs' centre points were construction points, not vertices
+        for t in arc_centers
+            cid=get(kernel.bindings,(0,t),nothing)
+            cid===nothing || _model_occ_unbind!(kernel,cid,false)
+        end
         _occ_invalidate_volume_tables!(m,vt)
+        vt=_occ_retag_result!(kernel,vid,caller)
         kernel.changed=true
         push!(out,(3,vt))
     end

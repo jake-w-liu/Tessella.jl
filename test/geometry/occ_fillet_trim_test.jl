@@ -42,7 +42,9 @@ using Tessella.Model: _model_occ_fillet, _model_occ_add_cylinder!,
     end
     @test any(q->abs(q[1]-1.0)<1e-9 && abs(q[2]-0.25)<1e-9,rings)
     @test any(q->abs(q[1]-0.75)<1e-9 && abs(q[2])<1e-9,rings)
-    @test !haskey(k.bindings,(1,3))
+    # the bottom rim is gone (the result's curves are renumbered from 1,
+    # as Gmsh's `_multiBind` does)
+    @test !any(q->abs(q[1]-1.0)<1e-9 && abs(q[2])<1e-9,rings)
     fid_l=only(fid for (fid,_) in uses
                if get(k.shapes[fid].geometry.geometry,:occ,nothing)===:cylinder)
     lg=k.shapes[fid_l].geometry.geometry
@@ -108,7 +110,8 @@ end
     @test tg.r2≈0.3
     @test 0.0<tg.r1<2.0
     @test tg.center[3]>0.0
-    @test haskey(k.bindings,(1,1)) && !haskey(k.bindings,(1,3))
+    # (the result's curves take fresh tags from 1, as in Gmsh)
+    @test haskey(k.bindings,(1,1))
 
     # A lone torus' equator is shared by the face with itself — reject.
     m=GeoModel()

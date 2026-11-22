@@ -5693,10 +5693,24 @@ end
 # Outer wires bind at the loop's own tag so `Using Wire {n}` references them;
 # a hole use binds a fresh-tagged wire carrying the reversed traversal, the
 # same shape convention `_model_occ_synchronize!` round-trips.
+function _geo_occ_wire_matches(kernel,wid,signed)
+    uses=kernel.shapes[wid].geometry.uses
+    length(uses)==length(signed) || return false
+    tags=Set(Int[(r ? -1 : 1)*Model._model_occ_shape_tag(kernel,u,"OCC bind")
+                 for (u,r) in uses])
+    return tags==Set(Int.(signed))
+end
+
 function _geo_occ_pipe_wire!(m::GeoModel,tag::Int,kernel,caller;
                              reversed::Bool=false)
-    !reversed && haskey(kernel.bindings,(-1,tag)) &&
-        return kernel.bindings[(-1,tag)]
+    # A kernel wire at this tag is the loop's only when it holds the loop's
+    # curves: the kernel's wire namespace is OpenCASCADE's, apart from the
+    # `.geo` curve loops (a fillet's wires can take a later Box's loop tags).
+    bound=get(kernel.bindings,(-1,tag),nothing)
+    if !reversed && bound!==nothing
+        (haskey(m.loops,tag) && _geo_occ_wire_matches(kernel,bound,
+            m.loops[tag])) && return bound
+    end
     haskey(m.loops,tag) || throw(ArgumentError(
         "$caller: unknown Wire/Curve Loop[$tag]"))
     signed=Int.(m.loops[tag])
@@ -5706,7 +5720,8 @@ function _geo_occ_pipe_wire!(m::GeoModel,tag::Int,kernel,caller;
         eid=_geo_occ_pipe_edge!(m,abs(s),kernel,caller)
         push!(uses,(eid,s<0))
     end
-    wtag=reversed ? Model._model_occ_next_tag(kernel,-1,-1,caller) : tag
+    wtag=(reversed || bound!==nothing) ?
+        Model._model_occ_next_tag(kernel,-1,-1,caller) : tag
     wid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
     Model._model_occ_bind_shape!(kernel,-1,wtag,wid,
         Model._ModelOCCShape(-1,(uses=uses,),[u[1] for u in uses]))
@@ -5868,7 +5883,14 @@ end
 # the `(-2, tag)` binding records the GModel loop mapping `synchronize`
 # round-trips through `kernel.shell_loops`.
 function _geo_occ_bind_shell!(m::GeoModel,tag::Int,kernel,caller)
-    haskey(kernel.bindings,(-2,tag)) && return kernel.bindings[(-2,tag)]
+    # as for wires: a kernel shell at this tag must hold the loop's faces
+    bound=get(kernel.bindings,(-2,tag),nothing)
+    if bound!==nothing
+        haskey(m.surface_loops,tag) || return bound
+        faces=Set(Int[(r ? -1 : 1)*Model._model_occ_shape_tag(kernel,f,caller)
+                      for (f,r) in kernel.shapes[bound].geometry.uses])
+        faces==Set(Int.(m.surface_loops[tag])) && return bound
+    end
     haskey(m.surface_loops,tag) || throw(ArgumentError(
         "$caller: unknown Surface Loop[$tag]"))
     uses=Tuple{UInt64,Bool}[]; face_ids=UInt64[]
@@ -5881,7 +5903,8 @@ function _geo_occ_bind_shell!(m::GeoModel,tag::Int,kernel,caller)
     isempty(uses) && throw(ArgumentError(
         "$caller: Surface Loop[$tag] is empty"))
     sid=only(Model._model_occ_reserve_shapes(kernel,1,caller))
-    Model._model_occ_bind_shape!(kernel,-2,tag,sid,
+    stag=bound===nothing ? tag : Model._model_occ_next_tag(kernel,-2,-1,caller)
+    Model._model_occ_bind_shape!(kernel,-2,stag,sid,
         Model._ModelOCCShape(-2,(uses=uses,),face_ids))
     kernel.next_shape=sid+UInt64(1)
     kernel.shell_loops[sid]=tag
