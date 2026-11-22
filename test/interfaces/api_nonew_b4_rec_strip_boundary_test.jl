@@ -364,13 +364,9 @@ function run_tests()
                         counts[Int(type)]=get(counts,Int(type),0)+length(cells)
                     end
                     observed=(length(API.mesh.get_nodes()[1]),counts)
-                    if kind===:oblique
-                        @test observed==gmsh[(m,kind)]
-                    else
-                        # The QuadTri source is meshed by another surface
-                        # producer than Gmsh's (64 / 21 quadrangles for m=5).
-                        @test_broken observed==gmsh[(m,kind)]
-                    end
+                    # The unequal-sides Source is meshed by the surface
+                    # pass's own producer, as Gmsh's (main 9b62ed30).
+                    @test observed==gmsh[(m,kind)]
                 end)
             end
             source=replace(f.source,"Layers{1}"=>"Layers{{1},{0.5}}")

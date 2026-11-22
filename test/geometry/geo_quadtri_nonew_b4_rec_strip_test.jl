@@ -79,20 +79,29 @@ function b4_atomic_standalone(f)
     malformed=replace(replace(f.source," RecombLaterals"=>""),
         "Transfinite Curve{$(join(long_tags,','))}=$(f.strip_length+1);"=>
         "Transfinite Curve{$(first(long_tags))}=$(f.strip_length+1);Transfinite Curve{$(last(long_tags))}=$(f.strip_length+2);")
-    invalid=(malformed,
-        replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.125,0.0,1.0}"),
-        replace(f.source,"Layers{1}"=>"Layers{{1},{0.5}}"))
-    for text in invalid
+    # Gmsh 4.15.2 meshes the unequal opposite sides and the oblique sweep
+    # (12 runs each, all alike; the values api_nonew_b4_rec_strip_boundary
+    # records for strip length 5) and stops on a half-height final layer.
+    f.strip_length==5 || error("b4_atomic_standalone: Gmsh values are for strip length 5")
+    meshed=((malformed,(62,Dict(2=>80,3=>20,4=>101,7=>20))),
+        (replace(f.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{0.125,0.0,1.0}"),
+            (29,Dict(2=>10,3=>17,4=>10,7=>25))))
+    for (text,gmsh) in meshed
         @test text!=f.source
-        geometry=B4.execute(text;dim=0);m=geometry.model;t=Int(geometry.lists["sweep"][2])
-        before=(repr(m),m.curve_params,deepcopy(m.curve_params))
-        # The first input has unequal opposite sides: Gmsh 4.15.2 meshes it
-        # by falling back to the unstructured algorithm, Tessella refuses it
-        # (recorded as broken in geo_quadtri_nonew_test.jl).
-        @test_throws r"QuadTriNoNewVerts|non-matching node counts" mesh_model_volume(m,t)
-        @test repr(m)==before[1] && m.curve_params===before[2] && m.curve_params==before[3]
-        @test_throws r"QuadTriNoNewVerts" B4.execute(text;dim=3)
+        mesh=B4.execute(text;dim=3).mesh
+        counts=Dict{Int,Int}()
+        for block in mesh.blocks
+            Tessella.Elements.msh_dimension(block.msh) in (2,3) || continue
+            counts[Int(block.msh)]=get(counts,Int(block.msh),0)+size(block.nodes,2)
+        end
+        @test (nnodes(mesh),counts)==gmsh
     end
+    text=replace(f.source,"Layers{1}"=>"Layers{{1},{0.5}}")
+    geometry=B4.execute(text;dim=0);m=geometry.model;t=Int(geometry.lists["sweep"][2])
+    before=(repr(m),m.curve_params,deepcopy(m.curve_params))
+    @test_throws r"QuadTriNoNewVerts" mesh_model_volume(m,t)
+    @test repr(m)==before[1] && m.curve_params===before[2] && m.curve_params==before[3]
+    @test_throws r"QuadTriNoNewVerts" B4.execute(text;dim=3)
 end
 
 @testset "Dynamic recombined B4 actual geometry" begin
