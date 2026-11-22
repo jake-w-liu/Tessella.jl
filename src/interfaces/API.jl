@@ -43,6 +43,7 @@ using ..Recombine: recombine_triangles, _recombine_triangles
 using ..Elements: ElementBlock, msh_family, msh_dimension, msh_spec
 using ..Model: GeoModel, add_point!, add_line!, add_curve_loop!, add_plane_surface!
 using ..Mesh3D: _gopt_gamma
+import ..MeshTypes, ..Mesh3D
 using ..Model: add_bezier_surface!, add_bspline_surface!
 using ..Model: add_surface_loop!, add_volume!
 using ..Model: add_box!, add_cylinder!, add_sphere!, add_cone!, boolean_volumes!
@@ -2537,10 +2538,30 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     end
     merged=Mesh(coordinate_matrix;segs=segs,tris=tris,tets=tets,
                 seg_tag=seg_tag,tri_tag=tri_tag,tet_tag=tet_tag)
+    # Regions meet at their shared faces, and also where the domain itself is
+    # pinched: two solids touching along an edge or at a point (Gmsh meshes
+    # both). The union then has vertices with disconnected links, so the
+    # vertex-link certificate is taken Region by Region, and the union is held
+    # to the incidence it must keep: no face of more than two tetrahedra.
+    volume_parts=count(part->ntets(part[2])>0,parts)
     diag=validate(merged;require_positive_tets=require_positive_tets,
-                  tri_owners=tri_owners)
+                  tri_owners=tri_owners,require_tet_topology=volume_parts<=1)
     diag.ok || throw(ErrorException(
         "$caller: merged mesh is invalid — "*join(diag.messages,"; ")))
+    if volume_parts>1
+        first_column=0
+        for (_,mesh) in parts
+            ntets(mesh)==0 && continue
+            ok,reason=MeshTypes._tet_topology(tets[:,first_column+1:first_column+ntets(mesh)])
+            ok || throw(ErrorException("$caller: merged mesh is invalid — non-manifold tet complex: $reason"))
+            first_column+=ntets(mesh)
+        end
+        faces=Mesh3D._sorted_tet_faces(tets)
+        @inbounds for i in 3:length(faces)
+            faces[i]==faces[i-2] && throw(ErrorException(
+                "$caller: merged mesh is invalid — non-manifold tet complex: a face of more than two tetrahedra"))
+        end
+    end
     return bindings===nothing ? (merged,remaps,seg_keeps) : (merged,remaps,seg_keeps,bindings)
 end
 

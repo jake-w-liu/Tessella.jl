@@ -378,6 +378,8 @@ end
         "meshing/optimize_exact_orientation_test.jl",
         "meshing/gmsh_insertion_sheet_sizes_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
+        "interfaces/api_merge_pinched_regions_test.jl",
+    )
         println("Testing ", path, "...")
         flush(stdout)
         elapsed = @elapsed include(path)
