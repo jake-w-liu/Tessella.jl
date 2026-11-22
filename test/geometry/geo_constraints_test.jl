@@ -270,14 +270,16 @@ end
     @test err isa ArgumentError
     @test occursin("Incompatible surface 6",string(err))
 
-    # Every boundary curve must be transfinite.
-    err=_constraint_error(_GEO_BOX * raw"""
+    # A boundary curve without a transfinite record keeps its ordinary
+    # nodes (here 4, from the 0.4 point sizes), as in Gmsh 4.15.2, which
+    # meshes this box with 64 nodes, 108 triangles and 162 tetrahedra.
+    execution=_execute_constraint_source(_GEO_BOX * raw"""
         Transfinite Curve{1,2,3,4,5,6,7,8,9,10,11} = 4;
         Transfinite Surface{:};
         Transfinite Volume{1} = {1,2,3,4,5,6,7,8};
         """;mesh_dim=3)
-    @test err isa ArgumentError
-    @test occursin("requires boundary Curve[12] to be transfinite",string(err))
+    @test isempty(execution.errors)
+    @test Tessella.MeshTypes.nnodes(execution.mesh)==64
 
     # Opposite edges in one direction must carry equal node counts; the
     # boundary surfaces mesh before the volume, so the patch kernel's

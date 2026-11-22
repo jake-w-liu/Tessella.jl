@@ -8737,9 +8737,11 @@ function _transfinite_volume_frame(m::GeoModel,t::Int,boundaries,caller::Abstrac
             "$caller: transfinite Volume[$t] corner pair ($a,$b) is not " *
             "a boundary edge"))
         spec=get(m.meshing.transfinite_curves,curve,nothing)
-        spec===nothing && throw(ArgumentError(
-            "$caller: transfinite Volume[$t] requires boundary " *
-            "Curve[$curve] to be transfinite"))
+        if spec===nothing
+            # Gmsh counts the nodes the curve actually carries.
+            haskey(m.curve_params,curve) || _model_surface_mesh_curves!(m,[curve],caller)
+            return length(m.curve_params[curve])-1
+        end
         # Same `Mesh.FlexibleTransfinite` count adjustment the curve
         # parameter path applies — the volume grid is sized by the meshed
         # edge counts, not the stored declaration.
@@ -9101,9 +9103,11 @@ function _transfinite_prism_volume_mesh(m::GeoModel,t::Int,boundaries,
             "$caller: transfinite Volume[$t] corner pair ($a,$b) is not " *
             "a boundary edge"))
         spec=get(m.meshing.transfinite_curves,curve,nothing)
-        spec===nothing && throw(ArgumentError(
-            "$caller: transfinite Volume[$t] requires boundary " *
-            "Curve[$curve] to be transfinite"))
+        if spec===nothing
+            # Gmsh counts the nodes the curve actually carries.
+            haskey(m.curve_params,curve) || _model_surface_mesh_curves!(m,[curve],caller)
+            return length(m.curve_params[curve])-1
+        end
         return _flexible_transfinite_nodes(m,spec.num_nodes,curve,caller)-1
     end
     s0,s1,s2,s4,s5,s6=ordered
@@ -9474,9 +9478,14 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
     for (position,signed) in enumerate(signed_curves)
         curve=abs(signed)
         cspec=get(m.meshing.transfinite_curves,curve,nothing)
-        cspec===nothing && throw(ArgumentError(
-            "$caller: transfinite Surface[$t] requires boundary Curve[$curve] " *
-            "to be transfinite"))
+        # Gmsh's MeshTransfiniteSurface takes whatever nodes the bounding
+        # curves carry (examples/api/square.geo: a Transfinite Surface on
+        # four ordinarily meshed curves), so a curve without a transfinite
+        # record is meshed by the 1-D mesher first.
+        if cspec===nothing && !haskey(m.curve_params,curve) &&
+                _model_mesh_curve_births(_mesh_input,m,curve,caller)===nothing
+            _model_surface_mesh_curves!(m,[curve],caller)
+        end
         # The side chain evaluates the same parameters the stored curve
         # discretization carries — `meshGFace` consumes `mesh_vertices`
         # verbatim, so every part emits bitwise-identical boundary nodes.
@@ -9484,7 +9493,12 @@ function _transfinite_surface_sides(m::GeoModel,t::Int,
         # differs (native arcs integrate the derivative primitive), which
         # cracks the shared boundary against the emitted curve rows.
         stored_params=get(m.curve_params,curve,nothing)
-        params=if stored_params===nothing
+        params=if stored_params===nothing && cspec===nothing
+            source_rows=_model_mesh_curve_births(_mesh_input,m,curve,caller)
+            source_rows===nothing && throw(ArgumentError(
+                "$caller: transfinite Surface[$t] boundary Curve[$curve] has no mesh"))
+            Float64[]
+        elseif stored_params===nothing
             t0,t1=_model_curve_param_bounds(m,curve,caller)
             _model_curve_transfinite_native_params(m,curve,t0,t1,cspec,
                                                    caller)
