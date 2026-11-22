@@ -242,6 +242,22 @@ end
         # the other five, marked broken: Gmsh's mesh for those comes from
         # its general QuadToTri planner classifying unmerged copies, which
         # Tessella's catalogs do not reproduce.
+        # Gmsh's unmerged QuadTri cells depend on vertex addresses and vary
+        # between runs. Volume cells (tetrahedra, prisms, pyramids) seen in 20
+        # fresh Gmsh processes each (the 5x1 set adds one earlier run);
+        # surface cells and node counts never varied.
+        unmerged_realizations=Dict(
+            (1,1,true)=>Set([(4,0,1),(2,0,2),(1,1,1),(0,0,3)]),
+            (2,1,true)=>Set([(8,0,2),(6,0,3),(3,1,3),(5,1,2),(2,0,5),(1,1,4),(4,0,4)]),
+            (3,1,true)=>Set([(12,0,3),(10,0,4),(9,1,3),(8,0,5),(5,1,5),(7,1,4)]),
+            (4,1,true)=>Set([(11,1,5),(12,0,6),(8,0,8),(10,0,7),(9,1,6),(7,1,7),(13,1,4),
+                (16,0,4),(14,0,5),(6,0,9),(4,0,10),(10,2,4)]),
+            (5,1,true)=>Set([(16,0,7),(15,1,6),(12,0,9),(14,0,8),(17,1,5),(18,0,6),(11,1,8),
+                (13,1,7),(12,2,6),(20,0,5)]),
+            (2,2,true)=>Set([(0,0,12)]),
+            (1,1,false)=>Set([(0,2,0)]))
+        volume_counts(mesh)=Tuple(sum((size(b.nodes,2) for b in mesh.blocks if b.msh==family);init=0)
+            for family in (4,6,7))
         shapes=((1,1,true,(8,9),44,true),(2,1,true,(12,14),50,true),
             (3,1,true,(16,19),56,true),(4,1,true,(20,24),62,true),
             (5,1,true,(24,29),68,false),(2,2,true,(18,18),58,false),
@@ -267,7 +283,9 @@ end
             elseif refused
                 @test_broken try nnodes(_QTNN.execute(separate).mesh)==unmerged catch;false end
             else
-                @test nnodes(_QTNN.execute(separate).mesh)==unmerged
+                execution=_QTNN.execute(separate)
+                @test nnodes(execution.mesh)==unmerged
+                @test volume_counts(execution.mesh) in unmerged_realizations[(n,m,recombined)]
             end
         end
     end
