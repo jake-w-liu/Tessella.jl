@@ -725,11 +725,56 @@ _gm_scanf_double(s::AbstractString) = _gm_scanf_double(s, parse(Float64, s))
 # The same, given `x = parse(Float64, s)` already read.
 function _gm_scanf_double(s::AbstractString, x::Float64)
     (_GM_SCANF_DOUBLE_ROUNDING && isfinite(x) && x != 0) || return x
+    fast = _gm_scanf_fast_far(s, x)
+    fast === true && return x
     _gm_scanf_near_halfway(strip(s), x) || return x
     return Float64(setprecision(BigFloat, 64) do
         parse(BigFloat, s)
     end)
 end
+
+# The common case, decided in Float64: a plain decimal [sign]digits[.digits]
+# with at most 18 significant digits and at most 22 after the point is
+# N / 10^k with N = Nh + Nl (two exact doubles) and 10^k exact, so its
+# distance from x in ulps comes out within far less than the 1/1024 margin
+# through one error-free product. Returns `true` when that distance is
+# clearly away from half an ulp (no double rounding possible), `nothing`
+# when the token needs the exact test.
+function _gm_scanf_fast_far(s::Union{String,SubString{String}}, x::Float64)
+    n = ncodeunits(s); i = 1
+    while i <= n && codeunit(s, i) in (0x20, 0x09); i += 1; end
+    while n >= i && codeunit(s, n) in (0x20, 0x09, 0x0a, 0x0d); n -= 1; end
+    i <= n || return nothing
+    c = codeunit(s, i)
+    (c == UInt8('-') || c == UInt8('+')) && (i += 1)
+    N = 0; ndig = 0; k = 0; point = false
+    while i <= n
+        c = codeunit(s, i)
+        if 0x30 <= c <= 0x39
+            if N != 0 || c != 0x30
+                ndig += 1
+                ndig > 18 && return nothing
+                N = 10N + Int(c - 0x30)
+            end
+            point && (k += 1)
+        elseif c == UInt8('.') && !point
+            point = true
+        else
+            return nothing          # exponents and anything else: exact test
+        end
+        i += 1
+    end
+    (k <= 22 && N != 0) || return nothing
+    P = _GM_POW10[k + 1]
+    ax = abs(x)
+    (issubnormal(ax) || significand(ax) == 1.0) && return nothing  # binade edge
+    hi = ax * P; lo = fma(ax, P, -hi)
+    Nh = Float64(N); Nl = Float64(N - Int64(Nh))      # N = Nh + Nl exactly
+    t = ((Nh - hi) + (Nl - lo)) / (P * eps(ax))
+    return abs(abs(t) - 0.5) < 1 / 1024 ? nothing : true
+end
+_gm_scanf_fast_far(s::AbstractString, x::Float64) = nothing
+const _GM_POW10 = ntuple(i -> 10.0^(i - 1), 23)
 
 function _gm_scanf_near_halfway(s::AbstractString, x::Float64)
     # The decimal is N * 10^-k.
