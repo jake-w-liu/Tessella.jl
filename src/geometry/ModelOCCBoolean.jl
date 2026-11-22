@@ -1274,6 +1274,24 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
         end
         sheet_out=_brep_unify_union(sheet_out,tol,caller)
     end
+    if op===:fragments && length(kept)>1 && !all(isvol)
+        # General Fuse shares coincident boundary edges between sheets that
+        # touch along a rim (two abutting rectangles): one curve bounds both
+        # faces, so both operands are modified. Only rims used once in the
+        # kept set relabel (`_occ_shared_rim_keys`), so closed shells keep
+        # their own edges.
+        before=[Any[ar.key for w in s.wires for ar in w] for s in kept]
+        kept=_occ_shared_rim_keys(kept,tol)
+        for (k,s) in enumerate(kept)
+            for w in s.wires, a in w
+                a.key in before[k] && continue
+                touched[s.oi]=true
+                for (k2,s2) in enumerate(kept)
+                    a.key in before[k2] && (touched[s2.oi]=true)
+                end
+            end
+        end
+    end
     op===:intersection &&
         (kept=_brep_unify_union(
             _occ_shared_rim_keys(kept,tol),tol,caller;same_uses=true))
@@ -1610,10 +1628,15 @@ end
 function _occ_face_credits(reps,isvol,spec,tol)
     credit=UInt64(0)
     pts=NTuple{3,Float64}[]
-    hasproperty(spec,:ruv) &&
+    # a region's interior sample decides alone: an edge midpoint can sit on
+    # a partner sheet's rim (two abutting rectangles) without the face
+    # lying on that sheet
+    if hasproperty(spec,:ruv)
         push!(pts,_brep_surface_eval(spec.sg,spec.ruv[1],spec.ruv[2]))
-    for wire in spec.wires, ar in wire
-        push!(pts,_brep_curve_eval(ar.crv,(ar.vt0+ar.vt1)/2))
+    else
+        for wire in spec.wires, ar in wire
+            push!(pts,_brep_curve_eval(ar.crv,(ar.vt0+ar.vt1)/2))
+        end
     end
     for i in eachindex(reps)
         isvol[i] && continue
@@ -1623,6 +1646,77 @@ function _occ_face_credits(reps,isvol,spec,tol)
         end
     end
     return credit
+end
+
+# Newell normal (unnormalized) of a closed chain of 3-D samples.
+function _occ_newell(pts)
+    n=(0.0,0.0,0.0)
+    for i in eachindex(pts)
+        p=pts[i];q=pts[mod1(i+1,length(pts))]
+        n=(n[1]+(p[2]-q[2])*(p[3]+q[3]),
+           n[2]+(p[3]-q[3])*(p[1]+q[1]),
+           n[3]+(p[1]-q[1])*(p[2]+q[2]))
+    end
+    return n
+end
+
+# 3-D samples along a chain of (curve, from, to) traversals.
+function _occ_chain_samples(trav)
+    pts=NTuple{3,Float64}[]
+    for (crv,a,b) in trav
+        for k in 0:3
+            push!(pts,_brep_vertex_eval(crv,a+(b-a)*k/4))
+        end
+    end
+    return pts
+end
+
+# A rebuilt planar sheet face in OpenCASCADE's form. General Fuse keeps the
+# face's natural normal: the outer wire winds counterclockwise about the
+# source face's normal (its outer wire's winding) and every hole the other
+# way. Its stored cycle starts at the first edge taken over from another
+# operand (a shared rim replaced by the partner's edge), else at the first
+# piece of the source face's first edge: Gmsh 4.15.2 numbers two abutting
+# rectangles' fragments 1,2,3,4 and -2,5,6,7.
+function _occ_sheet_spec_canon(spec,rep)
+    spec.sg.occ===:plane || return spec
+    src=rep.faces[1].wires[1]
+    ns=_occ_newell(_occ_chain_samples(
+        [(rep.edges[e].curve,sg>0 ? rep.edges[e].t0 : rep.edges[e].t1,
+          sg>0 ? rep.edges[e].t1 : rep.edges[e].t0) for (e,sg,_) in src]))
+    trav(w)=[(ar.crv,(ar.fwd⊻ar.neg) ? ar.vt0 : ar.vt1,
+              (ar.fwd⊻ar.neg) ? ar.vt1 : ar.vt0) for ar in w]
+    normals=[_occ_newell(_occ_chain_samples(trav(w))) for w in spec.wires]
+    isempty(normals) && return spec
+    outer=argmax([abs(_b3dot(n,ns)) for n in normals])
+    srcpos=Dict{Int,Tuple{Int,Int}}()
+    for (k,(e,sg,_)) in enumerate(src)
+        srcpos[rep.ctags[e]]=(k,sg)
+    end
+    wires=map(enumerate(spec.wires)) do (wi,w)
+        d=_b3dot(normals[wi],ns)
+        if (wi==outer) == (d<0)
+            w=[merge(ar,(fwd=!ar.fwd,)) for ar in Iterators.reverse(w)]
+        end
+        n=length(w)
+        start=findfirst(ar->!(ar.key isa Tuple && length(ar.key)>=4 &&
+                              ar.key[1]===:e && haskey(srcpos,ar.key[2])) &&
+                            ar.key isa Tuple && ar.key[1]===:e,w)
+        if start===nothing
+            best=nothing
+            for (k,ar) in enumerate(w)
+                (ar.key isa Tuple && length(ar.key)>=4 && ar.key[1]===:e) ||
+                    continue
+                pos=get(srcpos,ar.key[2],nothing)
+                pos===nothing && continue
+                r=(pos[1],pos[2]>0 ? ar.key[3] : -ar.key[4])
+                (best===nothing || r<best[1]) && (best=(r,k))
+            end
+            start=best===nothing ? 1 : best[2]
+        end
+        start==1 ? w : vcat(w[start:n],w[1:start-1])
+    end
+    return merge(spec,(wires=wires,))
 end
 
 # A spec's uv interior sample — merged specs (union/intersection unify)
@@ -2051,6 +2145,8 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             ctag[i]=c;push!(curves,c)
         end
         stag=zeros(Int,length(kept))
+        sheet_canon(spec)=(oi=get(spec,:oi,0);
+            oi>0 && !isvol[oi] ? _occ_sheet_spec_canon(spec,reps[oi]) : spec)
         function emit_spec(spec)
             pcdict=Dict{Int,NamedTuple}()
             loop_tags=Int[]
@@ -2138,7 +2234,7 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
         # then standalone specs
         for fi in free
             spec=kept[fi]
-            stag[fi]=verbatim(fi) ? spec.stag : emit_spec(spec)
+            stag[fi]=verbatim(fi) ? spec.stag : emit_spec(sheet_canon(spec))
             cr=_occ_face_credits(reps,isvol,spec,tol)
             push!(faces_out,(stag=stag[fi],credit=cr))
             for i in 1:nops
@@ -2146,7 +2242,7 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             end
         end
         for spec in sheet_out
-            st=verbatim(spec) ? spec.stag : emit_spec(spec)
+            st=verbatim(spec) ? spec.stag : emit_spec(sheet_canon(spec))
             cr=_occ_face_credits(reps,isvol,spec,tol)
             push!(faces_out,(stag=st,credit=cr))
             for i in 1:nops

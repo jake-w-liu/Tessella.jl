@@ -382,6 +382,7 @@ end
         "geometry/model_metric_volume_functional_test.jl",
         "interfaces/api_add_box_geo_construction_test.jl",
         "interfaces/api_nonew_p2_ownership_test.jl",
+        "interfaces/api_occ_boolean_sheet_rim_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)
