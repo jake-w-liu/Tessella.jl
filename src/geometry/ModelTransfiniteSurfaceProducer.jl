@@ -7,7 +7,7 @@ struct _ModelSurfaceGeometryProduction{P,G}
 end
 
 function _model_transfinite_source_admitted(m,t,input,caller)
-    input===nothing && return true
+    input===nothing && return _model_transfinite_declared_counts_match(m,t,caller)
     loops=m.surfaces[t]
     length(loops)==1 || return true # The regular TF dispatcher owns this diagnostic.
     curves=Int[abs(signed) for signed in m.loops[only(loops)]
@@ -21,6 +21,32 @@ function _model_transfinite_source_admitted(m,t,input,caller)
         # by every GEdge-owned vertex. P2 association pruning can move an old
         # endpoint onto the Curve without changing its Line-cell identity.
         push!(counts,2+count(==((1,Int32(curve))),product.entity_data.node_entities))
+    end
+    return counts[1]==counts[3] && counts[2]==counts[4]
+end
+
+# Without produced curves: Gmsh's MeshTransfiniteSurface gives up ("cannot
+# be meshed using the transfinite algorithm") when opposite sides of a
+# four-curve loop carry different node counts, and the surface is meshed by
+# the unstructured algorithm instead. Counts come from the transfinite
+# records (or a curve's own parameters); anything else keeps the transfinite
+# path and its diagnostics.
+function _model_transfinite_declared_counts_match(m,t,caller)
+    loops=m.surfaces[t]
+    length(loops)==1 || return true
+    curves=Int[abs(signed) for signed in m.loops[only(loops)]
+        if !(abs(signed) in m.meshing.degenerated)]
+    length(curves)==4 || return true
+    counts=Int[]
+    for curve in curves
+        spec=get(m.meshing.transfinite_curves,curve,nothing)
+        if spec!==nothing
+            push!(counts,_flexible_transfinite_nodes(m,spec.num_nodes,curve,caller))
+        elseif haskey(m.curve_params,curve)
+            push!(counts,length(m.curve_params[curve]))
+        else
+            return true
+        end
     end
     return counts[1]==counts[3] && counts[2]==counts[4]
 end
