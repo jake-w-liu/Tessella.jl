@@ -905,6 +905,8 @@ function _apply_volume_plan!(m::GeoModel, plan)
     return nothing
 end
 
+_transform_mesh_snapshot(snap::_BooleanSnapshotFailure,t::_AffineTransform,caller)=snap
+
 function _transform_mesh_snapshot(mesh::Mesh, t::_AffineTransform, caller)
     coords=Matrix{Float64}(undef,3,size(mesh.coords,2))
     for i in axes(mesh.coords,2)

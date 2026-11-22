@@ -1954,6 +1954,23 @@ function _geo_boolean_operands(m::GeoModel,groups::Vector{String},
     return (objects=objects,tools=tools)
 end
 
+# Drop a kernel binding and those of its sub-shapes no other bound shape
+# owns, without recording a removal: the `.geo` entities stay live and are
+# bound afresh from the model when the kernel next needs them.
+function _geo_occ_forget!(kernel,id)
+    entry=get(kernel.shape_tags,id,nothing)
+    entry===nothing && return nothing
+    Model._model_occ_shape_is_owned(kernel,id) && return nothing
+    Model._model_occ_entity_map_unbind!(kernel.entity_maps[first(entry)+3],
+                                        last(entry))
+    delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
+    first(entry)==0 && delete!(kernel.mirrored_points,last(entry))
+    for child in kernel.shapes[id].children
+        _geo_occ_forget!(kernel,child)
+    end
+    return nothing
+end
+
 # Apply the resolved operands: an all-volume operation runs the native
 # arrangement `boolean_volumes_multi!` (which keeps the lazy `m.booleans`
 # provenance records); any sub-volume operand goes through the OCC kernel —
@@ -1971,6 +1988,15 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
     obj=objects.dimtags;tool=tools.dimtags
     isempty(obj) && return NTuple{2,Int}[]
     if all(e->e[1]==3,obj) && all(e->e[1]==3,tool)
+        # an operand the kernel already holds (a transformed Box goes
+        # through it) would otherwise keep answering with its old shape
+        # after the native arrangement rebuilt the volume: a later
+        # `Duplicata` copied the whole box, not the fragment
+        kernel=m.occ_kernel
+        for (_,t) in Iterators.flatten((obj,tool))
+            id=get(kernel.bindings,(3,t),nothing)
+            id===nothing || Base.inferencebarrier(_geo_occ_forget!)(kernel,id)
+        end
         msgs=String[]
         out=Base.inferencebarrier(boolean_volumes_multi!)(m,op,
             Int[t for (_,t) in obj],Int[t for (_,t) in tool];tag=tag,

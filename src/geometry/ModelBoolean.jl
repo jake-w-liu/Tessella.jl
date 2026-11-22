@@ -800,6 +800,7 @@ function _brep_extract(m::GeoModel,tag::Int,caller::AbstractString)
         end
     end
     for shell in m.volumes[tag]
+        first_face=length(faces)+1
         for ssigned in m.surface_loops[shell]
             stag=abs(ssigned);orev=ssigned>0 ? 1 : -1
             sg=get(m.surface_geometry,stag,nothing)
@@ -847,10 +848,73 @@ function _brep_extract(m::GeoModel,tag::Int,caller::AbstractString)
                 "$caller: Surface[$stag] has no boundary wires"))
             push!(faces,(sg=sg,stag=stag,orev=orev,wires=wires))
         end
+        _brep_orient_shell!(m,faces,first_face,edges)
     end
     isempty(faces) && throw(ArgumentError(
         "$caller: Volume[$tag] has no materialized boundary"))
     return (pts=pts,ptags=ptags,edges=edges,ctags=ctags,faces=faces)
+end
+
+# A `.geo` shell of Plane Surfaces need not be oriented: its Surface Loop
+# lists every face positive whatever way each Curve Loop winds (Gmsh's
+# examples/boolean/simple4.geo), and OpenCASCADE sews it into a solid of
+# positive volume. A shell holding such untyped faces is made consistent
+# here: faces sharing an edge must traverse it opposite ways, starting from
+# an OpenCASCADE face (whose use is trusted) or the first face, and an
+# all-planar shell enclosing a negative volume is turned inside out.
+function _brep_orient_shell!(m::GeoModel,faces,first_face::Int,edges)
+    idx=first_face:length(faces)
+    typed0(k)=hasproperty(get(m.surface_geometry,faces[k].stag,(;)),:occ)
+    all(typed0,idx) && return faces
+    # an all-planar shell is oriented by its enclosed volume alone (a
+    # Plane Surface of the `.geo` kernel carries an OpenCASCADE plane record
+    # whose normal follows its Curve Loop, not the solid); with curved
+    # faces the OpenCASCADE faces' uses are trusted
+    planar=all(k->faces[k].sg.occ===:plane,idx)
+    typed(k)=!planar && typed0(k)
+    uses=Dict{Int,Vector{Tuple{Int,Int}}}()
+    for k in idx, wire in faces[k].wires, (eidx,sgn,_) in wire
+        push!(get!(Vector{Tuple{Int,Int}},uses,eidx),(k,sgn))
+    end
+    orev=Dict{Int,Int}()
+    order=sort(collect(idx);by=k->typed(k) ? 0 : 1)
+    for seed in order
+        haskey(orev,seed) && continue
+        orev[seed]=faces[seed].orev
+        queue=[seed]
+        while !isempty(queue)
+            k=popfirst!(queue)
+            for wire in faces[k].wires, (eidx,sgn,_) in wire
+                for (j,sj) in uses[eidx]
+                    (j==k || haskey(orev,j)) && continue
+                    typed(j) && (orev[j]=faces[j].orev;push!(queue,j);continue)
+                    orev[j]=-sgn*orev[k]*sj
+                    push!(queue,j)
+                end
+            end
+        end
+    end
+    if planar
+        vol=0.0
+        for k in idx
+            lt=m.surfaces[faces[k].stag]
+            n=_brep_wire_newell(m,lt[1])
+            area=_b3norm(n)
+            area==0.0 && continue
+            for h in lt[2:end]
+                area-=_b3norm(_brep_wire_newell(m,h))
+            end
+            p=_brep_wire_pts(m,lt[1])[1]
+            vol+=orev[k]*_b3dot(p,n)*area/_b3norm(n)
+        end
+        vol<0 && for k in idx
+            orev[k]=-orev[k]
+        end
+    end
+    for k in idx
+        orev[k]==faces[k].orev || (faces[k]=merge(faces[k],(orev=orev[k],)))
+    end
+    return faces
 end
 
 # pcurve entry `(fwd,rev)` for an edge on an OCC-geometry face — the stored
@@ -7509,7 +7573,7 @@ function _brep_materialize_boolean!(m::GeoModel,t::Int,op::Symbol,
                         lt=add_curve_loop!(m,ids)
                         push!(loops,lt);push!(loop_tags,lt)
                     end
-                    sg=merge(spec.sg,(pcurves=pcdict,))
+                    sg=merge(spec.sg,(pcurves=_brep_pc_slots(pcdict),))
                     st=_add_occ_surface!(m,spec.sg.occ,loop_tags,sg)
                     push!(surfaces,st);push!(stags,spec.sgn*st)
                     face=m.surface_geometry[st]
@@ -7900,7 +7964,7 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                 end
                 push!(loops,lt);push!(loop_tags,lt)
             end
-            sg=merge(spec.sg,(pcurves=pcdict,))
+            sg=merge(spec.sg,(pcurves=_brep_pc_slots(pcdict),))
             st=_add_occ_surface!(m,spec.sg.occ,loop_tags,sg)
             push!(surfaces,st);stag[fi]=st
             face=m.surface_geometry[st]
@@ -8957,6 +9021,89 @@ function _occ_curved_surface_production(m::GeoModel,t::Int,mesh::Mesh,
     return _ModelSurfaceProduction(mesh,tags,owners,params,retained,next)
 end
 
+# Axis-aligned bounds of a materialized Boolean result from its own trimmed
+# faces: every boundary edge sampled, plus the points of each curved face
+# inside its trim — a sphere's six axis extremes exactly, other carriers on a
+# parameter grid. Gmsh boxes such a volume from OpenCASCADE's triangulation
+# when `Geometry.OCCBoundsUseStl` is set (t18 selects pieces by it); the
+# untrimmed carrier boxes are far looser and the operand-snapshot Boolean
+# refuses coplanar contact.
+function _brep_shell_bounds(m::GeoModel,tag::Int,caller)
+    S=_brep_extract(m,tag,caller)
+    lo=[Inf,Inf,Inf];hi=[-Inf,-Inf,-Inf]
+    add(p)=for k in 1:3
+        lo[k]=min(lo[k],p[k]);hi[k]=max(hi[k],p[k])
+    end
+    for p in S.pts
+        add(p)
+    end
+    for e in S.edges
+        e.curve.kind===:degenerate && continue
+        n=e.curve.kind===:line ? 1 : 256
+        for k in 0:n
+            add(_brep_curve_eval(e.curve,e.t0+(e.t1-e.t0)*k/n))
+        end
+        if e.curve.kind===:circle
+            # a circle's axis extremes, exactly, where its arc reaches them
+            c=e.curve;a,b=minmax(e.t0,e.t1)
+            for k in 1:3, θ0 in (atan(c.y[k],c.x[k]),atan(c.y[k],c.x[k])+π)
+                θ=a+mod(θ0-a,2π)
+                θ<=b && add(_brep_curve_eval(c,θ))
+            end
+        end
+    end
+    tol=_BREP_TOL
+    for f in S.faces
+        sg=f.sg
+        sg.occ===:plane && continue
+        # strictly inside: an extreme on the carrier circle of a boundary
+        # edge but beyond its arc reads inside on the edge itself (the
+        # edge samples already cover the extremes the boundary reaches)
+        ulo=_brep_face_ubase(S.edges,f);uper=_brep_uperiod(sg)
+        function inface(P)
+            uv=_brep_wrap_u(_brep_surface_uv(sg,P),ulo,uper)
+            # nudged off the point: a ray cast along a boundary arc's own
+            # parameter line (an extreme on the equator of a face trimmed
+            # there) misreads the point itself
+            all(d->_brep_uv_in_face(S.edges,f,(uv[1]+d[1],uv[2]+d[2]),tol),
+                ((1e-6,1e-6),(-1e-6,1e-6),(1e-6,-1e-6),(-1e-6,-1e-6)))
+        end
+        if sg.occ===:sphere
+            for k in 1:3, s in (-1.0,1.0)
+                P=ntuple(i->sg.center[i]+(i==k ? s*sg.radius : 0.0),3)
+                inface(P) && add(P)
+            end
+            continue
+        end
+        umin=vmin=Inf;umax=vmax=-Inf
+        for wire in f.wires,(eidx,_,pc) in wire
+            e=S.edges[eidx]
+            for t in _brep_pc_grid(pc,min(e.t0,e.t1),max(e.t0,e.t1);subs=8)
+                uv=_brep_pc_eval(pc,t)
+                umin=min(umin,uv[1]);umax=max(umax,uv[1])
+                vmin=min(vmin,uv[2]);vmax=max(vmax,uv[2])
+            end
+        end
+        isfinite(umin) && isfinite(vmin) || continue
+        n=64
+        for i in 0:n, j in 0:n
+            uv=(umin+(umax-umin)*i/n,vmin+(vmax-vmin)*j/n)
+            _brep_uv_in_face(S.edges,f,uv,tol) || continue
+            add(_brep_surface_eval(sg,uv[1],uv[2]))
+        end
+    end
+    return (lo[1],lo[2],lo[3],hi[1],hi[2],hi[3])
+end
+
+# `CurveOnSurface` slots of an emitted face: `fwd` holds the edge's pcurve
+# and is always present, `rev` only for a seam used both ways. The emitters
+# fill a slot per use, so an edge used only reversed (a sphere's pole edge
+# on the piece below it) moves its pcurve to `fwd` — the kernel publication
+# does the same (`_model_occ_boolean_pc_entry`), and degenerate-edge
+# evaluation reads `fwd`.
+_brep_pc_slots(pcdict)=Dict{Int,NamedTuple}(
+    c=>(e.fwd===nothing ? (fwd=e.rev,rev=nothing) : e) for (c,e) in pcdict)
+
 # ── result surfaces (any Boolean record) ────────────────────────────────────
 #
 # `m.boolean_operands` carries either a binary snapshot `(A,B)` or a
@@ -8967,18 +9114,20 @@ end
 
 # Boundary mesh of one arrangement cell over operand snapshot `meshes`:
 # intersect the members, subtract every other operand.
-function _boolean_cell_mesh(meshes::Vector{Mesh},cell::UInt64,caller)
+function _boolean_cell_mesh(meshes::AbstractVector,cell::UInt64,caller)
     n=length(meshes)
     members=[i for i in 1:n if (cell & _brep_bit(i))!=0]
     isempty(members) && throw(ErrorException(
         "$caller: Boolean result cell has no member operands"))
-    acc=meshes[members[1]]
+    acc=_boolean_snapshot_mesh(meshes[members[1]],caller)
     for i in members[2:end]
-        acc=mesh_boolean(acc,meshes[i],:intersection)
+        acc=mesh_boolean(acc,_boolean_snapshot_mesh(meshes[i],caller),
+                         :intersection)
     end
     for i in 1:n
         (cell & _brep_bit(i))==0 || continue
-        acc=mesh_boolean(acc,meshes[i],:difference)
+        acc=mesh_boolean(acc,_boolean_snapshot_mesh(meshes[i],caller),
+                         :difference)
     end
     return acc
 end
@@ -9004,8 +9153,9 @@ function _boolean_result_surface(m::GeoModel,t::Int,
             acc=nothing
             for i in 1:length(rec.meshes)
                 (members & _brep_bit(i))==0 && continue
-                acc===nothing && (acc=rec.meshes[i];continue)
-                acc=mesh_boolean(acc,rec.meshes[i],:union)
+                snap=_boolean_snapshot_mesh(rec.meshes[i],caller)
+                acc===nothing && (acc=snap;continue)
+                acc=mesh_boolean(acc,snap,:union)
             end
             acc
         else

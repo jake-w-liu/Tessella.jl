@@ -87,6 +87,12 @@ using Printf: @sprintf
 
 include("ModelMeshOrientation.jl")
 
+# A Boolean operand snapshot that could not be formed, with the reason
+# (`boolean_volumes_multi!`).
+struct _BooleanSnapshotFailure
+    reason::String
+end
+
 export GeoModel, add_point!, set_point_mesh_size!, add_line!, add_curve_loop!, add_plane_surface!
 export add_circle_arc!, add_ellipse_arc!, add_ruled_surface!
 export add_spline!, add_bspline!, add_bezier!, add_nurbs!
@@ -2329,7 +2335,8 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         tag::Integer=0,remove_object::Bool=true,remove_tool::Bool=true,
         caller::AbstractString="boolean_volumes_multi!",
         image_out::Union{Nothing,Vector{Vector{Int}}}=nothing,
-        msg_out::Union{Nothing,AbstractVector{String}}=nothing)
+        msg_out::Union{Nothing,AbstractVector{String}}=nothing,
+        snapshots::Bool=true)
     op in (:union,:intersection,:difference,:fragments) || throw(ArgumentError(
         "$caller: op must be :union, :intersection, :difference, or :fragments"))
     remove_object isa Bool && remove_tool isa Bool || throw(ArgumentError(
@@ -2349,8 +2356,15 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
     requested!=0 && (haskey(m.volumes,requested) ||
         haskey(m.discrete,(3,requested))) && throw(ArgumentError(
             "$caller: Volume[$requested] already exists"))
-    # operand snapshots are operation-time — take them before any mutation
-    meshes=Mesh[_volume_surface(m,t,caller) for t in tags]
+    # operand snapshots are operation-time — take them before any mutation.
+    # They only serve the analytic (non-conforming) mesh path and Boolean
+    # bounds; an operand whose snapshot cannot be formed (a Boolean of
+    # coplanar boxes: the triangle-soup Boolean refuses coplanar overlap)
+    # records why, and only a consumer of that snapshot fails. The OCC
+    # bridge's scratch model is discarded after publication and takes none.
+    meshes=Any[snapshots ? _boolean_operand_snapshot(m,t,caller) :
+               _BooleanSnapshotFailure("no snapshot taken by the OCC kernel")
+               for t in tags]
     kept,touched=_brep_collect_faces_n(m,op,tags,nobj,caller)
     if isempty(kept)
         # empty result — OCC binds nothing; operands still get removed per
@@ -2579,6 +2593,19 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         rethrow()
     end
 end
+
+function _boolean_operand_snapshot(m::GeoModel,t::Int,caller)
+    try
+        return _volume_surface(m,t,caller)
+    catch err
+        (err isa ArgumentError || err isa ErrorException) || rethrow()
+        return _BooleanSnapshotFailure(sprint(showerror,err))
+    end
+end
+
+_boolean_snapshot_mesh(snap::Mesh,caller)=snap
+_boolean_snapshot_mesh(snap::_BooleanSnapshotFailure,caller)=throw(ArgumentError(
+    "$caller: a Boolean operand has no surface snapshot ($(snap.reason))"))
 
 # Materialize one result piece's volume records at `t`. `meshes` are the
 # operand snapshots; the piece's mesh cell is its membership mask — nothing

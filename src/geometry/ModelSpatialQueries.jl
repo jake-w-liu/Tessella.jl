@@ -164,6 +164,11 @@ function _model_volume_bounds(
     elseif encodings[4]
         return _model_cone_bounds(m.cones[tag],caller,entity)
     elseif encodings[5]
+        # a materialized Boolean result is bounded by its own trimmed faces;
+        # only a bare record falls back to the operand-snapshot Boolean,
+        # which costs a triangle-soup Boolean and refuses coplanar contact
+        shelled && return _model_bounds_checked(
+            _brep_shell_bounds(m,tag,caller),caller,entity)
         surface=_boolean_result_surface(m,tag,caller)
         return _model_bounds_from_surface_mesh(surface,caller,entity)
     end

@@ -603,7 +603,7 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     image=Vector{Int}[]
     out=boolean_volumes_multi!(sm,op,obj_tags,tool_tags;
         tag=explicit,remove_object=removeObject,remove_tool=removeTool,
-        caller=caller,image_out=image,msg_out=msg_out)
+        caller=caller,image_out=image,msg_out=msg_out,snapshots=false)
     # explicit-tag corner: the sole result is an unmodified operand kept in
     # place — upstream's `_multiBind` reports its own tag rather than the
     # requested one; the owning operand is the one mapping to itself
@@ -2189,7 +2189,7 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
                 lt=add_curve_loop!(m,ids)
                 push!(loops,lt);push!(loop_tags,lt)
             end
-            sg=merge(spec.sg,(pcurves=pcdict,))
+            sg=merge(spec.sg,(pcurves=_brep_pc_slots(pcdict),))
             st=_add_occ_surface!(m,spec.sg.occ,loop_tags,sg)
             push!(surfaces,st)
             face=m.surface_geometry[st]
