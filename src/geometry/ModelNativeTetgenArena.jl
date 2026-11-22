@@ -579,4 +579,5 @@ function recover_convex(kernel,facets;seed=1)
     return (cells=cells,pool_slots=slots,arena=arena,protocol=protocol)
 end
 include("ModelNativeTetgenQuality.jl")
+include("ModelNativeTetgenBR.jl")
 end

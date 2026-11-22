@@ -342,6 +342,18 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
         native_kernel=Ref{ModelNativeInitialTet.Kernel}()
         mesh=_model_native_initial_delaunay_fill(initial_surface,node_order,options,caller;
             births,kernel_output=native_kernel)
+        br=_model_native_tetgen_br_fill(initial_surface,node_order,native_kernel[],caller;
+            protected_facets,interior_points)
+        if br!==nothing
+            valid,reason=certify(br)
+            if valid
+                births===nothing || (nnodes(br)>nnodes(initial_surface) ?
+                    _model_native_volume_rebind!(births,br) :
+                    _model_native_volume_cell_births!(births,br))
+                return br
+            end
+            push!(failures,reason)
+        end
         valid,reason=certify(mesh)
         if valid
             # Tetgen's -Y reconstruction optimizer runs even when the later

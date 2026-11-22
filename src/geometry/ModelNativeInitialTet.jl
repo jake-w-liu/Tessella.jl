@@ -472,6 +472,52 @@ function _model_native_initial_embedded_input(m,volume,geometry,authority,caller
 end
 
 
+# Gmsh's TetGen/BR region pass (reconstruct, recover, carve, recoverdelaunay,
+# optimizemesh) on the native Delaunay kernel. Off until it reproduces Gmsh.
+const _MODEL_NATIVE_TETGEN_BR=Ref(false)
+_model_native_tetgen_br_region(kernel,facets)=ModelNativeTetgenArena.BR.region(kernel,facets)
+
+# The pass on the kernel's own rows; `nothing` when the switch is off, when the
+# Region has inputs the port does not model (embedded faces, extra interior
+# points), or when its boundary needs flips or Steiner points to be recovered.
+# Steiner points are appended after the surface rows in TetGen's point order.
+function _model_native_tetgen_br_fill(surface,order,kernel,caller;protected_facets=nothing,
+                                      interior_points=nothing)
+    _MODEL_NATIVE_TETGEN_BR[] || return nothing
+    protected_facets===nothing || isempty(protected_facets) || return nothing
+    interior_points===nothing || isempty(interior_points) || return nothing
+    inverse=Vector{Int32}(undef,length(order))
+    for (native,row) in enumerate(order);inverse[row]=Int32(native);end
+    facets=NTuple{3,Int32}[(inverse[surface.tris[1,column]],
+        inverse[surface.tris[2,column]],inverse[surface.tris[3,column]])
+        for column in axes(surface.tris,2)]
+    result=try
+        _model_native_tetgen_br_region(kernel,facets)
+    catch error
+        error isa ModelNativeTetgenArena.Unsupported || rethrow()
+        return nothing
+    end
+    count=length(order)
+    rows=Vector{Int32}(undef,length(result.mesh.xyz))
+    fill!(rows,0)
+    for native in 1:count;rows[native]=Int32(order[native]);end
+    coords=surface.coords
+    if !isempty(result.steiner)
+        coords=hcat(surface.coords,Matrix{Float64}(undef,3,length(result.steiner)))
+        for (k,(p,x)) in enumerate(result.steiner)
+            rows[p]=Int32(nnodes(surface)+k)
+            for axis in 1:3;coords[axis,nnodes(surface)+k]=x[axis];end
+        end
+    end
+    cells=Matrix{Int32}(undef,4,length(result.cells))
+    for (column,cell) in enumerate(result.cells),slot in 1:4
+        row=rows[cell[slot]]
+        row==0 && return nothing
+        cells[slot,column]=row
+    end
+    return Mesh(coords;tets=cells)
+end
+
 function _model_native_recovered_volume_fill(surface,order,kernel,caller;protected_facets=nothing)
     inverse=Vector{Int32}(undef,length(order))
     for (native,row) in enumerate(order);inverse[row]=Int32(native);end
