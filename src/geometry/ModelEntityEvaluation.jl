@@ -1110,13 +1110,15 @@ function _ruled_curve_parameters(m::GeoModel,tag::Int,curve_tag::Int,
             return (1.0,parameter)
         elseif gens[2]==-curve_tag
             return (1.0,1.0-parameter)
-        elseif gens[3]==curve_tag
-            u=1.0-parameter
-            # Non-exact-extrusion quirk: `V = hack ? 1 : U`.
-            return (u,old_ruled ? 1.0 : u)
-        elseif gens[3]==-curve_tag
-            u=parameter
-            return (u,old_ruled ? 1.0 : u)
+        elseif abs(gens[3])==curve_tag
+            u=gens[3]>0 ? 1.0-parameter : parameter
+            # `gmshEdge::reparamOnFace`: `V = hack ? 1 : U`, where `hack` is
+            # `Geometry.ExactExtrusion` on a surface swept from a curve — the
+            # surface `_ruled_surface_point` lifts through the extrusion
+            # formula over the whole unit square, whose u=0 side is the
+            # collapsed one (a cone's apex). OldRuledSurface always takes V=1.
+            hack=old_ruled || _ruled_exact_extrusion(m,tag,gens,caller)!==nothing
+            return (u,hack ? 1.0 : u)
         end
     end
     coordinate=_model_curve_point(m,curve_tag,parameter,caller)

@@ -390,6 +390,7 @@ end
         "geometry/geo_occ_boolean_coplanar_operand_test.jl",
         "geometry/geo_occ_boolean_native_operand_test.jl",
         "geometry/tetgen_br_region_test.jl",
+        "geometry/geo_rotation_degenerate_side_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)
