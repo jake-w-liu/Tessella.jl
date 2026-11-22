@@ -4,7 +4,9 @@ const A=Tessella.API
 
 # Sheets that touch only along an edge share that edge after a fragment, as
 # OpenCASCADE's General Fuse glues them. Tags, edge ends and the faces'
-# oriented boundaries are Gmsh 4.15.2's.
+# oriented boundaries in stored order (`combined=false`) are Gmsh 4.15.2's:
+# a rebuilt face keeps its source's edge order, the shared rim where the
+# source had its own edge.
 function boundary(t)
     [b[2] for b in A.model.get_boundary([(2,t)],false,true)]
 end
@@ -24,7 +26,7 @@ point(t)=Tuple(A.model.get_value(0,t,Float64[]))
         @test images==[[(2,1)],[(2,2)]]
         @test Tuple(length(A.model.get_entities(d)) for d in 0:2)==(6,7,2)
         @test boundary(1)==[1,2,3,4]
-        @test boundary(2)==[-2,5,6,7]
+        @test boundary(2)==[5,6,7,-2]
         @test ends()==Dict(1=>(1,2),2=>(2,3),3=>(3,4),4=>(4,1),
                            5=>(2,5),6=>(5,6),7=>(6,3))
         @test [point(t) for t in 1:6]==[(0.0,0.0,0.0),(1.0,0.0,0.0),
@@ -46,7 +48,7 @@ point(t)=Tuple(A.model.get_value(0,t,Float64[]))
         @test images==[[(2,1)],[(2,2)]]
         @test Tuple(length(A.model.get_entities(d)) for d in 0:2)==(8,9,2)
         @test boundary(1)==[1,2,3,4,5]
-        @test boundary(2)==[-3,6,7,8,9]
+        @test boundary(2)==[6,7,8,9,-3]
         @test ends()[3]==(3,4) && ends()[9]==(8,4)
         @test point(3)==(1.0,0.5,0.0)
     finally
@@ -64,7 +66,7 @@ point(t)=Tuple(A.model.get_value(0,t,Float64[]))
         occ.synchronize()
         @test images==[[(2,1)],[(2,2)],[(2,3)]]
         @test Tuple(length(A.model.get_entities(d)) for d in 0:2)==(8,10,3)
-        @test boundary(2)==[-2,5,6,7]
+        @test boundary(2)==[5,6,7,-2]
         @test boundary(3)==[-3,8,9,10]
         @test ends()[8]==(3,7) && ends()[10]==(8,4)
     finally

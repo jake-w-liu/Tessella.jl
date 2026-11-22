@@ -1954,11 +1954,13 @@ function _geo_boolean_operands(m::GeoModel,groups::Vector{String},
     return (objects=objects,tools=tools)
 end
 
-# Whether every listed volume is bounded by OpenCASCADE-typed faces only,
-# so that the kernel can take it as an operand.
+# Whether every listed volume is bounded by OpenCASCADE-typed faces only, or
+# is a Box, so that the kernel can take it as an operand.
 function _geo_occ_typed_volumes(m::GeoModel,entities)
     for (_,t) in entities
         haskey(m.volumes,t) || return false
+        # a Box's built-in Plane Surfaces bind as OpenCASCADE plane faces
+        haskey(m.box_extents,t) && continue
         for sh in m.volumes[t], s in get(m.surface_loops,abs(sh),Int[])
             hasproperty(get(m.surface_geometry,abs(s),(;)),:occ) || return false
         end
@@ -2041,9 +2043,14 @@ function _geo_boolean_apply!(m::GeoModel,op::Symbol,objects,tools;
     end
     msgs=String[]
     out_dt=try
-        Base.inferencebarrier(_geo_occ_bind_entities!)(
-            m,NTuple{2,Int}[e for e in Iterators.flatten((obj,tool))],
-            kernel,caller)
+        _GEO_OCC_PLANE_FACES[]=true
+        try
+            Base.inferencebarrier(_geo_occ_bind_entities!)(
+                m,NTuple{2,Int}[e for e in Iterators.flatten((obj,tool))],
+                kernel,caller)
+        finally
+            _GEO_OCC_PLANE_FACES[]=false
+        end
         out=first(Base.inferencebarrier(Model._model_occ_boolean)(
             m,op,obj,tool,tag,objects.delete,tools.delete,caller;
             msg_out=msgs))
@@ -2994,6 +3001,30 @@ end
 # BRepLib_FindSurface samples both endpoints of each straight edge, weighted
 # by that edge's length. An axis-aligned wire has an exact covariance null
 # axis; preserve that constructor instead of fitting a built-in mean Plane.
+# Set while a `.geo` Boolean binds its operands: a Box's built-in Plane
+# Surfaces then bind as OpenCASCADE plane faces.
+const _GEO_OCC_PLANE_FACES=Ref(false)
+
+# OpenCASCADE plane record of a built-in Plane Surface: the plane of its
+# wire with the wire's winding normal, pcurves of its edges in that frame and
+# the face's uv box.
+function _geo_occ_plane_face_geometry(m::GeoModel,tag::Int,caller)
+    base=Model._brep_plane_record(m,tag,caller)
+    pcurves=Dict{Int,NamedTuple}()
+    lo=[Inf,Inf];hi=[-Inf,-Inf]
+    for loop in m.surfaces[tag],signed in m.loops[loop]
+        curve=abs(signed);edge,low,high=Model._brep_edge_curve(m,curve)
+        pcurves[curve]=(fwd=Model._brep_synth_pcurve(base,edge,low,high,caller),
+                        rev=nothing)
+        for k in 0:8
+            uv=Model._occ_plane_uv(base,Model._brep_curve_eval(edge,low+(high-low)*k/8))
+            lo[1]=min(lo[1],uv[1]);lo[2]=min(lo[2],uv[2])
+            hi[1]=max(hi[1],uv[1]);hi[2]=max(hi[2],uv[2])
+        end
+    end
+    return merge(base,(pcurves=pcurves,uvb=(lo,hi)))
+end
+
 function _geo_occ_axis_plane_geometry(m,loops)
     curves=get(m.loops,first(loops),Int[])
     isempty(curves) && return nothing
@@ -5723,6 +5754,12 @@ function _geo_occ_pipe_face!(m::GeoModel,tag::Int,kernel,caller)
     g=get(m.surface_geometry,tag,nothing)
     if g===nothing && kind===:plane
         g=_geo_occ_axis_plane_geometry(m,loops)
+    end
+    # a built-in Plane Surface (an OCC-factory `Box` is built from them) is
+    # an OpenCASCADE plane face whose natural normal follows its wire
+    if (g===nothing || !hasproperty(g,:occ)) && kind===:plane &&
+            _GEO_OCC_PLANE_FACES[]
+        g=Base.inferencebarrier(_geo_occ_plane_face_geometry)(m,tag,caller)
     end
     (g===nothing || !hasproperty(g,:occ)) && throw(ArgumentError(
         "$caller: Surface[$tag] has no OCC geometry record for pipe " *

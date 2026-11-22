@@ -1681,13 +1681,33 @@ function _occ_chain_samples(trav)
     return pts
 end
 
+# Position (wire index, signed parameter) on the source face's outer wire of
+# the source edge that a foreign arc lies on, or `nothing`.
+function _occ_source_slot(rep,src,ar)
+    ar.crv.kind===:degenerate && return nothing
+    pm=_brep_vertex_eval(ar.crv,(ar.vt0+ar.vt1)/2)
+    scale=max(1.0,abs(pm[1]),abs(pm[2]),abs(pm[3]))
+    for (k,(e,sg,_)) in enumerate(src)
+        ed=rep.edges[e]
+        ed.curve.kind===:degenerate && continue
+        t=_brep_curve_param(ed.curve,pm,(ed.t0+ed.t1)/2)
+        t===nothing && continue
+        lo,hi=minmax(ed.t0,ed.t1)
+        (lo-_BREP_TOL<=t<=hi+_BREP_TOL) || continue
+        _b3dist(_brep_curve_eval(ed.curve,t),pm)<=1e-9*scale || continue
+        return (k,sg>0 ? t : -t)
+    end
+    return nothing
+end
+
 # A rebuilt planar sheet face in OpenCASCADE's form. General Fuse keeps the
 # face's natural normal: the outer wire winds counterclockwise about the
 # source face's normal (its outer wire's winding) and every hole the other
-# way. Its stored cycle starts at the first edge taken over from another
-# operand (a shared rim replaced by the partner's edge), else at the first
-# piece of the source face's first edge: Gmsh 4.15.2 numbers two abutting
-# rectangles' fragments 1,2,3,4 and -2,5,6,7.
+# way. Its stored cycle keeps the source's edge order from the first piece
+# of the source face's first edge, a shared rim taken over from another
+# operand included where the source had its own: Gmsh 4.15.2 stores two
+# abutting rectangles' fragments as 1,2,3,4 and 5,6,7,-2
+# (`getBoundary(...; combined=false)`).
 function _occ_sheet_spec_canon(spec,rep)
     spec.sg.occ===:plane || return spec
     src=rep.faces[1].wires[1]
@@ -1709,17 +1729,21 @@ function _occ_sheet_spec_canon(spec,rep)
             w=[merge(ar,(fwd=!ar.fwd,)) for ar in Iterators.reverse(w)]
         end
         n=length(w)
-        start=findfirst(ar->!(ar.key isa Tuple && length(ar.key)>=4 &&
-                              ar.key[1]===:e && haskey(srcpos,ar.key[2])) &&
-                            ar.key isa Tuple && ar.key[1]===:e,w)
-        if start===nothing
+        start=nothing
+        begin
             best=nothing
             for (k,ar) in enumerate(w)
                 (ar.key isa Tuple && length(ar.key)>=4 && ar.key[1]===:e) ||
                     continue
                 pos=get(srcpos,ar.key[2],nothing)
-                pos===nothing && continue
-                r=(pos[1],pos[2]>0 ? ar.key[3] : -ar.key[4])
+                r=if pos!==nothing
+                    (pos[1],pos[2]>0 ? ar.key[3] : -ar.key[4])
+                else
+                    # a rim taken over from another operand sits where the
+                    # source edge it replaced was
+                    _occ_source_slot(rep,src,ar)
+                end
+                r===nothing && continue
                 (best===nothing || r<best[1]) && (best=(r,k))
             end
             start=best===nothing ? 1 : best[2]
