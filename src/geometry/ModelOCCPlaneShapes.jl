@@ -277,20 +277,17 @@ function _model_occ_plane_face_geometry(shape_of,tag_of,uses_per_wire,caller)
             "$caller: boundary conic is not in the face plane"))
         push!(signs,s>0.0 ? 1 : -1)
     end
-    if !isempty(signs)
-        if all(==(-1),signs)
-            axis=(.-axis)
-        elseif !all(==(1),signs)
-            throw(ArgumentError(
-                "$caller: boundary conics have inconsistent orientations"))
-        end
-    end
+    # A unanimous disagreement flips the fit; a conic wound against the
+    # face axis among others (the ellipse arcs of examples/boolean/
+    # twist.geo) traces its projection backwards: a `neg2d` pcurve.
+    !isempty(signs) && all(==(-1),signs) && (axis=(.-axis))
     X,Y=_occ_ax2_frame(axis)
     pcurves=Dict{Int,NamedTuple}()
     umin=vmin=Inf; umax=vmax=-Inf
     for uses in uses_per_wire,(id,_) in uses
         g=shape_of(id).geometry.geometry
         pc=_model_occ_plane_pcurve(g,center,X,Y)
+        g.occ in (:circle,:ellipse) && _dot3(g.n,axis)<0 && (pc=(neg2d=(pc,),))
         pcurves[tag_of(id)]=(fwd=pc,rev=nothing)
         lo,hi=_occ_pcurve_fillbndbox(pc,g.t0,g.t1)
         umin=min(umin,lo[1]); vmin=min(vmin,lo[2])
