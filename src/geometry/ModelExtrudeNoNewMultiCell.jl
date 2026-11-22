@@ -29,14 +29,19 @@
 # owner boundaries, unlike the generic catalog's single
 # diagonal-per-layer contract.
 
+# Also the catalog of the general QuadToTri planner (ModelExtrudeNoNewGeneral.jl),
+# whose source cells may be quadrangles and whose cap is its own (`top`).
 struct _ExtrudeNoNewMultiCellCatalog
-    source_cells::Vector{NTuple{3,Int32}}
+    source_cells::Vector{Tuple{Vararg{Int32}}}
     boundary_curves::Vector{Int}
     boundary_chains::Vector{Vector{Int32}}
     boundary_widths::Vector{Int}
     levels::Vector{Float64}
     layer_refs::Vector{NTuple{2,Int32}}
+    top::Union{Nothing,Vector{NTuple{3,NTuple{3,Float64}}}}
 end
+_ExtrudeNoNewMultiCellCatalog(cells,curves,chains,widths,levels,refs)=
+    _ExtrudeNoNewMultiCellCatalog(Vector{Tuple{Vararg{Int32}}}(cells),curves,chains,widths,levels,refs,nothing)
 
 @noinline _extrude_nonew_multi_cell_error(caller)=
     throw(ArgumentError(

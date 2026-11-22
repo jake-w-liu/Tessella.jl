@@ -374,6 +374,7 @@ end
         "geometry/geo_plugin_test.jl",
         "interfaces/api_subdivision_algorithm_test.jl",
         "structured/transfinite_ordinary_curves_test.jl",
+        "structured/quadtotri_general_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

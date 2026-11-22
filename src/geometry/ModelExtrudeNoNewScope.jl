@@ -391,7 +391,9 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         _extrude_nonew_four_quad_strip_top(working,plan.top_tag,params,
             plan.sweep.cols,plan.catalog,caller) : dynamic_grid ?
         _extrude_nonew_rect_grid_top(working,plan.top_tag,params,
-            plan.sweep.cols,plan.catalog,caller) : _extrude_top_mesh(
+            plan.sweep.cols,plan.catalog,caller) :
+        plan.catalog isa _ExtrudeNoNewMultiCellCatalog && plan.catalog.top!==nothing ?
+            _extrude_nonew_general_top(plan.catalog.top) : _extrude_top_mesh(
         working,plan.top_tag,params,spec,link[2],caller;
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field,source_mesh=plan.source_mesh)

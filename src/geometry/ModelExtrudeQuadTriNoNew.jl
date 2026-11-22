@@ -726,7 +726,29 @@ function _extrude_nonew_quad_strip_candidate(m::GeoModel,source::Int,sides::Int,
     return twos==2 && threes==2
 end
 
+# The catalogs where they apply; a lone region whose source they refuse goes
+# to the general QuadToTri planner (ModelExtrudeNoNewGeneral.jl).
+const _EXTRUDE_NONEW_GENERAL_REFUSALS=("boundary-category planner",
+    "requires an isolated","degenerate-cell planner","requires one cell",
+    "does not match its boundary category")
+
 function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
+        min_angle_deg::Real=25.0,max_periodic_passes=8,
+        size_field::Union{Nothing,AbstractSizeField}=nothing,_mesh_input=nothing,
+        _shared_diagonals=nothing,_shared_parts=nothing,_union_us=nothing)
+    try
+        return _extrude_nonew_catalog_plan(m,t,caller;min_angle_deg,max_periodic_passes,
+            size_field,_mesh_input,_shared_diagonals,_shared_parts,_union_us)
+    catch err
+        err isa ArgumentError && any(text->occursin(text,err.msg),_EXTRUDE_NONEW_GENERAL_REFUSALS) &&
+            _shared_diagonals===nothing && _shared_parts===nothing && _union_us===nothing &&
+            _extrude_nonew_general_candidate(m,t,caller) || rethrow()
+        return _extrude_nonew_general_plan(m,t,caller;min_angle_deg,max_periodic_passes,
+            size_field,_mesh_input)
+    end
+end
+
+function _extrude_nonew_catalog_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,
         size_field::Union{Nothing,AbstractSizeField}=nothing,_mesh_input=nothing,
         _shared_diagonals=nothing,_shared_parts=nothing,_union_us=nothing)
@@ -1072,3 +1094,4 @@ include("ModelExtrudeNoNewRectGrid.jl")
 include("ModelExtrudeNoNewB4Strip.jl")
 include("ModelExtrudeNoNewB4Free.jl")
 include("ModelExtrudeNoNewMultiCell.jl")
+include("ModelExtrudeNoNewGeneral.jl")

@@ -18,6 +18,7 @@ import ..NURBS
 import ..BRep
 import ..Transfinite
 import ..TransfiniteTriangle
+import ..QuadToTri3D
 import ..OrderedMatching
 import ..WeightedMatching
 

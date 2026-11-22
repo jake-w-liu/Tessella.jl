@@ -44,6 +44,7 @@ include("structured/StructuredRecombine.jl") # shared recombined-volume emission
 include("structured/TransfiniteVolume.jl") # affine six-face transfinite volumes
 include("structured/TransfinitePrism.jl") # affine five-face transfinite prisms
 include("structured/StructuredQuadTri.jl") # transfinite boundary-diagonal transitions
+include("structured/QuadToTri3D.jl") # Gmsh's general QuadToTri region mesher
 include("structured/TransfiniteHex.jl") # affine six-face recombined hexahedra
 include("meshing/ExactMesh3D.jl") # exact-coordinate (Rational{BigInt}) 3-D Delaunay
 include("interfaces/IO.jl")       # .msh v2/v4 read/write, STL, .geo scan

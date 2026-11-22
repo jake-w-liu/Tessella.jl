@@ -296,17 +296,32 @@ end
             replace(fixture.source,"Recombine Surface{1};"=>"",
                     "Transfinite Curve{:}=2"=>"Transfinite Curve{:}=3"),
             replace(fixture.source,"Extrude{0.0,0.0,1.0}"=>"Extrude{{0,1,0},{0,0,0},Pi/3}"))
-        # Gmsh 4.15.2 meshes all three (124, 36 and 10 nodes): a transfinite
-        # Surface with unequal opposite sides falls back to the unstructured
-        # algorithm, an unrecombined source sweeps to tetrahedra, and a
-        # rotation about an edge of the source collapses that edge. Tessella
-        # meshes the second and still refuses the first and the third.
+        # Gmsh 4.15.2 meshes all three: a transfinite Surface with unequal
+        # opposite sides falls back to the unstructured algorithm, an
+        # unrecombined source sweeps to tetrahedra, and a rotation about an
+        # edge of the source collapses that edge. Gmsh's QuadTri compares
+        # vertex addresses, so its output can differ between runs; these are
+        # the realizations of 20 fresh Gmsh processes each (nodes and volume
+        # cells by type), all 20 alike here. The first and the third go
+        # through the general QuadToTri planner.
+        gmsh_realizations=Dict(
+            :mismatched=>[(124,Dict(4=>236,5=>2,6=>7,7=>77))],
+            :hinged=>[(10,Dict(4=>7,7=>1))])
         mismatched,triangles,hinged=sources
-        for source in (mismatched,hinged)
-            geometry=_QTNN.execute(source;dim=0)
-            @test_throws r"QuadTriNoNewVerts|non-matching node counts" mesh_model_volume(geometry.model,1)
-            @test_throws r"QuadTriNoNewVerts|non-matching node counts" _QTNN.execute(source)
-            @test_broken try mesh_model_volume(geometry.model,1);true catch;false end
+        for (name,source) in ((:mismatched,mismatched),(:hinged,hinged))
+            execution=_QTNN.execute(source)
+            @test validate(execution.mesh).ok
+            volume=geo_entity_mesh(execution,3,1;geometry=true)
+            observed=(nnodes(execution.mesh),_QTNN.counts(volume))
+            if name===:hinged
+                @test observed in gmsh_realizations[name]
+            else
+                # The Region planner meshes Gmsh's own source to Gmsh's cells
+                # (quadtotri_general_test.jl); this source differs: the NoNew
+                # scope meshes it with mesh_model_surface, 32 nodes and 21
+                # quadrangles where the surface pass and Gmsh give 31 and 20.
+                @test_broken observed in gmsh_realizations[name]
+            end
         end
         geometry=_QTNN.execute(triangles;dim=0)
         @test nnodes(mesh_model_volume(geometry.model,1))==36
