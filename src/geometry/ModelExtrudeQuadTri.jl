@@ -400,12 +400,8 @@ function _extrude_quadtri_certify_retained(sweep::_ExtrudeVolumeSweep,
                 isfinite(volume) && volume!=0 ||
                 throw(ArgumentError("$caller: degenerate or nonfinite Tet4 map"))
         end
-        for index in nhexes+1:length(sweep.hexes)
-            v=sweep.hexes[index]
-            corner=-orient3(v[1],v[2],v[4],v[5])
-            orientation=corner>0 ? 1 : corner<0 ? -1 : 0
-            _extrude_nonew_hex_jacobian_certify(v,orientation,caller)
-        end
+        # Retained hexahedra are emitted as swept, as in Gmsh 4.15.2 (a
+        # folded transform gives a negative scaled Jacobian there too).
         for index in nprisms+1:length(sweep.prisms)
             _extrude_nonew_prism_jacobian_certify(sweep.prisms[index],caller)
         end

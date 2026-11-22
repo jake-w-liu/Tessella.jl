@@ -235,10 +235,13 @@ end
         #   "FindDiagonalEdgeIndices() encountered unexpected surface
         #   configuration"; with RecombLaterals it returns an unmerged mesh
         #   with the `unmerged` node count.
-        # Tessella agrees on every coherent case. Without AutoCoherence it
-        # refuses five of the sources in both modes and returns the unmerged
-        # mesh for the other two in both modes; the cases where that is not
-        # what Gmsh does are marked broken.
+        # Tessella agrees on every coherent case. Without AutoCoherence and
+        # without RecombLaterals it stops on every source (with Gmsh's
+        # message for the two it can bind); with RecombLaterals it returns
+        # Gmsh's unmerged mesh for the 5x1 and 2x2 sources and still refuses
+        # the other five, marked broken: Gmsh's mesh for those comes from
+        # its general QuadToTri planner classifying unmerged copies, which
+        # Tessella's catalogs do not reproduce.
         shapes=((1,1,true,(8,9),44,true),(2,1,true,(12,14),50,true),
             (3,1,true,(16,19),56,true),(4,1,true,(20,24),62,true),
             (5,1,true,(24,29),68,false),(2,2,true,(18,18),58,false),
@@ -260,7 +263,7 @@ end
             if !laterals && refused
                 @test_throws ArgumentError _QTNN.execute(separate)
             elseif !laterals
-                @test_broken try _QTNN.execute(separate);false catch;true end
+                @test_throws r"FindDiagonalEdgeIndices\(\) encountered unexpected surface configuration" _QTNN.execute(separate)
             elseif refused
                 @test_broken try nnodes(_QTNN.execute(separate).mesh)==unmerged catch;false end
             else
@@ -445,7 +448,7 @@ end
         end
     end
 
-    @testset "positive total volume does not admit a folded Hex8 map" begin
+    @testset "a folded Hex8 map is swept as in Gmsh" begin
         vertices=_QTNN.FOLDED_HEX_VERTICES
         coordinates=reduce(hcat,collect.(vertices))
         hex=MixedMesh(coordinates,[ElementBlock(5,reshape(Int32.(1:8),8,1))])
@@ -458,20 +461,24 @@ end
             geometry=_QTNN.execute(source;dim=0)
             model=geometry.model
             params=deepcopy(model.curve_params);attributes=repr(model.meshing)
-            # Gmsh 4.15.2 meshes this sweep in both modes: 33 nodes, two
-            # tetrahedra, five pyramids and one hexahedron whose minimum
-            # scaled Jacobian is -0.10. Tessella refuses to emit the inverted
-            # hexahedron. With QuadTriAddVerts the whole request does not
-            # reach that guard: it stops earlier with "model_to_mixed: input
-            # node 2 is 7.01 off Surface[13]", recorded as broken here; the
-            # checks below hold for whichever refusal occurs.
-            guard=r"full P1 Hex8 Jacobian positivity is not certified"
-            pipeline=mode=="QuadTriNoNewVerts" ? guard : ArgumentError
-            @test_throws guard mesh_model_volume(model,1)
-            @test model.curve_params==params && repr(model.meshing)==attributes
+            # Gmsh 4.15.2 meshes this sweep in both modes: two tetrahedra,
+            # five pyramids and one hexahedron whose minimum scaled Jacobian
+            # is -0.10, on 13 swept nodes. The Region producer returns the
+            # same cells. Gmsh's 33 nodes add one isolated node for each of
+            # the 20 Points its screw Extrude puts on the generatrices: those
+            # curves end at Points 29, 34, 48 and 62, not at the cap corners,
+            # in Gmsh as here, and the entity projection binds curve ends to
+            # swept nodes, so the GEO request stops there (broken below;
+            # repro in the structured4 scratch directory, p4.jl).
+            volume=mesh_model_volume(model,1)
+            @test nnodes(volume)==13
+            @test _QTNN.counts(volume)==Dict(4=>2,5=>1,7=>5)
+            geometry=_QTNN.execute(source;dim=0)
+            model=geometry.model
+            params=deepcopy(model.curve_params);attributes=repr(model.meshing)
+            pipeline=ArgumentError
             @test_throws pipeline _QTNN.execute(source)
-            mode=="QuadTriAddVerts" && @test_broken try _QTNN.execute(source);false catch err
-                occursin(guard,sprint(showerror,err)) end
+            @test_broken try nnodes(_QTNN.execute(source).mesh)==33 catch;false end
 
             # A failed GEO request also rolls back its preliminary grading,
             # option synchronization, and replacement of existing parts.

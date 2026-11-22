@@ -543,10 +543,10 @@ end
 function _extrude_nonew_certify_template(v,template,orientation::Int,caller)
     for position in 1:Int(template.ncells)
         cell=template.cells[position]
-        if cell.msh==5
-            corners=ntuple(k->v[cell.nodes[k]],8)
-            _extrude_nonew_hex_jacobian_certify(corners,orientation,caller)
-        end
+        # A retained Hex8 is emitted as swept, as Gmsh 4.15.2 does: a
+        # folded transform yields a cell with a negative scaled Jacobian
+        # there too, so its interior map is not certified here.
+        cell.msh==5 && continue
         for (a,b,c,d) in _EXTRUDE_CELL_TETS[Int(cell.msh)]
             p,q,r,s=(v[cell.nodes[a]],v[cell.nodes[b]],v[cell.nodes[c]],v[cell.nodes[d]])
             -orient3(p,q,r,s)*orientation>0 || throw(ArgumentError(
@@ -783,6 +783,13 @@ function _extrude_nonew_plan(m::GeoModel,t::Int,caller::AbstractString;
     strip_shape=quad_patch || quad_strip || three_quad_strip || four_quad_strip || rect_grid ?
         nothing : _extrude_nonew_rect_grid_shape(m,source,sides,caller;mode=:b4_strip)
     b4_strip=strip_shape!==nothing
+    # Without coherence the laterals keep their own copies of the swept
+    # nodes, so Gmsh 4.15.2 cannot find a lateral triangle on the Region's
+    # nodes and stops in QuadToTriGetRegionDiags; only RecombLaterals, whose
+    # laterals carry no triangles, returns the unmerged mesh.
+    !params.recomb_laterals &&
+        _extrude_nonew_unmerged_b4_incidence(m,t,caller) && throw(ArgumentError(
+            "$caller: FindDiagonalEdgeIndices() encountered unexpected surface configuration."))
     two_tri=!quad_patch && !quad_strip && !three_quad_strip && !four_quad_strip && !rect_grid && !b4_strip &&
         _extrude_nonew_two_tri_candidate(m,source,sides,caller)
     # A copied shared cap is not a lateral and leaves every certified
