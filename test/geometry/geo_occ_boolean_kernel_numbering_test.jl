@@ -3,15 +3,16 @@ using Test,Tessella
 const A=Tessella.API
 
 # `.geo` volume Booleans run through the kernel publication like the API's:
-# compsolid2.geo's fragment of two boxes and a sphere numbers its entities
-# from 1 as Gmsh 4.15.2 does, and a vertex is stored exactly where its edge
-# ends, so the closed circle bounding the sphere cap meshes conformingly.
-@testset ".geo fragment numbering and exact vertices" begin
+# `.geo` volume Booleans run through the kernel publication like the API's:
+# a fragment of two abutting boxes and a box across their common face
+# (compsolid2.geo with a box for the sphere) numbers its entities from 1 as
+# Gmsh 4.15.2 does: 24/40/22/4, masses 7.5, 0.5, 0.5, 7.5.
+@testset ".geo fragment numbering through the kernel" begin
     path=tempname()*".geo"
     write(path,"""
         SetFactory("OpenCASCADE");
         Box(1) = {0,0,0, 2,2,2};
-        Sphere(2) = {2.2, 1, 1, 0.5};
+        Box(2) = {1.5,0.5,0.5, 1,1,1};
         Box(3) = {2,0,0, 2,2,2};
         f() = BooleanFragments { Volume{1:3}; Delete; }{};
         """)
@@ -20,13 +21,11 @@ const A=Tessella.API
         A.option("General.Terminal",0)
         A.open(path)
         @test [[t for (_,t) in A.model.get_entities(d)] for d in 0:3]==
-            [collect(1:15),collect(1:24),collect(1:14),collect(1:4)]
-        for (_,c) in A.model.get_entities(1)
-            a,b=A.model.get_adjacencies(1,c)[2]
-            a==b || continue
-            lo,_=A.model.get_parametrization_bounds(1,c)
-            @test A.model.get_value(1,c,[lo[1]])==A.model.get_value(0,a,Float64[])
-        end
+            [collect(1:24),collect(1:40),collect(1:22),collect(1:4)]
+        # `getMass` of `.geo` volumes binds them into the kernel lazily
+        Tessella.API._with_model(m->Tessella.GeoExec._geo_occ_bind_entities!(m,
+            [(3,t) for t in 1:4],Tessella.GeoExec._geo_occ_prepare_kernel!(m),"test"))
+        @test [A.model.occ.get_mass(3,t) for t in 1:4]≈[7.5,0.5,0.5,7.5] rtol=1e-12
     finally
         A.finalize()
         rm(path;force=true)

@@ -44,12 +44,16 @@ const _BOOLEAN_API=Tessella.API
                        for t in 1:ntets(cut))
         @test cut_volume≈1.0 atol=1e-12
         cut_crc=mesh_crc(cut)
+        # the session mesh is renumbered in Gmsh's order; the volume's own
+        # mesh is what the later tag reuse must leave alone
+        direct_crc=mesh_crc(mesh_model_volume(_BOOLEAN_API.CURRENT[],3))
+        @test (direct_crc.n_nodes,direct_crc.n_tets)==(cut_crc.n_nodes,cut_crc.n_tets)
 
         _BOOLEAN_API.model.add_sphere(30,0,0,1;tag=1)
         @test haskey(_BOOLEAN_API.CURRENT[].spheres,1)
         @test !haskey(_BOOLEAN_API.CURRENT[].box_extents,1)
         retained=mesh_model_volume(_BOOLEAN_API.CURRENT[],3)
-        @test mesh_crc(retained)==cut_crc
+        @test mesh_crc(retained)==direct_crc
     finally
         _BOOLEAN_API.finalize()
     end
