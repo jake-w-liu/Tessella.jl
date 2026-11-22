@@ -7246,17 +7246,19 @@ function _brep_piece_first_own(pieces,kept)
     return own
 end
 
-# The pieces of a split face in OpenCASCADE's order: the piece at the first
-# vertex of the face's first wire comes first. Gmsh 4.15.2 lists a box
-# fragmented by a sphere over its corner as box∩sphere, then the rest; a
-# pyramid whose base is pierced by a cylinder as the pyramid's outer part
-# first.
+# The pieces of a split face in OpenCASCADE's order, as far as measured: the
+# piece at the far end of the face's first wire edge comes first. Gmsh
+# 4.15.2 lists a box fragmented by a sphere over its (xmin,ymin,zmin) corner
+# as box∩sphere, then the rest (the box's first edge -1 runs down to that
+# corner); a pyramid whose base is pierced by a cylinder as the pyramid's
+# outer part first; a cylinder's band at its top circle first. A square rod
+# through a pyramid apex is the known exception (Gmsh: top piece first).
 function _brep_regions_from_first_vertex(S,f,regions,arcs,cycles)
     length(regions)<2 && return regions
-    isempty(f.wires) || isempty(f.wires[1]) && return regions
+    (isempty(f.wires) || isempty(f.wires[1])) && return regions
     eidx,sgn,_=f.wires[1][1]
     e=S.edges[eidx]
-    P0=_brep_vertex_eval(e.curve,sgn>0 ? e.t0 : e.t1)
+    P0=_brep_vertex_eval(e.curve,sgn>0 ? e.t1 : e.t0)
     scale=max(1.0,abs(P0[1]),abs(P0[2]),abs(P0[3]))
     at(r)=any(c->any(a->begin
             ar=arcs[a[1]]

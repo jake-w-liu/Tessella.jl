@@ -106,19 +106,14 @@ end
 # Boundary Curves in the order upstream's `gf->edges()` hands them to
 # `getNodeCopies`: that order fills the `unordered_map` whose iteration is the
 # insertion order of the initial triangulation, so it decides the mesh. A
-# built-in face lists its Curve Loop as declared. The wire OpenCASCADE builds
-# for a Box face begins one edge before the cycle the Box record stores
-# (Gmsh 4.15.2 `getBoundary(combined=False)`: face 1 is -1,4,3,-2 where the
-# record holds 4,3,-2,-1; the same shift on all six faces).
+# built-in face lists its Curve Loop as declared, an OpenCASCADE face its
+# wire (a Box face's wire is OpenCASCADE's own: -1,4,3,-2 for face 1).
 function _gmsh_native_surface_curves(m::GeoModel,tag::Int)
     curves=Int[];seen=Set{Int}()
-    geometry=get(m.surface_geometry,tag,nothing)
-    box=geometry!==nothing && hasproperty(geometry,:primitive) &&
-        geometry.primitive===:box
     for loop in m.surfaces[tag]
         cycle=m.loops[loop]
         for index in eachindex(cycle)
-            signed=box ? cycle[mod1(index-1,length(cycle))] : cycle[index]
+            signed=cycle[index]
             curve=abs(signed)
             curve in seen && continue
             push!(curves,curve);push!(seen,curve)

@@ -24,10 +24,9 @@ point(t)=Tuple(round.(A.model.get_bounding_box(0,t)[1:3];digits=12))
             (1.5,2.25,5.0),(1.5,2.25,3.0)]
         @test [boundary(1,t) for t in 1:12]==[[2,1],[1,3],[4,3],[2,4],
             [6,5],[5,7],[8,7],[6,8],[2,6],[1,5],[4,8],[3,7]]
-        # Gmsh's wires, each started where the GEO Box starts it (Gmsh lists
-        # the same cycles from one edge earlier: [-1,4,3,-2], …)
-        @test [boundary(2,t) for t in 1:6]==[[4,3,-2,-1],[8,7,-6,-5],
-            [1,10,-5,-9],[3,12,-7,-11],[9,8,-11,-4],[10,6,-12,-2]]
+        # Gmsh's wires as it stores them (`getBoundary(combined=false)`)
+        @test [boundary(2,t) for t in 1:6]==[[-1,4,3,-2],[-5,8,7,-6],
+            [-9,1,10,-5],[-11,3,12,-7],[-4,9,8,-11],[-2,10,6,-12]]
         @test boundary(3,box)==[-1,2,-3,4,-5,6]
         @test occ.get_mass(3,box)≈0.25 rtol=1e-14
         @test collect(occ.get_center_of_mass(3,box))≈[1.25,2.125,4.0] rtol=1e-14

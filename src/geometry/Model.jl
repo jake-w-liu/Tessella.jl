@@ -1942,6 +1942,10 @@ function add_box!(m::GeoModel, xmin, ymin, zmin, dx, dy, dz; tag::Integer=0,
                           [c[3],c[12],-c[7],-c[11]],
                           [c[9],c[8],-c[11],-c[4]],
                           [c[10],c[6],-c[12],-c[2]])
+        # OpenCASCADE's box wires begin one edge earlier on the same cycle
+        # (Gmsh 4.15.2 `getBoundary(combined=false)`: face 1 is -1,4,3,-2);
+        # the built-in construction keeps its Curve Loops as declared
+        builtin || (loop_curve_signs=map(l->circshift(l,1),loop_curve_signs))
         for (face,signed_curves) in enumerate(loop_curve_signs)
             push!(created_loops,add_curve_loop!(m,signed_curves))
             push!(created_surfaces,

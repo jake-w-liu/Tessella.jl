@@ -40,11 +40,8 @@ end
         Translate{4,0,0}{ Duplicata{ Volume{1}; } }
         """) do
         @test volumes()==[1,2,3,4]
-        # since `add_box!` builds the `.geo` Box from built-in Plane
-        # Surfaces (08c4ba40), `Translate` cannot bind it into the kernel
-        # ("Could not translate shapes"), so the box is not moved
         @test Tuple(length(A.model.get_entities(d)) for d in 0:3)==(36,57,27,4)
-        @test_broken [mass(t) for t in 1:4]≈[6.5,1.5,6.5,6.5] rtol=1e-12
+        @test [mass(t) for t in 1:4]≈[6.5,1.5,6.5,6.5] rtol=1e-12
     end
 end
 
@@ -74,10 +71,9 @@ end
         @test Tuple(length(A.model.get_entities(d)) for d in 0:3)==(21,40,24,4)
         vols=[mass(t) for t in 1:4]
         @test sort(vols)≈sort([1/3-0.104/3,0.104/3,0.076/3,0.02]) rtol=1e-12
-        # Gmsh orders the two rod pieces outside the pyramid top, bottom: the
-        # first edge of its Box's first face is -1, from (xmin,ymin,zmax);
-        # Tessella's Box stores that face as the chained cycle 4,3,-2,-1
-        # (OpenCASCADE: -1,-2,3,4), so its first vertex is (xmin,ymin,zmin)
+        # Gmsh orders the two rod pieces outside the pyramid top, bottom;
+        # Tessella's split-face order (`_brep_regions_from_first_vertex`)
+        # puts the bottom first here
         @test_broken vols≈[1/3-0.104/3,0.104/3,0.076/3,0.02]
     end
 end

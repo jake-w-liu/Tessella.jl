@@ -440,13 +440,12 @@ function _model_occ_add_box!(m::GeoModel,x,y,z,dx,dy,dz;tag=-1)
        (hi[1],hi[2],hi[3]),(hi[1],hi[2],lo[3]))
     ep=((2,1),(1,3),(4,3),(2,4),(6,5),(5,7),(8,7),(6,8),
         (2,6),(1,5),(4,8),(3,7))
-    # -k walks edge k against its stored direction. Each wire starts at the
-    # edge `add_box!` starts it at (Gmsh's own boundary list is the same
-    # cycle one step on, [-1,4,3,-2] for the first face): the published box
-    # is then record for record the GEO Box, and its mesh is Gmsh's node
-    # for node like that one's.
-    face_loops=((4,3,-2,-1),(8,7,-6,-5),(1,10,-5,-9),
-                (3,12,-7,-11),(9,8,-11,-4),(10,6,-12,-2))
+    # -k walks edge k against its stored direction. Each wire is
+    # OpenCASCADE's (Gmsh 4.15.2 `getBoundary(combined=false)`: -1,4,3,-2
+    # for the first face), the same records `add_box!` stores for the GEO
+    # Box, so both boxes mesh alike and as Gmsh does.
+    face_loops=((-1,4,3,-2),(-5,8,7,-6),(-9,1,10,-5),
+                (-11,3,12,-7),(-4,9,8,-11),(-2,10,6,-12))
     span=ntuple(i->hi[i]-lo[i],3)
     count=8+12+6+6+1+1
     kernel.maxima[3]<=typemax(Int32)-8 || throw(ArgumentError(
