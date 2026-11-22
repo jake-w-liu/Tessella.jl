@@ -525,7 +525,7 @@ function _model_transfinite_volume_production(m,t,mesh,bindings,input,geometry_p
     for row in eachindex(tags)
         retained[row] || continue
         source=get(positions,tags[row],nothing)
-        source!==nothing && isequal(mesh.coords[:,row],input.mesh.coords[:,source]) ||
+        source!==nothing && all(axis->isequal(mesh.coords[axis,row],input.mesh.coords[axis,source]),1:3) ||
             throw(ArgumentError("$caller: actual volume boundary loses its emitted source value"))
     end
     geometry=nothing

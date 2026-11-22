@@ -138,7 +138,9 @@ end
             end
             if !edited
                 mapping=Dict(zip(old,new))
-                expected=sort!([mapping[tag] for tag in located])
+                # Gmsh 4.15.2 returns the elements in search order, unsorted:
+                # after renumberElements the same cells, under their new tags.
+                expected=[mapping[tag] for tag in located]
                 @test _PEL.mesh.get_elements_by_coordinates(.5,.5,0,2,true)==expected
                 answer=_PEL.mesh.get_element_by_coordinates(.5,.5,0,2,true)
                 source=old[findfirst(==(first(expected)),new)]
