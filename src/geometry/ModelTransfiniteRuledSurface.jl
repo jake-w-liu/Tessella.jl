@@ -44,8 +44,12 @@ function _model_transfinite_ruled_grid(m,t,curves,frame,points,input,caller)
         source=_model_mesh_curve_births(input,m,curve,caller)
         params=if source===nothing
             t0,t1=_model_curve_param_bounds(m,curve,caller)
-            _model_curve_transfinite_native_params(m,curve,t0,t1,
-                m.meshing.transfinite_curves[curve],caller)
+            spec=get(m.meshing.transfinite_curves,curve,nothing)
+            stored=get(m.curve_params,curve,nothing)
+            # A swept connector (an Extrude with Layers) is not a Transfinite
+            # Curve: its nodes are the layer heights it already holds.
+            spec===nothing && stored!==nothing ? (stored.-t0)./(t1-t0) :
+            _model_curve_transfinite_native_params(m,curve,t0,t1,spec,caller)
         else
             data=source.mesh.entity_data
             map(enumerate(source.rows)) do entry

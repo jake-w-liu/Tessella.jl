@@ -78,6 +78,15 @@ function _extrude_nonew_scope_contract(m::GeoModel,t::Int,
     curves=Set{Int}()
     points=Set{Int}()
     for surface in surfaces
+        # A transfinite cap is meshed first and the Region follows it (or
+        # stops, as Gmsh does, when it cannot). A transfinite lateral is not
+        # followed yet: Gmsh meshes it (two square Regions sharing a
+        # transfinite wall: 18 nodes, 32 tri, 2 quad, 20 or 16 tets).
+        surface==source || !haskey(m.meshing.transfinite_surfaces,surface) ||
+            get(m.meshing.extrude_sources,(2,surface),(0,0))[1]==2 ||
+            throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts transfinite lateral overrides " *
+                "require the constrained-boundary planner"))
         # A mesh-level `Reverse Surface` flag only flips the published cell
         # windings — the scope mirrors a reversed Source through its Source
         # mesh (the surface pass already flipped it) and flips each emitted
