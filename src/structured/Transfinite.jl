@@ -380,7 +380,16 @@ end
 # best-conditioned coordinate-plane projection; fully collinear candidates
 # fall back to a scalar interval-overlap test along the dominant axis.
 function _point_on_segment3(a,b,p)
-    cross=_cross3(_sub3(b,a),_sub3(p,a))
+    # The bounding box is exact and rejects almost every candidate before
+    # the collinearity test; a float cross product clearly away from zero
+    # (beyond its rounding bound) rejects without rational arithmetic.
+    (min(a[1],b[1])<=p[1]<=max(a[1],b[1]) &&
+     min(a[2],b[2])<=p[2]<=max(a[2],b[2]) &&
+     min(a[3],b[3])<=p[3]<=max(a[3],b[3])) || return false
+    u=_sub3(b,a);v=_sub3(p,a)
+    cross=_cross3(u,v)
+    bound=16eps(Float64)*(abs(u[1])+abs(u[2])+abs(u[3]))*(abs(v[1])+abs(v[2])+abs(v[3]))
+    (abs(cross[1])>bound || abs(cross[2])>bound || abs(cross[3])>bound) && return false
     if !(cross[1]==0&&cross[2]==0&&cross[3]==0)
         ea=ntuple(d->Rational{BigInt}(a[d]),3)
         eb=ntuple(d->Rational{BigInt}(b[d]),3)

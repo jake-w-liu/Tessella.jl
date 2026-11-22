@@ -1136,7 +1136,11 @@ function _higher_ordinary_sweep_classification(assembly,m,production,input,dimen
         all(row->!boundary[row] || retained[row],eachindex(boundary)) || throw(ArgumentError(
             "$caller: ordinary Layers boundary vertex lacks an actual source UID"))
     else
-        Model._volume_projection_contract(mesh,caller)
+        # The sweep producer made every cell positive (`_extrude_make_positive!`
+        # throws on a degenerate one), so the cells' signs are not proved a
+        # second time here: that pass, with exact rational volumes for the
+        # nearly flat fan tetrahedra of rotated faces, was half of t3's
+        # generate(3).
         actual_faces,_=Model._volume_cell_boundary_faces(mesh)
         expected_faces==actual_faces || throw(ArgumentError(
             "$caller: ordinary Layers lower Surface cells do not exactly cover its emitted Volume boundary"))
@@ -1295,18 +1299,40 @@ function _higher_transfinite_constructor_input(actual,events,assembly,tag)
         allunique(cell.tag for cell in events) ||
         throw(ArgumentError("$caller: transfinite constructor lacks its actual Face cell events"))
     for family in (2,3)
-        emitted=[(cell.tag,cell.physical,
-                  Tuple(assembly.nodes[row].tag for row in cell.nodes))
-                 for cell in events if cell.msh==family]
-        bound=[(uid,block.tags[column],
-                Tuple(data.external_node_tags[block.nodes[:,column]]))
-               for (block,uids,owners) in zip(actual.blocks,data.external_element_tags,data.block_entities)
-               if block.msh==family
-               for (column,uid) in enumerate(uids) if owners[column]==owner[2]]
-        emitted==bound || throw(ArgumentError(
-            "$caller: transfinite constructor changes its actual Face emission vector"))
+        _higher_transfinite_same_emission(events,family,actual,data,assembly,owner) ||
+            throw(ArgumentError(
+                "$caller: transfinite constructor changes its actual Face emission vector"))
     end
     return actual
+end
+
+# The events of one family against the actual block columns of `owner`, in
+# order: element UID, physical tag and node UIDs. Walked in step, without a
+# tuple or vector per cell.
+function _higher_transfinite_same_emission(events,family,actual,data,assembly,owner)
+    position=1
+    for (block,uids,owners) in zip(actual.blocks,data.external_element_tags,data.block_entities)
+        block.msh==family || continue
+        for (column,uid) in enumerate(uids)
+            owners[column]==owner[2] || continue
+            while position<=length(events) && events[position].msh!=family
+                position+=1
+            end
+            position<=length(events) || return false
+            cell=events[position]
+            position+=1
+            cell.tag==uid && cell.physical==block.tags[column] &&
+                length(cell.nodes)==size(block.nodes,1) || return false
+            for (slot,row) in enumerate(cell.nodes)
+                assembly.nodes[row].tag==data.external_node_tags[block.nodes[slot,column]] ||
+                    return false
+            end
+        end
+    end
+    while position<=length(events) && events[position].msh!=family
+        position+=1
+    end
+    return position>length(events)
 end
 
 # meshGFace writes a recovered boundary chain back onto its GEdge when the

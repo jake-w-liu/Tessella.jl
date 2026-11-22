@@ -2105,15 +2105,24 @@ function _extrude_volume_columns(m::GeoModel,t::Int,src::Int,srcmesh,
     return cols
 end
 
+# The first two collapsed columns `i` (`v[i]==v[i+n]`) and how many there are,
+# without a vector per cell.
+@inline function _extrude_collapsed(v,::Val{n}) where n
+    first=0;second=0;count=0
+    for i in 1:n
+        v[i]==v[i+n] || continue
+        count+=1
+        count==1 ? (first=i) : count==2 ? (second=i) : nothing
+    end
+    return (first,second),count
+end
+
 # `createPriPyrTet` verbatim — vertex identity is the bitwise position
 # tuple, so `v[i]==v[i+3]` marks a collapsed column.
 function _extrude_pripyrtet!(tets,pyramids,prisms,
                              v::NTuple{6,NTuple{3,Float64}})
-    dup=Int[]
-    for i in 1:3
-        v[i]==v[i+3] && push!(dup,i)
-    end
-    if length(dup)==2
+    dup,count=_extrude_collapsed(v,Val(3))
+    if count==2
         if dup[1]==1 && dup[2]==2
             push!(tets,(v[1],v[2],v[3],v[6]))
         elseif dup[1]==2 && dup[2]==3
@@ -2121,7 +2130,7 @@ function _extrude_pripyrtet!(tets,pyramids,prisms,
         else
             push!(tets,(v[1],v[2],v[3],v[5]))
         end
-    elseif length(dup)==1
+    elseif count==1
         if dup[1]==1
             push!(pyramids,(v[2],v[5],v[6],v[3],v[1]))
         elseif dup[1]==2
@@ -2139,11 +2148,8 @@ end
 # unmatched two-collapse pattern emits upstream's error and no cell.
 function _extrude_hexpri!(hexes,prisms,degenerate,
                           v::NTuple{8,NTuple{3,Float64}})
-    dup=Int[]
-    for i in 1:4
-        v[i]==v[i+4] && push!(dup,i)
-    end
-    if length(dup)==2
+    dup,count=_extrude_collapsed(v,Val(4))
+    if count==2
         if dup[1]==1 && dup[2]==2
             push!(prisms,(v[1],v[4],v[8],v[2],v[3],v[7]))
         elseif dup[1]==2 && dup[2]==3
@@ -2256,9 +2262,10 @@ function _extrude_volume_sweep(m::GeoModel,t::Int,params::_GeoExtrudeParams,
         elseif recombine
             before=(length(sweep.tets),length(sweep.pyramids),length(sweep.prisms))
             _extrude_pripyrtet!(sweep.tets,sweep.pyramids,sweep.prisms,v)
-            for (msh,cells,count) in ((4,sweep.tets,before[1]),(7,sweep.pyramids,before[2]),
-                                      (6,sweep.prisms,before[3]))
-                !_record_cell_events || length(cells)==count || push!(sweep.cell_events,(msh,length(cells)))
+            if _record_cell_events
+                length(sweep.tets)==before[1] || push!(sweep.cell_events,(4,length(sweep.tets)))
+                length(sweep.pyramids)==before[2] || push!(sweep.cell_events,(7,length(sweep.pyramids)))
+                length(sweep.prisms)==before[3] || push!(sweep.cell_events,(6,length(sweep.prisms)))
             end
         else
             push!(sweep.prism6,v)
@@ -2517,6 +2524,13 @@ function _extrude_make_positive!(coords::Matrix{Float64},
     return nothing
 end
 
+function _extrude_cell_nodes!(lookup,coords,cells::Vector{NTuple{N,NTuple{3,Float64}}}) where N
+    for cell in cells,p in cell
+        _extrude_node!(lookup,coords,p)
+    end
+    return nothing
+end
+
 # Emit a swept volume as a `Mesh` (tetrahedra only) or `MixedMesh`. Nodes
 # are the deduplicated column positions in source-node × level order, and
 # blocks follow ascending MSH type like the writer's serialization order.
@@ -2539,9 +2553,12 @@ function _extrude_volume_part(m::GeoModel,sweep::_ExtrudeVolumeSweep,
         _extrude_node!(lookup,coords,p)
     end
     # Transition fans introduce body vertices after the column sweep.
-    for cells in (sweep.tets,sweep.hexes,sweep.prisms,sweep.pyramids),cell in cells,p in cell
-        _extrude_node!(lookup,coords,p)
-    end
+    # One concrete loop per family: iterating the tuple of differently typed
+    # vectors boxed every cell and point (15 objects per cell on t3).
+    _extrude_cell_nodes!(lookup,coords,sweep.tets)
+    _extrude_cell_nodes!(lookup,coords,sweep.hexes)
+    _extrude_cell_nodes!(lookup,coords,sweep.prisms)
+    _extrude_cell_nodes!(lookup,coords,sweep.pyramids)
     out=Matrix{Float64}(undef,3,length(coords))
     for (i,(x,y,z)) in enumerate(coords)
         out[1,i]=x;out[2,i]=y;out[3,i]=z
