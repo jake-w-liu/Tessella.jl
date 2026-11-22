@@ -49,11 +49,15 @@ end
     @test isapprox(near, 0.036; atol=0.003)
     # Without the field the interior is only boundary-driven (75 triangles
     # near the curve, mean edge 0.066, identical in both programs).
-    _, _, plain = generate("")
-    @test plain > 0.06
-    @test_throws Exception generate("""
+    unsized = generate("")
+    @test unsized[3] > 0.06
+    # SurfacesList samples the listed surfaces' triangles, and while the
+    # surface is being meshed it has none, so the field leaves the mesh as
+    # it is without it (Gmsh 4.15.2: 87 nodes and 98 triangles both ways).
+    @test unsized[1:2] == (87, 98)
+    @test generate("""
         Field[1]=Extend; Field[1].SurfacesList={1}; Background Field=1;
-        """)
+        """) == unsized
 end
 
 end # module
