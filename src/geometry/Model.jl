@@ -19,6 +19,7 @@ import ..BRep
 import ..Transfinite
 import ..TransfiniteTriangle
 import ..QuadToTri3D
+import ..Hxt
 import ..OrderedMatching
 import ..WeightedMatching
 
@@ -7941,6 +7942,7 @@ include("ModelNativeHybridVolume.jl")
 include("ModelNativeHybridComponents.jl")
 include("ModelNativeHybridBatch.jl")
 include("ModelVolumeAlgorithms.jl")
+include("ModelHxtVolume.jl")
 
 function _surface_recombine_physical_coords(mesh,frame,canonical)
     coords=Matrix{Float64}(undef,3,size(mesh.coords,2))
@@ -11432,10 +11434,17 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                 _native_initial_births.node_high_water,
                 _native_initial_births.element_high_water,caller) : mesh
     end
+    if m.meshing.algorithm_3d==10 && !isempty(m.volumes[t])
+        mesh=_model_hxt_volume(m,t,caller;size_field,_mesh_input,options,
+            births=_native_initial_births)
+        diag=validate(mesh)
+        diag.ok || throw(ErrorException("$caller: invalid HXT mesh — "*join(diag.messages,"; ")))
+        return mesh
+    end
     m.meshing.algorithm_3d in (1,3,9) || throw(ArgumentError(
         "$caller: Mesh.Algorithm3D=$(m.meshing.algorithm_3d) is not " *
         "implemented for ordinary native Volume[$t]; supported: " *
-        "1 (Delaunay), 3 (initial only), 9 (RTREE hex-combining fill)"))
+        "1 (Delaunay), 3 (initial only), 9 (RTREE hex-combining fill), 10 (HXT)"))
     if !isempty(m.volumes[t]) && !_model_factory_volume_encoding(m,t)
         hybrid=_model_native_hybrid_volume_input(m,t,_mesh_input,caller)
         if hybrid!==nothing

@@ -1428,12 +1428,13 @@ below `quality_min`. Cells of volume `k` (0-based, the order of
 `m.surfaces_per_volume`) have colour `k`.
 """
 function tet_mesh!(m::Mesh; min_size::Float64=0.0, max_size::Float64=floatmax(Float64),
-                   size_callback=nothing, quality_min::Float64=0.3,
+                   factor::Float64=1.0, size_callback=nothing, quality_min::Float64=0.3,
                    optimize::Bool=true, refine::Bool=true)
     max_size <= 0.0 && (max_size = floatmax(Float64))
+    factor <= 0.0 && (factor = 1.0)
     b = bbox(m)
     constrained = m.nv
-    ns = refine ? nodal_sizes_init(m, min_size, max_size, 1.0) : nothing
+    ns = refine ? nodal_sizes_init(m, min_size, max_size, factor) : nothing
     opt = DelaunayOptions(b, ns, 0, 0, 0.0, false, false)
     empty_mesh!(m, opt)
     map, missing = tri2tet_map(m)
