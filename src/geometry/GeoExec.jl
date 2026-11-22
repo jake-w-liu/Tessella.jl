@@ -10932,6 +10932,8 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
     before=get(api.OPTIONS,"Mesh.PartitionCreatePhysicals",nothing)
     api.OPTIONS["Mesh.PartitionCreatePhysicals"]=physicals
     plan=try
+        !ghosts && api._partition_gmsh_supported(actual,class) ?
+            api._partition_gmsh_plan(source,actual,class,count,assignment,caller;topology) :
         topology||ghosts ?
             api._partition_tet_production_plan(source,actual,class,count,assignment,
                 caller;topology,ghosts) :
@@ -13369,13 +13371,16 @@ function _geo_plugin_run!(api,name,m,context,caller)
             api.LAST_MESH[]=slot.mesh
             api.LAST_MESH_CLASS[]=slot.class
             api.LAST_MESH_PARTITION[]=nothing
+            api.LAST_PARTITION_SPLIT[]=nothing
             push!(api.MODEL_SLOTS,slot)
             api._plugin_entry(name,caller).run_fn(
                 api._plugin_state_locked(name),caller)
             # A produced `_MeshPartition` on this mesh transports through the
             # `PartitionMesh` production plan — the actual published mesh
             # carries the partition entities and element columns `Save` emits.
-            produced=api.LAST_MESH_PARTITION[]
+            produced=api.LAST_PARTITION_SPLIT[]
+            api.LAST_PARTITION_SPLIT[]=nothing
+            produced===nothing && (produced=api.LAST_MESH_PARTITION[])
             if produced!==nothing && actual_input!==nothing &&
                     produced.mesh===actual_input[2]
                 # `Mesh.PartitionCreatePhysicals` scopes the same `.geo`
@@ -13384,7 +13389,12 @@ function _geo_plugin_run!(api,name,m,context,caller)
                     _geo_option_number(context,"Mesh",0,"PartitionCreatePhysicals"),1.0)
                 before=get(api.OPTIONS,"Mesh.PartitionCreatePhysicals",nothing)
                 api.OPTIONS["Mesh.PartitionCreatePhysicals"]=physicals
+                topology=!iszero(something(
+                    _geo_option_number(context,"Mesh",0,"PartitionCreateTopology"),1.0))
                 plan=try
+                    api._partition_gmsh_supported(actual_input[2],actual_input[3]) ?
+                    api._partition_gmsh_plan(actual_input[1],actual_input[2],actual_input[3],
+                        produced.num_partitions,produced.element_partitions,caller;topology) :
                     api._partition_assign_production_plan(actual_input[1],
                         actual_input[2],actual_input[3],produced.num_partitions,
                         produced.element_partitions,caller)

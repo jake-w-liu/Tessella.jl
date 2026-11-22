@@ -47,11 +47,9 @@ end
         API.mesh.generate(2)
         @test counts()[3] == [(1, 14, 42), (2, 15, 44), (3, 0, 0), (4, 0, 0)]
         @test counts()[2][3] == 86
-        # The totals that still differ from Gmsh's (85 nodes, 17 point and 60
-        # line cells; Tessella 56 lines) depend on the partition topology:
-        # Gmsh adds 4 interface lines over Curve 2, Tessella's topology does
-        # not follow Gmsh's createPartitionTopology yet.
-        @test_broken counts()[1:2] == (85, [17, 60, 86])
+        # Gmsh's partition topology adds 4 interface lines over Curve 2 and
+        # the partition points; they survive the new generates.
+        @test counts()[1:2] == (85, [17, 60, 86])
     finally
         API.finalize()
     end

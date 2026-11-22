@@ -150,6 +150,7 @@ include("APINativeMeshTags.jl")
 include("APIPartitionNative.jl")
 include("APIPartitionProducer.jl")
 include("APIPartitionBRep.jl")
+include("APIPartitionGmsh.jl")
 include("APIPlugins.jl")
 include("APIOnelab.jl")
 
@@ -8942,6 +8943,10 @@ function _partition_elements_simple(mesh::Mesh,num_partitions::Int)
     return assignment
 end
 
+# The last explicit split `_partition` published through Gmsh's topology
+# construction, for `Plugin(SimplePartition)` inside a `.geo` run.
+const LAST_PARTITION_SPLIT=Ref{Any}(nothing)
+
 function _partition(num_part,element_tags=(),partitions=())
     caller="API.mesh.partition"
     count=_mesh_query_integer(num_part,caller,"num_part")
@@ -8996,6 +9001,16 @@ function _partition(num_part,element_tags=(),partitions=())
         topology=!iszero(OPTIONS["Mesh.PartitionCreateTopology"])
         ghosts=!iszero(OPTIONS["Mesh.PartitionCreateGhostCells"])
         class=_cached_classification_locked(cached)
+        # Gmsh's own entity and topology construction (APIPartitionGmsh.jl)
+        # for the cells it covers; ghost cells still go through the producers.
+        if !ghosts && _partition_gmsh_supported(cached,class)
+            plan=_partition_gmsh_plan(_model_locked(),cached,class,count,assignment,caller;topology)
+            _commit_tagged_plan_locked!(plan;preserve_visibility=true,
+                element_tag_map=plan.visibility_tag_map)
+            # The `.geo` plugin transport reads the split back from here.
+            LAST_PARTITION_SPLIT[]=_MeshPartition(cached,Int(count),assignment)
+            return nothing
+        end
         if topology || ghosts
             plan=_partition_tet_production_plan(_model_locked(),cached,class,count,
                 assignment,caller;topology,ghosts)
