@@ -1444,10 +1444,9 @@ end
         for key in keys(left)
             @test _sl_reversed(left[key],right[key])
         end
-        # The coarse unstructured pair welds the same way: each native
-        # Source carries two triangles (the oracle fans its own sources
-        # through an extra centroid — 24 nodes — while the native pair
-        # stays at 18), the certified wall stays two whole quadrangles.
+        # The coarse unstructured pair welds the same way: each Source is
+        # fanned through a centroid as Gmsh does (24 nodes), the certified
+        # wall stays two whole quadrangles.
         execution=_sl_model("""
         Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
         Point(3)={1,1,0,3.0}; Point(4)={0,1,0,3.0};
@@ -1524,11 +1523,10 @@ end
         for key in keys(left)
             @test _sl_reversed(left[key],right[key])
         end
-        # The same pair on the coarse two-triangle Sources: the wall
-        # carries four triangles through the partner's vote. The twist
-        # fixpoint selects the mirror diagonal on this source — a valid
-        # certified weld the partner reproduces bitwise, oriented the
-        # opposite way from the oracle's own centroid-fanned sources.
+        # The same pair on the coarse Sources, which Gmsh fans through a
+        # centroid: the wall carries four triangles through the partner's
+        # vote, Gmsh's diagonal (20 runs, all alike), in the GEO pipeline and
+        # the naked pass alike.
         execution=_sl_model("""
         Point(1)={0,0,0,3.0}; Point(2)={1,0,0,3.0};
         Point(3)={1,1,0,3.0}; Point(4)={0,1,0,3.0};
@@ -1547,18 +1545,11 @@ end
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         wall=_sl_surface_faces(pass.scope.surfaces[s])
         @test wall==Set((
-            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.0)),
-            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.5),(1.0,1.0,0.0),(1.0,1.0,0.5)),
-            ((1.0,0.0,1.0),(1.0,1.0,0.5),(1.0,1.0,1.0))))
-        # The GEO pipeline meshes the Sources as Gmsh does (centroid fans)
-        # and carries Gmsh's wall, the other diagonal (20 runs, all alike);
-        # the naked pass above still meshes two-triangle Sources.
-        @test _sl_dim2_faces_on(merged,1,1.0)==Set((
             ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
             ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
             ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
             ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_dim2_faces_on(merged,1,1.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
             _sl_positive(pass.parts[tag])
