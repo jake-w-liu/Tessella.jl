@@ -402,6 +402,7 @@ end
         "interfaces/api_mixed_queries_test.jl",
         "geometry/geo_periodic_test.jl",
         "fields/geo_extend_field_volume_test.jl",
+        "interfaces/api_view_tag_counter_test.jl",
         "geometry/geo_exec_params_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")

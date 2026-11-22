@@ -773,7 +773,7 @@ function initialize()
         push!(MODEL_SLOTS,_new_slot(""))
         _slot_load_locked!(MODEL_SLOTS[1])
         FIELD_TAG_MAX[]=0
-        empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        empty!(SESSION_VIEWS)   # the view tag counter survives initialize, as PView::_globalTag
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
         _onelab_reset_server_state!()
@@ -793,7 +793,7 @@ function finalize()
         _slot_clear_globals_locked!()
         empty!(OPTIONS);merge!(OPTIONS,DEFAULT_OPTIONS)
         FIELD_TAG_MAX[]=0
-        empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=-1
         empty!(SESSION_PLUGINS)
         empty!(SESSION_ONELAB);empty!(SESSION_ONELAB_CHANGED)
         _onelab_reset_server_state!()
@@ -812,7 +812,7 @@ function clear()
         end
         empty!(MODEL_SLOTS);push!(MODEL_SLOTS,_new_slot(""))
         _slot_load_locked!(MODEL_SLOTS[1])
-        empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=0
+        empty!(SESSION_VIEWS);VIEW_TAG_MAX[]=-1
         empty!(SESSION_PLUGINS)
         # `ClearProject` ends with `Msg::ResetErrorCounter()`: an error left in
         # the session no longer makes `set_order`, `optimize` or `recombine`
@@ -9895,6 +9895,10 @@ _SessionView(name::AbstractString)=_SessionView(
     Dict{Tuple{Int,String},Tuple{Vector{UInt64},Vector{Float64},Int}}())
 
 const SESSION_VIEWS = Dict{Int,_SessionView}()
+# PView::_globalTag: the next view tag is VIEW_TAG_MAX[]+1. A fresh process
+# starts at 1; gmsh.finalize and gmsh.clear (DeleteAllModelsAndViews) set it
+# to 0, and gmsh.initialize leaves it alone, so a script that runs
+# initialize/finalize twice numbers its views from 0 the second time.
 const VIEW_TAG_MAX = Ref(0)
 include("APIViewTime.jl")
 include("APIHighOrderOptimize.jl")
