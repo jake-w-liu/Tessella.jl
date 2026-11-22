@@ -203,10 +203,29 @@ function _model_import_stage_cad_file(path,options;model=nothing,seed=nothing,
         native_element_lookup_receipt=context.native_element_lookup_receipt)
 end
 
+# The reader a file goes to. A known extension decides it; any other name is
+# recognized by its first line as Gmsh's MergeFile does: an MSH header
+# (`$MeshFormat`, `$Comments`, MSH 1 `$NOD`/`$PTS`/`$PARA`/`$ELM`), a
+# post-processing view (`$PostFormat`, `$View`), and a `.geo` script otherwise.
+function _model_import_kind(path)
+    extension=lowercase(splitext(path)[2])
+    extension in _MODEL_IMPORT_EXTENSIONS && return extension
+    header=try
+        Base.open(io->String(Base.read(io,256)),path)
+    catch err
+        err isa InterruptException && rethrow()
+        ""
+    end
+    any(prefix->startswith(header,prefix),("\$PTS","\$NO","\$PARA","\$ELM","\$MeshFormat","\$Comments")) &&
+        return ".msh"
+    any(prefix->startswith(header,prefix),("\$PostFormat","\$View")) && return ".pos"
+    return ".geo"
+end
+
 function _model_import_prepare(path,dimension;legacy=false)
     caller=legacy ? "API.open_geo!" : "API.open"
     options=copy(OPTIONS);diagnostics=_model_import_diagnostics(options)
-    extension=lowercase(splitext(path)[2])
+    extension=_model_import_kind(path)
     extension==".pos" && return _list_model_open_prepare(path,caller)
     view_receipt=Ref{Any}(nothing)
     result=if extension==".msh"
@@ -227,15 +246,20 @@ function _model_import_prepare(path,dimension;legacy=false)
         Base.invokelatest(_model_import_execute_geo,path,dimension,options,diagnostics;
             legacy,view_receipt)
     end
-    # A staged `.msh` model is built fresh by `_geo_stage_mesh_file` and aliased
-    # nowhere else, so the plan can adopt it without a deep copy of its mesh.
+    # A staged `.msh`, foreign-mesh or STL model is built fresh by
+    # `_geo_stage_mesh_file` (the foreign readers stage through it too) and
+    # aliased nowhere else, so the plan can adopt it without a deep copy of
+    # its mesh (a third of opening a 500k-tetrahedron .mesh file).
+    detached=extension==".msh" || extension==".stl" || extension in
+        (".unv",".mesh",".meshb",".su2",".bdf",".nas",".inp",".neu",".p3d",".mail",
+         ".ir3",".diff",".vtk",".wrl",".off",".obj",".ply",".ply2")
     return _model_import_prepare_result(result,path,options,diagnostics;legacy,caller,
-        geo_views=view_receipt[],detached_result=extension==".msh")
+        geo_views=view_receipt[],detached_result=detached)
 end
 
 function _model_import_prepare_result(result,path,options,diagnostics;legacy=false,
         caller="API.open",detached_result=false,view_sections=nothing,geo_views=nothing)
-    extension=lowercase(splitext(path)[2])
+    extension=_model_import_kind(path)
     model=detached_result ? result.model : deepcopy(result.model)
     authority=model.meshing.mesh_authority
     mesh=authority!==nothing && authority.mesh!==nothing ? authority.mesh :
@@ -396,7 +420,8 @@ function _model_import_filename(filename,caller;geo_only=false)
     extension==".cgns" && throw(ArgumentError(
         "$caller: .cgns import requires the CGNS library (upstream Gmsh " *
         "must be compiled with CGNS support), which Tessella does not link"))
-    extension in (geo_only ? (".geo",) : _MODEL_IMPORT_EXTENSIONS) || throw(ArgumentError(
+    # Gmsh's MergeFile reads a file of any other name by its content.
+    !geo_only || extension==".geo" || throw(ArgumentError(
         "$caller: supported file extensions are $(geo_only ? ".geo" : ".geo, .msh, .pos, .unv, .mesh, .meshb, .stl, .su2, .bdf, .nas, .inp, .neu, .p3d, .mail, .ir3, .diff, .vtk, .wrl, .off, .obj, .ply, .ply2, .step, .stp, .igs, .iges, .xao, .brep and .cdf")"))
     isfile(filename) || throw(ArgumentError("$caller: missing file $filename"))
     return String(filename)
@@ -473,7 +498,7 @@ function open(filename)
         # current model's entities through the merge stage (upstream
         # `GeomMeshMatcher::match` keeps the current model, so the publish is
         # slot-reusing like `API.merge`).
-        if lowercase(splitext(path)[2])==".msh" &&
+        if _model_import_kind(path)==".msh" &&
                 !iszero(get(OPTIONS,"Geometry.MatchGeomAndMesh",0.0)) &&
                 _current_slot_index_locked()!=0 &&
                 !isempty(Model.model_entities(current))
