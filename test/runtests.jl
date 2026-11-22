@@ -26,6 +26,53 @@ import Tessella.MeshTypes as MT
 # Small public operations and analytic invariants; opt-in campaigns: README.md.
 include("functional/fixtures.jl")
 
+# `TESSELLA_TEST_SHARD="k/n"` runs the k-th of n parts of the file list below
+# (the feature checks run in every part). CI's interpreted coverage job runs
+# the parts on separate machines: in one process it took five of the six hours
+# a job may run. Parts are balanced by the interpreted times below (seconds on
+# the machine they were measured on, 2026-11-22); unlisted files count 1 s.
+const _SHARD_WEIGHTS = Dict(
+    "interfaces/api_occ_conic_rational_chart_test.jl" => 107.0,
+    "interfaces/api_occ_import_brep_natural_test.jl" => 85.0,
+    "meshing/highorder_elastic_fem_test.jl" => 75.0,
+    "interfaces/api_incomplete_pyramid_view_test.jl" => 69.0,
+    "functional/occ_closest_smoke.jl" => 64.0,
+    "functional/brep_nurbs_mixed_smoke.jl" => 64.0,
+    "interfaces/api_occ_natural_measures_translation_test.jl" => 57.0,
+    "meshing/mesh2d_hinted_locate_test.jl" => 41.0,
+    "interfaces/api_occ_brep_hyperbola_test.jl" => 40.0,
+    "interfaces/cli_onelab_listener_test.jl" => 39.0,
+    "interfaces/cli_onelab_remote_test.jl" => 39.0,
+    "functional/brep_nurbs_trim_smoke.jl" => 25.0,
+    "interfaces/api_occ_pcurve_edge_test.jl" => 18.0,
+    "meshing/mesh3d_hinted_locate_test.jl" => 18.0,
+    "meshing/mesh2d_refine_scan_test.jl" => 17.0,
+    "interfaces/api_onelab_run_test.jl" => 17.0,
+    "interfaces/api_occ_inertia_test.jl" => 13.0,
+    "geometry/geo_background_mesh_view_test.jl" => 11.0,
+    "interfaces/api_native_lookup_test.jl" => 9.0,
+    "functional/brep_assembly_smoke.jl" => 9.0,
+)
+
+# The files of part `k` of `n`: longest first onto the lightest part, so the
+# assignment depends only on the list and the weights. Suite order is kept
+# within a part.
+function _shard_files(paths, shard::AbstractString)
+    isempty(shard) && return collect(paths)
+    m = match(r"^(\d+)/(\d+)$", shard)
+    m === nothing && error("TESSELLA_TEST_SHARD must look like k/n, not $(repr(shard))")
+    k, n = parse(Int, m[1]), parse(Int, m[2])
+    1 <= k <= n || error("TESSELLA_TEST_SHARD: part $k of $n does not exist")
+    weight(path) = get(_SHARD_WEIGHTS, path, 1.0)
+    order = sort(collect(eachindex(paths)); by=i -> (-weight(paths[i]), i))
+    load = zeros(n); owner = zeros(Int, length(paths))
+    for i in order
+        part = argmin(load)
+        owner[i] = part; load[part] += weight(paths[i])
+    end
+    return [paths[i] for i in eachindex(paths) if owner[i] == k]
+end
+
 @testset verbose=true "Tessella functionality" begin
     for feature in ("core", "geometry", "meshing", "io", "api")
         println("Testing ", feature, "...")
@@ -34,7 +81,7 @@ include("functional/fixtures.jl")
         println("Completed ", feature, " in ", round(elapsed; digits=2), " s")
         flush(stdout)
     end
-    for path in (
+    for path in _shard_files((
         "meshing/ordered_matching_seeded_test.jl",
         "meshing/periodic_test.jl",
         "meshing/boundary_recovery_test.jl",
@@ -325,7 +372,7 @@ include("functional/fixtures.jl")
         "interfaces/api_cell_cache_sizes_test.jl",
         "interfaces/api_mesh_jacobian_test.jl",
         "geometry/geo_plugin_test.jl",
-    )
+    ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)
         elapsed = @elapsed include(path)

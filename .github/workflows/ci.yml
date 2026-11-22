@@ -78,8 +78,18 @@ jobs:
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
               summary.write(f"Compiled native kernel suite: {hit}/{found} source lines ({100 * hit / found:.2f}%). Full LCOV report is attached. Functional tests on three operating systems and two Julia versions run separately without coverage instrumentation.\n")
 
+  # The interpreted suite with coverage took about five of the six hours a job
+  # may run when it ran in one process; it now runs in three parts
+  # (TESSELLA_TEST_SHARD, see test/runtests.jl) and one job checks the merged
+  # reports.
   coverage-api:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    env:
+      TESSELLA_TEST_SHARD: ${{ matrix.part }}/3
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -90,16 +100,26 @@ jobs:
         run: julia --project=. --startup-file=no -e 'using Pkg; Pkg.instantiate(;allow_autoprecomp=false)'
       - name: Run interpreted session API coverage
         run: julia --project=. --startup-file=no --compiled-modules=no --check-bounds=yes --compile=min -O0 --code-coverage=user test/coverage/api.jl
-      - name: Verify executed API function coverage
-        run: python test/coverage/verify.py api
       - uses: julia-actions/julia-processcoverage@v1
         with:
           directories: src
       - uses: actions/upload-artifact@v4
         with:
-          name: coverage-session-api-julia-1.14
+          name: coverage-session-api-julia-1.14-part-${{ matrix.part }}
           path: lcov.info
           if-no-files-found: error
+
+  coverage-api-verify:
+    needs: coverage-api
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-session-api-julia-1.14-part-*
+          path: api-coverage
+      - name: Verify executed API function coverage
+        run: python test/coverage/verify.py api-lcov api-coverage/*/lcov.info
 
   docs:
     runs-on: ubuntu-latest
