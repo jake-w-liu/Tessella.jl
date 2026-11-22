@@ -740,7 +740,7 @@ function create_new_deleted!(m::Mesh, L::Local, demand::Integer)
 end
 
 # fillingACavity: the last `length(ball)` deleted cells become the star of vta
-function fill!(m::Mesh, L::Local, cur::Base.RefValue{UInt64}, vta::UInt32, color::UInt32)
+function fill_cavity!(m::Mesh, L::Local, cur::Base.RefValue{UInt64}, vta::UInt32, color::UInt32)
     blength = length(L.ball)
     start = length(L.deleted) - blength
     for i in 1:blength
@@ -808,7 +808,7 @@ function insertion!(m::Mesh, L::Local, opt::DelaunayOptions, cur::Base.RefValue{
         end
     end
     length(L.ball) > length(L.deleted) && create_new_deleted!(m, L, length(L.ball))
-    fill!(m, L, cur, vta, color)
+    fill_cavity!(m, L, cur, vta, color)
     return ST_TRUE
 end
 
@@ -1412,6 +1412,47 @@ function empty_mesh!(m::Mesh, opt::DelaunayOptions)
     opt.perfect_delaunay = false
     any(x -> x.status != ST_TRUE, info) &&
         @warn "HXT: a point of the empty mesh was not inserted"
+    return m
+end
+
+include("HxtOpti.jl")
+
+"""
+    tet_mesh!(m; min_size, max_size, size_callback, quality_min=0.3,
+              optimize=true, refine=true) -> m
+
+`hxtTetMesh` on one thread: empty mesh of the boundary vertices, boundary
+facets and lines constrained, volumes coloured after the BRep, refinement with
+`size_callback(x, y, z, interpolated, color)`, then optimisation of every cell
+below `quality_min`. Cells of volume `k` (0-based, the order of
+`m.surfaces_per_volume`) have colour `k`.
+"""
+function tet_mesh!(m::Mesh; min_size::Float64=0.0, max_size::Float64=floatmax(Float64),
+                   size_callback=nothing, quality_min::Float64=0.3,
+                   optimize::Bool=true, refine::Bool=true)
+    max_size <= 0.0 && (max_size = floatmax(Float64))
+    b = bbox(m)
+    constrained = m.nv
+    ns = refine ? nodal_sizes_init(m, min_size, max_size, 1.0) : nothing
+    opt = DelaunayOptions(b, ns, 0, 0, 0.0, false, false)
+    empty_mesh!(m, opt)
+    map, missing = tri2tet_map(m)
+    lines = lines_not_in_triangles(m)
+    missing_lines = missing == 0 ? constrain_lines!(m, lines) : 0
+    (missing != 0 || missing_lines != 0) && throw(ArgumentError(
+        "HXT: $missing boundary facets and $missing_lines lines are missing from the Delaunay " *
+        "tetrahedralization; HXT's boundary recovery is not ported yet"))
+    constrain_triangles!(m, map)
+    map_colors_to_brep!(m, map)
+    if refine
+        process_only_brep_volumes!(m)
+        ns.enabled = true
+        refine!(m, opt, size_callback)
+    end
+    if optimize
+        process_only_brep_volumes!(m)
+        optimize!(m, b, quality_min, constrained)
+    end
     return m
 end
 
