@@ -79,7 +79,8 @@ using ..Model: create_topology!, classify_surfaces!, create_geometry!,
     _curve_type, _periodic_curve_point, _transfinite_parameters,
     model_dimension
 using ..MeshTypes: Mesh
-using ..IO: read_geo_params, _GeoNumericContext, _GeoGeometryParts, _geo_eval_numeric
+using ..IO: read_geo_params, _GeoNumericContext, _GeoGeometryParts, _geo_eval_numeric,
+    _gmsh_random_seed, _gmsh_int_option, @_geo_rx
 using ..IO: _geo_exchange_onelab_number!, _geo_exchange_onelab_string!
 using ..IO: _geo_onelab_changed!
 using ..IO: _geo_split_list, _geo_split_range, _geo_range_count
@@ -869,6 +870,24 @@ explicit blockers.
 An allocator read after an untracked topology-changing declaration is rejected;
 tracked `Boolean` operand `Delete` and `SetMaxTag` counters stay live.
 """
+# The `GeoParams` of a `.geo` run, from the run itself: the option writes it
+# made (`context.scan_options`), its named physical groups, and its fields.
+function _geo_execution_params(model,context,params)
+    options=something(context.scan_options,Dict{String,Float64}())
+    get_option(key,default)=get(options,key,default)
+    seed=haskey(options,"Mesh.RandomSeed") ? _gmsh_random_seed(options["Mesh.RandomSeed"]) : 0
+    fan=5
+    for key in ("Mesh.BoundaryLayerFanElements","Mesh.BoundaryLayerFanPoints")
+        haskey(options,key) && (fan=_gmsh_int_option(options[key],key))
+    end
+    groups=Dict{Tuple{Int,Int},String}(key=>name for (key,name) in model.physical_names
+        if !isempty(name))
+    return GeoParams(get_option("Mesh.MeshSizeMin",NaN),get_option("Mesh.MeshSizeMax",NaN),
+        get_option("Mesh.MeshSizeFactor",1.0),seed,groups,params.fields,
+        something(context.background_field,0),copy(context.boundary_layer_fields),
+        get_option("Geometry.Tolerance",NaN),fan,String[],String[],0)
+end
+
 function execute_geo(path::AbstractString; mesh_dim::Integer=0,
                      _initial_mesh_algorithms=(algorithm_2d=6,algorithm_3d=1),
                      _initial_context_lc::Float64=1.0,
@@ -903,8 +922,10 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
         throw(ArgumentError("execute_geo: mesh_dim exceeds the platform Int range"))
     end
     dim in 0:3 || throw(ArgumentError("execute_geo: mesh_dim must be in 0:3"))
-    params=read_geo_params(path;_onelab_action=_initial_onelab_action,
-                           _skip_unavailable_fields=true)
+    # One pass: the values `GeoParams` reports are read off the execution
+    # itself (`_geo_execution_params`) instead of a second full parse.
+    params=GeoParams(NaN,NaN,1.0,0,Dict{Tuple{Int,Int},String}(),
+        Dict{Int,GeoFieldSpec}(),0,Int[],NaN,5,String[],String[],0)
     # A model-file merge supplies an operation-owned detached model and context.
     # Ordinary standalone/open execution still starts with an empty model.
     model=_initial_model===nothing ? GeoModel() : _initial_model
@@ -1020,6 +1041,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     context.exec_hook=src->Base.inferencebarrier(_geo_exec_value_term)(
         model,src,context,allocator_state)
     statements,stmt_locs=_geo_exec_statements(path)
+    context.scan_options=Dict{String,Float64}()
     executed=Ref(0)
     transfinite_tri=Base.inferencebarrier(_exec_geo_statements!)(
         model,statements,stmt_locs,firstindex(statements),
@@ -1079,6 +1101,7 @@ function execute_geo(path::AbstractString; mesh_dim::Integer=0,
     end
     Base.inferencebarrier(_geo_sync_mesh_algorithms!)(model,context)
     Base.inferencebarrier(_geo_sync_native_surface_controls!)(model,context)
+    params=_geo_execution_params(model,context,params)
     if _initial_fields!==nothing
         # The execution map is shared with params.fields; selection commands
         # live on the context and need their literal final values transported.
@@ -1576,7 +1599,7 @@ function _exec_geo_statements!(m::GeoModel,statements::Vector{String},
             # the discrete-model statements derive boundary entities, and
             # `Mesh n` runs queued homology requests whose chains share the
             # elementary namespace.
-            match(Regex("^(?:Merge|Include|MergeWithBoundingBox|" *
+            match(@_geo_rx("^(?:Merge|Include|MergeWithBoundingBox|" *
                 "CreateTopology|ClassifySurfaces|CreateGeometry|" *
                 "Homology|Cohomology|Betti|Mesh)\\b"),line)!==nothing &&
                 _geo_allocator_resync_model!(allocator_state,m)
@@ -8080,6 +8103,7 @@ function _geo_exec_delete!(m::GeoModel,recursive::Bool,tail::AbstractString,
         context.stored_list_items=0
         return nothing
     elseif name=="Options"
+        context.scan_options===nothing || empty!(context.scan_options)
         # `ReInitOptions` — restore the option-valued state `.geo` execution
         # tracks: mesh order, the transfinite-triangle flag, the extrude
         # result-list behavior, the generation-scoped option mirrors, and
@@ -8954,7 +8978,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
         ok || _geo_yyerror!(context,"Could not add line")
         return
     elseif (mm=match(
-            Regex("^(Rectangle|Disk|Wedge|ThickSolid|ThruSections|Wire)\\s*\\(|" *
+            @_geo_rx("^(Rectangle|Disk|Wedge|ThickSolid|ThruSections|Wire)\\s*\\(|" *
                   "^(Ruled\\s+)ThruSections\\s*\\(|" *
                   "^(BSpline|Bezier)\\s+Surface\\s*\\("),
             line)) !== nothing
@@ -9639,7 +9663,7 @@ function _exec_line!(m::GeoModel,line::AbstractString,
     elseif (mm=match(r"^(?:Recursive\s+)?Color\b",line)) !== nothing
         Base.inferencebarrier(_geo_exec_color!)(m,line,context,allocator_state)
         return
-    elseif (mm=match(Regex("^(RelocateMesh|ReorientMesh|RecombineMesh|" *
+    elseif (mm=match(@_geo_rx("^(RelocateMesh|ReorientMesh|RecombineMesh|" *
         "RenumberMeshNodes|RenumberMeshElements|CreateMeshEdges|" *
         "CreateMeshFaces|RefineMesh|TransformMesh|SetOrder|" *
         "PartitionMesh|CreateOverlaps|AdaptMesh|CreateTopology|" *
@@ -13081,6 +13105,28 @@ function _geo_retag_view(view,tag)
         interpolations=view.interpolations,scheme_positions=view.scheme_positions)
 end
 
+# The numbers of one `.pos` record inside a `.geo` View block. A list of
+# plain decimal literals (the whole of a written view) is read directly; any
+# other list goes through the expression evaluator, which on a large view
+# spends its time locating each list inside the one long statement (t9's
+# view3.pos: 2.2 s).
+const _GEO_VIEW_LITERAL=r"^\s*[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?\s*$"
+function _geo_view_values(raw::String,context,caller)
+    inner=strip(raw)
+    if startswith(inner,"{") && endswith(inner,"}")
+        body=SubString(inner,nextind(inner,firstindex(inner)),prevind(inner,lastindex(inner)))
+        values=Float64[]
+        isempty(strip(body)) && return _geo_numeric_list_values(raw,context,caller)
+        for token in eachsplit(body,',')
+            occursin(_GEO_VIEW_LITERAL,token) ||
+                return _geo_numeric_list_values(raw,context,caller)
+            push!(values,parse(Float64,strip(token)))
+        end
+        return values
+    end
+    return _geo_numeric_list_values(raw,context,caller)
+end
+
 # `View <StringExpr> { records };` — Gmsh's parsed (list-based)
 # post-processing view, inline in a `.geo` script or an `Include`d `.pos`
 # file. Its records may use script variables and string expressions
@@ -13109,7 +13155,7 @@ function _geo_exec_view_block!(m::GeoModel,line::AbstractString,
         rm===nothing && _geo_syntax_abort(_geo_stmt_head_token(record))
         word=String(rm.captures[1]);rest=String(strip(rm.captures[2]))
         if word=="TIME"
-            values=_geo_numeric_list_values(rest,context,caller)
+            values=_geo_view_values(rest,context,caller)
             print(io,"TIME{",join(_geo_view_number.(values),","),"};\n")
         elseif word=="INTERPOLATION_SCHEME"
             # Plain numeric matrices; the `.pos` reader evaluates them.
@@ -13118,7 +13164,7 @@ function _geo_exec_view_block!(m::GeoModel,line::AbstractString,
             startswith(rest,"(") || _geo_syntax_abort(_geo_stmt_head_token(rest))
             pclose=_geo_matching_delim(rest,firstindex(rest))
             pclose==0 && _geo_syntax_abort("(")
-            coords=_geo_numeric_list_values(
+            coords=_geo_view_values(
                 "{"*rest[nextind(rest,firstindex(rest)):prevind(rest,pclose)]*"}",
                 context,caller)
             tail=String(strip(rest[nextind(rest,pclose):end]))
@@ -13132,7 +13178,7 @@ function _geo_exec_view_block!(m::GeoModel,line::AbstractString,
                 print(io,join((_geo_view_quote(
                     _geo_eval_string(item,context,caller)) for item in items),","))
             else
-                values=_geo_numeric_list_values("{"*inner*"}",context,caller)
+                values=_geo_view_values("{"*inner*"}",context,caller)
                 print(io,join(_geo_view_number.(values),","))
             end
             print(io,"};\n")
@@ -13263,8 +13309,8 @@ field_value(field::_GeoPostViewSizeField,x,y,z,::Tuple{T,U}) where
 function _geo_exec_plugin!(m::GeoModel,line::AbstractString,
                            context::_GeoNumericContext)
     caller="execute_geo: Plugin"
-    mm=match(r"^Plugin\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\." *
-             r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*(.*?)\s*)?;?\s*$",line)
+    mm=match(@_geo_rx(r"^Plugin\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\." *
+             r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*(.*?)\s*)?;?\s*$"),line)
     mm===nothing && throw(ArgumentError(
         "$caller: malformed statement: $line"))
     api=getfield(parentmodule(@__MODULE__),:API)

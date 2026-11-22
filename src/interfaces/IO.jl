@@ -2117,6 +2117,14 @@ mutable struct _GeoWhileLevel
     iterations::Int
 end
 
+# A regex spelled as a concatenation (`"a" * "b"` or `r"a" * r"b"`), built
+# once when the code is loaded: `Regex(...)` in a function body compiles the
+# pattern on every call (most of a `.geo` statement's cost on antenna.geo).
+macro _geo_rx(ex)
+    value=Core.eval(__module__,ex)
+    return value isa Regex ? value : Regex(value)
+end
+
 # Exported geometry entity parts use the carrier's row space, while the
 # existing context products continue to use actual native row space.
 # `parts` and `rows` are derived from the carrier: an import keeps only a thunk
@@ -2340,6 +2348,11 @@ mutable struct _GeoNumericContext
     # staging or created lazily by standalone GEO execution.
     native_onelab_runner::Any
     native_onelab_action::String
+    # Option writes a `.geo` run makes to the values `GeoParams` reports
+    # (Mesh.MeshSizeMin/Max/Factor, RandomSeed, BoundaryLayerFanElements,
+    # Geometry.Tolerance), so `execute_geo` reads them off its single pass;
+    # `nothing` outside a run.
+    scan_options::Union{Nothing,Dict{String,Float64}}
 end
 _GeoNumericContext()=_GeoNumericContext(
     Dict{String,Float64}(),Dict{String,Vector{Float64}}(),Set{String}(),
@@ -2359,7 +2372,7 @@ _GeoNumericContext()=_GeoNumericContext(
     Union{Nothing,Vector{Float64}}[],UInt64(0),UInt64(0),
     Dict{Tuple{Int,Int},Vector{Int}}(),true,true,nothing,
     Dict{Int,Any}(),nothing,false,1.0,false,nothing,nothing,nothing,nothing,
-    nothing,nothing,nothing,nothing,Int[],Bool[],0,-1,nothing,"")
+    nothing,nothing,nothing,nothing,Int[],Bool[],0,-1,nothing,"",nothing)
 
 # Thrown where the upstream grammar fails to reduce — a bison syntax error.
 # `execute_geo` catches it per statement, records `syntax error (<token>)`
@@ -8242,6 +8255,9 @@ end
 # `opt_mesh_lc_*` callback), so a write to either name mirrors into the other
 # key. `opt_mesh_lc_factor` also ignores non-positive writes (`if(val > 0)`),
 # which is replicated by skipping the store entirely.
+const _GEO_SCAN_MESH_OPTIONS=("MeshSizeMin","MeshSizeMax","MeshSizeFactor","RandomSeed",
+    "BoundaryLayerFanElements","BoundaryLayerFanPoints")
+
 function _geo_store_option_number!(context::_GeoNumericContext,
                                    family::String,index::Int,
                                    member::String,value::Float64,
@@ -8287,6 +8303,11 @@ function _geo_store_option_number!(context::_GeoNumericContext,
         end
     end
     context.option_numbers[(family,index,member)]=v
+    if context.scan_options!==nothing && index==0 &&
+            ((family=="Mesh" && member in _GEO_SCAN_MESH_OPTIONS) ||
+             (family=="Geometry" && member=="Tolerance"))
+        context.scan_options["$family.$member"]=v
+    end
     if family=="General" && index==0 && member=="AbortOnError" &&
             context.native_abort_option_callback!==nothing
         context.native_abort_option_callback(v)
@@ -8976,9 +8997,9 @@ function _geo_allocator_observe_statement!(state::_GeoTagAllocatorState,
     end
 
     boolean=match(
-        r"^Boolean(Difference|Union|Intersection|Fuse|Common|Cut)\s*\(\s*(.*?)\s*\)\s*=\s*" *
+        @_geo_rx(r"^Boolean(Difference|Union|Intersection|Fuse|Common|Cut)\s*\(\s*(.*?)\s*\)\s*=\s*" *
         r"\{\s*Volume\s*\{\s*([^{},;:\[\]]+?)\s*\}([^}]*)\}\s*" *
-        r"\{\s*Volume\s*\{\s*([^{},;:\[\]]+?)\s*\}([^}]*)\}\s*;?\s*$",
+        r"\{\s*Volume\s*\{\s*([^{},;:\[\]]+?)\s*\}([^}]*)\}\s*;?\s*$"),
         source)
     if boolean!==nothing
         # Under the built-in factory upstream's tagged `BooleanShape` is a
@@ -9656,7 +9677,7 @@ function _geo_extrude_shape_group(body::AbstractString)
     isempty(b) && return true
     occursin(';',b) && return true
     return match(
-        Regex("^\\s*(Point|Line|Curve|Surface|Volume|Physical|Parent|" *
+        @_geo_rx("^\\s*(Point|Line|Curve|Surface|Volume|Physical|Parent|" *
               "GeoEntity|Layers|Recombine|ScaleLast|QuadTriAddVerts|" *
               "QuadTriNoNewVerts|RecombLaterals|Using|Hole)\\b"),b)!==nothing
 end
@@ -11544,7 +11565,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int),_onelab_action::Abstra
         # `Intersect Curve`, `Split Curve`, `ThruSections`) are complete
         # upstream productions — params-neutral, with any topology effect
         # already recorded by the allocator observer above.
-        match(Regex("^(?:Boolean(?:Union|Difference|Intersection|Fragments|" *
+        match(@_geo_rx("^(?:Boolean(?:Union|Difference|Intersection|Fragments|" *
             "Section|Fuse|Coherence|Common|Cut)\\s*\\{|" *
             "Boolean(?:Union|Difference|Intersection|Fragments|Section|" *
             "Fuse|Coherence|Common|Cut)\\s*\\([^)]*\\)\\s*=|" *
@@ -12040,7 +12061,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int),_onelab_action::Abstra
             scan_changed[]=false
             return
         end
-        if match(Regex("^(?:BoundingBox|Save\\b|Print\\b|Show|Hide|Color|" *
+        if match(@_geo_rx("^(?:BoundingBox|Save\\b|Print\\b|Show|Hide|Color|" *
             "RefineMesh|ReorientMesh|RelocateMesh|" *
             "AdaptMesh)\\b"),body)!==nothing ||
            match(r"^Recursive\s+(?:Show|Hide|Color)\b",body)!==nothing ||
@@ -12071,7 +12092,7 @@ function read_geo_params(path;max_file_bytes=typemax(Int),_onelab_action::Abstra
 
         # Diagnostics, stream control, geometry-independent commands and the
         # remaining mesh statements carry no params state.
-        if match(Regex("^(?:Printf|Warning|Error|Draw|SetChanged|" *
+        if match(@_geo_rx("^(?:Printf|Warning|Error|Draw|SetChanged|" *
             "UnsplitWindow|NewModel|Sleep|Remesh|SetName|" *
             "CreateDir|System|SystemCall|NonBlockingSystemCall|OnelabRun|" *
             "OptimizeMesh|Plugin|SetCurrentWindow|SplitCurrentWindow|" *
