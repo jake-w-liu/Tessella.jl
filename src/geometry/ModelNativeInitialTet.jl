@@ -472,6 +472,35 @@ function _model_native_initial_embedded_input(m,volume,geometry,authority,caller
 end
 
 
+# Generator.cpp orients every surface mesh (orientMeshGFace, which also
+# applies a Reverse constraint) after Mesh3D, so a Volume meshed in the same
+# generate() call hands TetGen each face as the 2-D mesher left it. The
+# surface producer records here, per model being meshed, the faces whose
+# mesh that orientation reverses (an odd number of reversals); a later call
+# meshes a fresh working model and finds none.
+const _MODEL_ORIENTATION_FLIPS=WeakKeyDict{Any,Set{Int}}()
+const _MODEL_ORIENTATION_FLIPS_LOCK=ReentrantLock()
+function _model_record_orientation_flip!(m,tag::Integer)
+    lock(_MODEL_ORIENTATION_FLIPS_LOCK) do
+        flips=get!(Set{Int},_MODEL_ORIENTATION_FLIPS,m)
+        Int(tag) in flips ? delete!(flips,Int(tag)) : push!(flips,Int(tag))
+    end
+    return nothing
+end
+function _model_clear_orientation_flip!(m,tag::Integer)
+    lock(_MODEL_ORIENTATION_FLIPS_LOCK) do
+        flips=get(_MODEL_ORIENTATION_FLIPS,m,nothing)
+        flips===nothing || delete!(flips,Int(tag))
+    end
+    return nothing
+end
+function _model_orientation_flipped(m,tag::Integer)
+    lock(_MODEL_ORIENTATION_FLIPS_LOCK) do
+        flips=get(_MODEL_ORIENTATION_FLIPS,m,nothing)
+        flips!==nothing && Int(tag) in flips
+    end
+end
+
 # Gmsh's TetGen/BR region pass (reconstruct, recover, carve, recoverdelaunay,
 # optimizemesh) on the native Delaunay kernel. The switch exists for
 # comparisons against the earlier fill; the pass is Gmsh's and is on.
@@ -483,14 +512,18 @@ _model_native_tetgen_br_region(kernel,facets)=ModelNativeTetgenArena.BR.region(k
 # points), or when its boundary needs flips or Steiner points to be recovered.
 # Steiner points are appended after the surface rows in TetGen's point order.
 function _model_native_tetgen_br_fill(surface,order,kernel,caller;protected_facets=nothing,
-                                      interior_points=nothing)
+                                      interior_points=nothing,tetgen_flip=nothing)
     _MODEL_NATIVE_TETGEN_BR[] || return nothing
     protected_facets===nothing || isempty(protected_facets) || return nothing
     interior_points===nothing || isempty(interior_points) || return nothing
     inverse=Vector{Int32}(undef,length(order))
     for (native,row) in enumerate(order);inverse[row]=Int32(native);end
-    facets=NTuple{3,Int32}[(inverse[surface.tris[1,column]],
-        inverse[surface.tris[2,column]],inverse[surface.tris[3,column]])
+    flip=tetgen_flip!==nothing && length(tetgen_flip)==size(surface.tris,2)
+    # A face oriented after this generate's volume pass reaches TetGen with
+    # its second and third vertices exchanged (MTriangle::reverse).
+    facets=NTuple{3,Int32}[flip && tetgen_flip[column] ?
+        (inverse[surface.tris[1,column]],inverse[surface.tris[3,column]],inverse[surface.tris[2,column]]) :
+        (inverse[surface.tris[1,column]],inverse[surface.tris[2,column]],inverse[surface.tris[3,column]])
         for column in axes(surface.tris,2)]
     result=try
         _model_native_tetgen_br_region(kernel,facets)

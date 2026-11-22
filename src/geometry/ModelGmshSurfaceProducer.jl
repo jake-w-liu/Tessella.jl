@@ -168,7 +168,11 @@ function _gmsh_native_surface_canonical_orientation(m,tag,mesh,physical,caller)
     c=ntuple(axis->physical[axis,cells[3,1]],3)
     product=_model_orientation_dot(_model_orientation_cross(
         _model_orientation_sub(b,a),_model_orientation_sub(c,a)),normal)
-    return product>0 ? mesh : _reversed_surface_mesh(mesh,caller,tag)
+    product>0 && return mesh
+    # orientMeshGFace runs at the end of generate(): a Volume meshed in the
+    # same call sees this face before the reversal.
+    _model_record_orientation_flip!(m,tag)
+    return _reversed_surface_mesh(mesh,caller,tag)
 end
 
 struct _ModelSurfaceSource
@@ -1043,6 +1047,7 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
     else
         nothing
     end
+    _model_clear_orientation_flip!(m,tag)
     mesh=_gmsh_native_surface_canonical_orientation(m,tag,mesh,physical,caller)
     triangle_count=mesh isa Mesh ? ntris(mesh) :
         sum(size(block.nodes,2) for block in mesh.blocks if block.msh==2;init=0)
@@ -1058,8 +1063,10 @@ function _gmsh_native_initial_surface(m::GeoModel,tag::Int,options,input,
             triangles[slot,1]=wound_nodes[mod1(first_slot+slot-1,3)]
         end
     end
-    get(m.meshing.reverse,(2,tag),false) &&
-        (mesh=_reversed_surface_mesh(mesh,caller,tag))
+    if get(m.meshing.reverse,(2,tag),false)
+        mesh=_reversed_surface_mesh(mesh,caller,tag)
+        _model_record_orientation_flip!(m,tag)
+    end
     nnodes(mesh)==length(product.node_tags) || throw(ArgumentError(
         "$caller: Surface[$tag] postprocessing changed the actual producer node set"))
     for row in axes(mesh.coords,2)

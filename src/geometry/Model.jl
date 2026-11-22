@@ -10905,6 +10905,7 @@ function _model_explicit_volume_geometry(
     native_nodes=UInt64[]
     native_index=Dict{UInt64,Int32}()
     triangles=NTuple{3,Int32}[]
+    tetgen_flip=Bool[]
     seen_faces=Set{NTuple{3,Int32}}()
     shell_faces=Vector{NTuple{3,Int32}}[]
     function global_node(coordinate)
@@ -10943,7 +10944,9 @@ function _model_explicit_volume_geometry(
                     local_nodes[node]=global_node(coordinate)
                 end
             end
+            flipped=_model_orientation_flipped(m,surface)
             for local_face in _volume_boundary_faces(local_mesh)
+                push!(tetgen_flip,flipped)
                 face=(local_nodes[local_face[1]],
                       local_nodes[local_face[2]],
                       local_nodes[local_face[3]])
@@ -10999,7 +11002,8 @@ function _model_explicit_volume_geometry(
     return (surface=output,expected_volume=expected_volume,
             comparison_scale=comparison_scale,
             native_node_tags=native_identity ? native_nodes : nothing,
-            native_order=native_identity ? sortperm(native_nodes) : nothing)
+            native_order=native_identity ? sortperm(native_nodes) : nothing,
+            tetgen_flip=tetgen_flip)
 end
 
 # A volume carrying a native curved-solid encoding normally meshes through the
@@ -11484,6 +11488,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             _model_native_initial_volume_fill(surface,t,caller;
                 interior_points=isempty(extra) ? nothing : extra,
                 node_order=initial_geometry.native_order,initial_surface=initial_geometry.surface,
+                tetgen_flip=hasproperty(initial_geometry,:tetgen_flip) ? initial_geometry.tetgen_flip : nothing,
                 options,births=_native_initial_births,
                 protected_facets=native_constraints===nothing ? nothing :
                     [constraint[3] for constraint in native_constraints.embedded_faces])

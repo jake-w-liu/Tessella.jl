@@ -311,7 +311,7 @@ end
 function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
                                            interior_points=nothing,
                                            node_order=nothing,initial_surface=surface,options=nothing,births=nothing,
-                                           protected_facets=nothing)
+                                           protected_facets=nothing,tetgen_flip=nothing)
     extra=interior_points===nothing ? NTuple{3,Float64}[] : interior_points
     failures=String[]
     function certify(mesh)
@@ -343,7 +343,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
         mesh=_model_native_initial_delaunay_fill(initial_surface,node_order,options,caller;
             births,kernel_output=native_kernel)
         br=_model_native_tetgen_br_fill(initial_surface,node_order,native_kernel[],caller;
-            protected_facets,interior_points)
+            protected_facets,interior_points,tetgen_flip)
         if br!==nothing
             valid,reason=certify(br)
             if valid

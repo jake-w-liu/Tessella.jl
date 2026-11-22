@@ -58,7 +58,9 @@ end
 #   M11=64, extend 1:        1,125 tets, 27 of 1,733 violate,     max 2.62
 #   M11=(8x+1)^2, extend 0:    209 tets, 67 of 425 violate,       max 4.15
 # Tessella is held to a band around those numbers (it gives 210 / 85 / 5.52,
-# 1,127 / 28 / 2.62 and 208 / 62 / 4.47).
+# 1,127 / 28 / 2.62 and 208 / 62 / 4.47). Since the volume pass takes each face
+# as Gmsh's TetGen sees it in one generate(3), the M11=64, extend 0 mesh is
+# Gmsh's own, node for node.
 function api_aniso_box(m11,extend,metric)
     A.initialize()
     try
@@ -90,16 +92,7 @@ end
         # Violating fraction and worst metric length within Gmsh's own, plus
         # a margin for a different but equally valid Delaunay realization.
         @test checked.violating/checked.total_edges<=violating/edges+0.03
-        # extend 0: the surfaces are Gmsh's, but the initial tetrahedralization
-        # differs from Gmsh's from its fifth cell (what reaches the Delaunay
-        # kernel after anisotropic surface meshing is not Gmsh's), and with
-        # Gmsh's TetGen pass and insertion order the worst edge lands at 6.21
-        # and 5.59 instead of Gmsh's 5.29 and 4.15.
-        if extend==0
-            @test_broken checked.maximum_metric<=1.1*maximum_metric
-        else
-            @test checked.maximum_metric<=1.1*maximum_metric
-        end
+        @test checked.maximum_metric<=1.1*maximum_metric
     end
 end
 @testset "isotropic-varying tensor: Gmsh's band" begin
