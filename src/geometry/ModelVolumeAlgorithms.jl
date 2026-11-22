@@ -311,7 +311,15 @@ end
 function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
                                            interior_points=nothing,
                                            node_order=nothing,initial_surface=surface,options=nothing,births=nothing,
-                                           protected_facets=nothing,tetgen_flip=nothing)
+                                           protected_facets=nothing,tetgen_flip=nothing,validated=nothing)
+    # `validated[]` is set when the returned fill passed `validate` with its
+    # default options (every return below except the exact-CDT fallback, which
+    # carries its own certificate instead).
+    validated===nothing || (validated[]=false)
+    function certified(mesh)
+        validated===nothing || (validated[]=true)
+        return mesh
+    end
     extra=interior_points===nothing ? NTuple{3,Float64}[] : interior_points
     failures=String[]
     function certify(mesh)
@@ -336,7 +344,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
         recovered===nothing && (push!(failures,reason);return nothing)
         valid,why=certify(recovered)
         valid || (push!(failures,why);return nothing)
-        return _finish_interior(recovered,extra)
+        return certified(_finish_interior(recovered,extra))
     end
     if node_order!==nothing
         native_kernel=Ref{ModelNativeInitialTet.Kernel}()
@@ -350,7 +358,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
                 births===nothing || (nnodes(br)>nnodes(initial_surface) ?
                     _model_native_volume_rebind!(births,br) :
                     _model_native_volume_cell_births!(births,br))
-                return br
+                return certified(br)
             end
             push!(failures,reason)
         end
@@ -376,7 +384,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
             finished=_finish_interior(mesh,extra)
             finished.tets==mesh.tets && finished.coords==mesh.coords &&
                 _model_native_volume_cell_births!(births,finished)
-            return finished
+            return certified(finished)
         end
         push!(failures,reason)
         try
@@ -386,7 +394,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
                 finished=_finish_interior(recovered,extra)
                 finished.tets==recovered.tets && finished.coords==recovered.coords &&
                     _model_native_volume_cell_births!(births,finished)
-                return finished
+                return certified(finished)
             end
             push!(failures,reason)
         catch error
@@ -407,7 +415,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
             keep=drop_flat ? _rb_drop_flats(T,selected) : selected
             mesh=to_mesh3(T;keep,preserve_input_rows=node_order!==nothing)
             valid,reason=certify(mesh)
-            valid && return _finish_interior(mesh,extra)
+            valid && return certified(_finish_interior(mesh,extra))
             push!(failures,reason)
         end
     catch error
@@ -422,7 +430,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
         # near-cospherical boundaries the float kernel certifies quickly.
         mesh=recover_boundary(surface;max_seeds=8,steiner=true)
         valid,reason=certify(mesh)
-        valid && return _finish_interior(mesh,extra)
+        valid && return certified(_finish_interior(mesh,extra))
         push!(failures,reason)
     catch error
         error isa InterruptException && rethrow()

@@ -28,8 +28,9 @@ _GmshTetQueue()=_GmshTetQueue(_GmshTetEntry[],Set{NTuple{4,Int32}}())
 @inline _gmsh3_before(a,b)=a.radius>b.radius ||
     (a.radius==b.radius && a.number<b.number)
 
-function _gmsh3_push!(queue,entry)
-    heap=queue.heap
+_gmsh3_push!(queue::_GmshTetQueue,entry)=_gmsh3_push!(queue.heap,entry)
+
+function _gmsh3_push!(heap::Vector{_GmshTetEntry},entry::_GmshTetEntry)
     push!(heap,entry)
     slot=length(heap)
     @inbounds while slot>1
@@ -43,7 +44,13 @@ function _gmsh3_push!(queue,entry)
 end
 
 function _gmsh3_pop!(queue)
-    heap=queue.heap
+    first=_gmsh3_pop_entry!(queue.heap)
+    first===nothing || delete!(queue.pending,first.key)
+    return first
+end
+
+# The heap's best entry, removed; `nothing` when it is empty.
+function _gmsh3_pop_entry!(heap::Vector{_GmshTetEntry})
     isempty(heap) && return nothing
     first=heap[1]
     last=pop!(heap)
@@ -58,7 +65,6 @@ function _gmsh3_pop!(queue)
         end
         @inbounds heap[slot]=last
     end
-    delete!(queue.pending,first.key)
     return first
 end
 
@@ -262,6 +268,26 @@ function _gmsh3_queue_tet!(queue,T,t,sizes,background,extend,skipped,numbers,sto
     T.alive[t] || return nothing
     key=_gmsh3_key(T,t)
     (key in skipped || key in queue.pending) && return nothing
+    normalized=_gmsh3_normalized_radius(T,t,sizes,background,extend,storage)
+    normalized>=1 || return nothing
+    push!(queue.pending,key)
+    _gmsh3_push!(queue,_GmshTetEntry(normalized,key,Int32(t),numbers[t]))
+    return nothing
+end
+
+# The queue of `_refine_gmsh_delaunay3`: a cell is offered once, when it is
+# made, and every cell it is offered with contains the vertex just inserted,
+# so no offered cell can be pending or refused already. A hash set of the
+# pending and refused vertex sets would answer "no" to every question.
+function _gmsh3_offer_tet!(heap::Vector{_GmshTetEntry},T,t,sizes,background,extend,numbers,storage)
+    @inbounds T.alive[t] || return nothing
+    normalized=_gmsh3_normalized_radius(T,t,sizes,background,extend,storage)
+    normalized>=1 || return nothing
+    _gmsh3_push!(heap,_GmshTetEntry(normalized,_gmsh3_key(T,t),Int32(t),numbers[t]))
+    return nothing
+end
+
+function _gmsh3_normalized_radius(T,t,sizes,background,extend,storage)
     normalized=if storage===nothing
         center=_gmsh3_center(T,t);point=_pt(T,_vert(T,t,1))
         radius=hypot(point[1]-center[1],point[2]-center[2],point[3]-center[3])
@@ -273,10 +299,7 @@ function _gmsh3_queue_tet!(queue,T,t,sizes,background,extend,skipped,numbers,sto
     end
     isfinite(normalized) || throw(ArgumentError(
         "native 3-D Delaunay insertion: normalized circumradius is not finite"))
-    normalized>=1 || return nothing
-    push!(queue.pending,key)
-    _gmsh3_push!(queue,_GmshTetEntry(normalized,key,Int32(t),numbers[t]))
-    return nothing
+    return normalized
 end
 
 function _gmsh3_begin_cavity!(T,seed,point,tags,protected_faces)
@@ -656,7 +679,7 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
         element_numbers=nothing,element_high_water=nothing,
         node_numbers=nothing,node_high_water=nothing,
         native_storage_order::Bool=false,return_numbers::Bool=false,
-        audit::Bool=true,
+        audit::Bool=true,validated::Bool=false,
         max_nodes::Int=PIPELINE_DEFAULT_MAX_NODES,
         max_tets::Int=PIPELINE_DEFAULT_MAX_TETS,max_iterations::Int=1_000_000)
     caller="native 3-D Delaunay insertion"
@@ -666,8 +689,12 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
     nn=size(mesh.coords,2);nt=size(mesh.tets,2)
     (nn<=max_nodes && nt<=max_tets) || throw(ArgumentError(
         "$caller: input exceeds the construction limits"))
-    diagnostic=validate(mesh)
-    diagnostic.ok || throw(ArgumentError("$caller: invalid input — "*join(diagnostic.messages,"; ")))
+    # `validated`: the caller has run this same `validate(mesh)` on this mesh
+    # and it passed (the volume driver's certified fill); it is not repeated.
+    if !validated
+        diagnostic=validate(mesh)
+        diagnostic.ok || throw(ArgumentError("$caller: invalid input — "*join(diagnostic.messages,"; ")))
+    end
     T,tags,exterior=_gmsh3_triangulation(mesh)
     numbers=_gmsh3_birth_numbers(element_numbers,nt,caller,"element")
     number=_gmsh3_birth_maximum(element_high_water,numbers,caller,"element")
@@ -677,20 +704,25 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
         ntuple(slot->mesh.tets[slot,column],4) for column in axes(mesh.tets,2)] : nothing
     sizes,background=_gmsh3_initial_sizes(T,mesh,exterior,minimize_boundary,embedded_sizes;native_arithmetic=native_storage_order,
         sheet_faces=protected_faces)
-    queue=_GmshTetQueue();skipped=Set{NTuple{4,Int32}}()
+    # Every cell is offered to the queue once, when it is made, and the cells
+    # made by an insertion all contain the new vertex: an offered cell is never
+    # pending or refused already, and an entry is popped at most once. So the
+    # queue needs no set of pending cells, and a refused cell is marked by its
+    # slot (cleared when the slot is reused) instead of hashed by its vertices.
+    heap=_GmshTetEntry[];skipped=falses(length(T.alive))
     shell_scratch=_GmshShellScratch()
     # `protected_edges` is not edited while this loop runs.
     protected_nodes=_gmsh3_protected_nodes(protected_edges,nn)
     for t in eachindex(T.alive)
-        _gmsh3_queue_tet!(queue,T,t,sizes,background,extend_boundary,skipped,numbers,storage)
+        _gmsh3_offer_tet!(heap,T,t,sizes,background,extend_boundary,numbers,storage)
     end
     live=nt;iteration=0;newtets=Int32[]
     gshell=Tuple{Int32,Int8}[];gwrong=Tuple{Int32,Int8}[]
     while true
-        entry=_gmsh3_pop!(queue)
+        entry=_gmsh3_pop_entry!(heap)
         entry===nothing && break
         t=entry.tet
-        (T.alive[t] && _gmsh3_key(T,t)==entry.key && !(entry.key in skipped)) || continue
+        (T.alive[t] && _gmsh3_key(T,t)==entry.key) || continue
         iteration<max_iterations || throw(ArgumentError("$caller: iteration limit reached"))
         iteration+=1
         point=storage===nothing ? _gmsh3_center(T,t) :
@@ -706,17 +738,17 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
             containing=_gmsh3_gmsh_containing(T,storage,point)
         end
         if containing===nothing
-            push!(skipped,entry.key);continue
+            skipped[t]=true;continue
         end
         # The candidate MVertex is allocated before star and distance rejection.
         vertex_number=Base.checked_add(vertex_number,UInt64(1))
         if storage===nothing
             if !_gmsh3_star!(T,point,tags,protected_faces)
-                push!(skipped,entry.key);continue
+                skipped[t]=true;continue
             end
         else
             if !_gmsh3_gmsh_star!(T,storage,point,tags,protected_faces,gshell,gwrong)
-                push!(skipped,entry.key);continue
+                skipped[t]=true;continue
             end
             _gmsh3_gmsh_boundary!(T,storage,gshell)
         end
@@ -739,7 +771,7 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
         number+=candidates
         if !_gmsh3_compatible(T,point,lc,protected_faces,protected_edges,shell_scratch,
                               protected_nodes;keep_vertices=storage===nothing)
-            push!(skipped,entry.key);continue
+            skipped[t]=true;continue
         end
         T.nreal<max_nodes || throw(ArgumentError("$caller: node limit reached"))
         remaining=live-length(T.cavity)
@@ -754,6 +786,7 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
         _retriangulate3!(T,T.boundary,Int32(T.nreal),newtets)
         resize!(tags,length(T.alive))
         resize!(numbers,length(T.alive))
+        resize!(skipped,length(T.alive))
         storage===nothing || resize!(storage,length(T.alive))
         for (ordinal,new) in enumerate(newtets)
             tags[new]=region
@@ -763,7 +796,8 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
                 face=T.boundary[ordinal]
                 storage[new]=(face[1],face[2],face[3],Int32(T.nreal))
             end
-            _gmsh3_queue_tet!(queue,T,new,sizes,background,extend_boundary,skipped,numbers,storage)
+            skipped[new]=false
+            _gmsh3_offer_tet!(heap,T,new,sizes,background,extend_boundary,numbers,storage)
         end
         live=remaining+length(newtets)
     end
@@ -794,12 +828,19 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
     output_numbers=return_numbers ? Vector{UInt64}(undef,live) : UInt64[]
     output_rows=findall(T.alive)
     if storage!==nothing
-        radii=Float64[_gmsh3_key(T,t) in skipped ? 0. :
-            _gmsh3_native_radius(T,storage[t],sizes,background,extend_boundary) for t in output_rows]
-        pool_rows=output_rows
-        permutation=sortperm(eachindex(pool_rows);lt=(a,b)->radii[a]>radii[b] ? true :
-            radii[a]<radii[b] ? false : numbers[pool_rows[a]]<numbers[pool_rows[b]])
-        output_rows=output_rows[permutation]
+        # Largest radius first, then the element number: numbers are unique, so
+        # sorting (-radius, number, row) triples gives the same order as the
+        # comparison sort of the rows, without a closure per comparison.
+        order=Vector{Tuple{Float64,UInt64,Int32}}(undef,length(output_rows))
+        for (index,t) in enumerate(output_rows)
+            radius=skipped[t] ? 0. :
+                _gmsh3_native_radius(T,storage[t],sizes,background,extend_boundary)
+            order[index]=(-radius,numbers[t],Int32(t))
+        end
+        sort!(order)
+        for index in eachindex(order)
+            output_rows[index]=Int(order[index][3])
+        end
     end
     column=0
     for t in output_rows

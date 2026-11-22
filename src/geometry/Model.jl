@@ -11553,6 +11553,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     # Actual embedded Point/Curve/Surface products are already in the native
     # input. CAD-derived extra seeds would create a second unrelated geometry.
     native_input && empty!(extra)
+    fill_validated=Ref(false)
     mesh=if explicit_geometry===nothing
         isempty(extra) ? tetrahedralize(surface) :
                          tetrahedralize(surface;interior_points=extra)
@@ -11567,7 +11568,8 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
                 tetgen_flip=hasproperty(initial_geometry,:tetgen_flip) ? initial_geometry.tetgen_flip : nothing,
                 options,births=_native_initial_births,
                 protected_facets=native_constraints===nothing ? nothing :
-                    [constraint[3] for constraint in native_constraints.embedded_faces])
+                    [constraint[3] for constraint in native_constraints.embedded_faces],
+                validated=fill_validated)
         end
     end
     if legacy_factory && m.meshing.algorithm_3d in (1,9)
@@ -11703,8 +11705,9 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             node_high_water=receipt===nothing ? nothing : receipt.node_high_water,
             native_storage_order=receipt!==nothing,return_numbers=receipt!==nothing,
             # The complete structural audit runs once, on the finished Region
-            # below; here it would only repeat on an intermediate mesh.
-            audit=false)
+            # below; here it would only repeat on an intermediate mesh. Nor is
+            # the fill validated again when no recovery pass replaced it.
+            audit=false,validated=mesh===filled && fill_validated[])
         if receipt===nothing
             mesh=refined
         else
