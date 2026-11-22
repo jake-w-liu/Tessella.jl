@@ -410,6 +410,7 @@ end
         "interfaces/api_occ_sweep_curved_test.jl",
         "meshing/hxt_volume_test.jl",
         "interfaces/api_occ_primitives_geo_gmsh_test.jl",
+        "geometry/geo_occ_periodic_disk_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

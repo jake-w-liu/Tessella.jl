@@ -1013,10 +1013,16 @@ function _model_periodic_surface_points(
         end
     end
     sort!(unique!(points))
-    length(points)>=3 || throw(ArgumentError(
-        "$caller: Surface[$surface] needs at least three distinct point tags"))
-    coordinates=NTuple{3,Float64}[m.points[point] for point in points]
-    _model_surface_projection(coordinates,points,surface,caller)
+    isempty(points) && throw(ArgumentError(
+        "$caller: Surface[$surface] has no boundary points"))
+    # A disk bounded by one closed curve (the end face of a torus segment
+    # in examples/boolean/periodic.geo) has a single point; Gmsh pairs it
+    # through the affine map like any other. The projection check needs
+    # three points to define a chart.
+    if length(points)>=3
+        coordinates=NTuple{3,Float64}[m.points[point] for point in points]
+        _model_surface_projection(coordinates,points,surface,caller)
+    end
     return points
 end
 
