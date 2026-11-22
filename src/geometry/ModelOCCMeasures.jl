@@ -732,6 +732,8 @@ function _model_occ_trimmed_face_measure(kernel,id)
         J=_model_occ_sphere_face_integrals(kernel,id)
         J===nothing || return _model_occ_sphere_face_measure(rec,J)
     end
+    green=_model_occ_green_face_integrals(kernel,id)
+    green===nothing || return green[1],_occ3_scale(green[2],1.0/green[1])
     # Generic parametric base: sample the pcurve boundary at each edge's
     # resolution, triangulate the uv domain, integrate |p_u×p_v| with a
     # three-point rule over 4×-split subtriangles.
@@ -1065,6 +1067,8 @@ end
 # `get_mass`/`get_center_of_mass` accumulate per shell use.
 function _model_occ_trimmed_face_div(kernel,id)
     shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    green=_model_occ_green_face_integrals(kernel,id)
+    green===nothing || return green[3],green[4]
     xs,ys,T,interior=_model_occ_trimmed_face_cdt(kernel,id,shape,rec)
     nodes=((1/6,1/6),(2/3,1/6),(1/6,2/3))
     V=0.0; M=(0.0,0.0,0.0)
@@ -1092,6 +1096,133 @@ function _model_occ_trimmed_face_div(kernel,id)
 end
 
 @inline _occ2_mid(a,b)=((a[1]+b[1])/2,(a[2]+b[2])/2)
+
+# Trimmed tensor faces by Green's theorem on the exact boundary: with
+# F(u,v) = ∫ f(s,v) ds from the patch's lower u bound, ∬_D f = ∮_∂D F dv.
+# F is a Gauss sum per u knot span, the boundary integral adaptive Gauss
+# along each pcurve between its own knots. The triangulated domain of
+# `_model_occ_trimmed_face_cdt` (a polygonal boundary) left the faces of an
+# imported STEP part 1e-4 off. f collects |p_u×p_v|, p|p_u×p_v| and
+# p·(p_u×p_v). Returns (area, ∬p dA, ∬p·n/3, ∬p (p·n)) for the counter-
+# clockwise domain, or `nothing` where the method does not apply (a
+# periodic patch, a missing pcurve).
+const _OCC_GREEN_INNER=16
+function _model_occ_green_face_integrals(kernel,id)
+    shape=kernel.shapes[id]; rec=shape.geometry.geometry
+    (hasproperty(rec,:patch) && hasproperty(rec,:pcurves)) || return nothing
+    (_brep_uperiod(rec)>0.0 || _brep_vperiod(rec)>0.0) && return nothing
+    surface=rec.patch.surface
+    ku=surface.knots_u; pu=surface.degree_u
+    ulo=ku[pu+1]; uhi=ku[end-pu]
+    ubreaks=unique!(Float64[k for k in ku if ulo<=k<=uhi])
+    nodes,weights=_occ_natural_gauss_rule(_OCC_GREEN_INNER)
+    function inner(u,v)
+        acc=zeros(8)   # area, first(3), volume, divfirst(3)
+        u==ulo && return acc
+        a0=min(u,ulo); a1=max(u,ulo); sgn=u>=ulo ? 1.0 : -1.0
+        cuts=Float64[a0]
+        for k in ubreaks
+            a0<k<a1 && push!(cuts,k)
+        end
+        push!(cuts,a1)
+        for c in 1:length(cuts)-1
+            h=(cuts[c+1]-cuts[c])/2; mid=(cuts[c+1]+cuts[c])/2
+            for i in eachindex(nodes),si in (-1,1)
+                s=mid+si*h*nodes[i]; w=sgn*weights[i]*h
+                p,du,dv=_occ_surface_d1(rec,s,v)
+                n=_occ_cross(du,dv); a=_occ_modulus(n); rn=_dot3(p,n)
+                acc[1]+=w*a
+                acc[2]+=w*a*p[1]; acc[3]+=w*a*p[2]; acc[4]+=w*a*p[3]
+                acc[5]+=w*rn/3
+                acc[6]+=w*rn*p[1]; acc[7]+=w*rn*p[2]; acc[8]+=w*rn*p[3]
+            end
+        end
+        return acc
+    end
+    g16=_occ_natural_gauss_rule(16)
+    # The boundary point is the edge's own 3-D point taken back onto the
+    # patch (Gauss-Newton from the pcurve's estimate): a fitted pcurve is
+    # only as good as its samples, the edge is exact. Its uv velocity is
+    # the edge tangent in the patch's tangent frame.
+    function boundary_uv(eg,pc,t)
+        (u,v),(dut,dvt)=_occ_pcurve_d1(pc,t)
+        kind=get(eg,:occ,nothing)
+        if kind===:copied_curve && hasproperty(eg,:curve)
+            C,Ct,_=_model_occ_curve_d2(eg.curve,t)
+        elseif kind===:circle && !hasproperty(eg,:native_geometry) &&
+                !hasproperty(eg,:native_arithmetic)
+            sn,cs=_gm_sincos(t); Y=_occ_circle_y(eg)
+            C=_occ_circle_point(eg,t)
+            Ct=_occ3_add(_occ3_scale(eg.X,-eg.r*sn),_occ3_scale(Y,eg.r*cs))
+        elseif kind===:ellipse
+            sn,cs=_gm_sincos(t)
+            C=_occ_ellipse_point(eg,t)
+            Ct=_occ3_add(_occ3_scale(eg.X,-eg.rx*sn),_occ3_scale(eg.Y,eg.ry*cs))
+        elseif kind===:line
+            C=_occ3_add(eg.origin,_occ3_scale(eg.dir,t)); Ct=eg.dir
+        else
+            return u,v,dvt
+        end
+        for _ in 1:8
+            p,Su,Sv=_occ_surface_d1(rec,u,v)
+            r=_occ3_sub(C,p)
+            a=_dot3(Su,Su); b=_dot3(Su,Sv); c=_dot3(Sv,Sv)
+            det=a*c-b*b; det>0.0 || return u,v,dvt
+            ru=_dot3(Su,r); rv=_dot3(Sv,r)
+            du=(c*ru-b*rv)/det; dv=(a*rv-b*ru)/det
+            u+=du; v+=dv
+            abs(du)+abs(dv)<=1e-15*(1.0+abs(u)+abs(v)) && break
+        end
+        _,Su,Sv=_occ_surface_d1(rec,u,v)
+        a=_dot3(Su,Su); b=_dot3(Su,Sv); c=_dot3(Sv,Sv)
+        det=a*c-b*b
+        det>0.0 || return u,v,dvt
+        cu=_dot3(Su,Ct); cv=_dot3(Sv,Ct)
+        return u,v,(a*cv-b*cu)/det
+    end
+    function panel(eg,pc,a,b)
+        acc=zeros(8)
+        h=(b-a)/2; mid=(a+b)/2
+        for i in eachindex(g16[1]),si in (-1,1)
+            t=mid+si*h*g16[1][i]
+            u,v,dvt=boundary_uv(eg,pc,t)
+            acc.+=(g16[2][i]*h*dvt).*inner(u,v)
+        end
+        return acc
+    end
+    function adapt(eg,pc,a,b,whole,depth)
+        m=(a+b)/2
+        left=panel(eg,pc,a,m); right=panel(eg,pc,m,b)
+        both=left.+right
+        scale=max(abs(both[1]),1e-300)
+        (depth>=10 || abs(both[1]-whole[1])<=1e-14*max(scale,1.0)) &&
+            return both
+        return adapt(eg,pc,a,m,left,depth+1).+adapt(eg,pc,m,b,right,depth+1)
+    end
+    total=zeros(8)
+    for wire_id in shape.children
+        for (eid,rev) in kernel.shapes[wire_id].geometry.uses
+            etag=get(kernel.shape_tags,eid,nothing)
+            etag===nothing && return nothing
+            ent=get(rec.pcurves,etag[2],nothing)
+            ent===nothing && return nothing
+            pc=(rev && ent.rev!==nothing) ? ent.rev : ent.fwd
+            pc===nothing && return nothing
+            eg=kernel.shapes[eid].geometry.geometry
+            t0,t1=rev ? (eg.t1,eg.t0) : (eg.t0,eg.t1)
+            cuts=_model_occ_pcurve_measure_panels(pc,t0,t1)
+            for c in 1:length(cuts)-1
+                a,b=cuts[c],cuts[c+1]
+                total.+=adapt(eg,pc,a,b,panel(eg,pc,a,b),0)
+            end
+        end
+    end
+    s=total[1]>=0.0 ? 1.0 : -1.0
+    total.*=s
+    total[1]>_OCC_EPS_DIM || return nothing
+    return (total[1],(total[2],total[3],total[4]),total[5],
+            (total[6],total[7],total[8]))
+end
 
 # ---- faces -----------------------------------------------------------
 

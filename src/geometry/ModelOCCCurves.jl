@@ -7,6 +7,10 @@ struct _ModelOCCNURBSCurve
 end
 
 _model_occ_native_curve_type(geometry)=nothing
+# a B-spline record (STEP/BREP import, `addBSpline`, a NURBS conversion):
+# Gmsh's OCCEdge reports GeomAbs_BSplineCurve / GeomAbs_BezierCurve
+_model_occ_native_curve_type(g::_ModelOCCNURBSCurve)=
+    g.family===:bezier ? "Bezier" : "BSpline"
 
 function _model_occ_curve_derivative_net(net,degree,knots)
     degree==0 && return nothing
