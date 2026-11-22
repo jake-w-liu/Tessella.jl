@@ -56,4 +56,33 @@ count_cells(dim) = (b = API.mesh.get_elements(dim)[2]; isempty(b) ? 0 : sum(leng
     end
 end
 
+
+# Gmsh's readSTL parses with sscanf("%lf"); its Windows build rounds through
+# the 80-bit long double, so "-0.529113" (sphere-surf.stl, node 16) reads as
+# -0.5291129999999999 there and as -0.529113 elsewhere.
+@testset "STL coordinates parse like Gmsh's sscanf" begin
+    mktempdir() do dir
+        path = joinpath(dir, "one.stl")
+        write(path, """solid one
+ facet normal 0 0 1
+  outer loop
+   vertex -0.529113 0.222735 0.818799
+   vertex 1 0 0
+   vertex 0 1 0
+  endloop
+ endfacet
+endsolid one
+""")
+        API.initialize()
+        try
+            API.option("General.Terminal", 0)
+            API.open(path)
+            x = API.mesh.get_nodes()[2][1]
+            @test x == (Sys.iswindows() ? -0.5291129999999999 : -0.529113)
+        finally
+            API.finalize()
+        end
+    end
+end
+
 end

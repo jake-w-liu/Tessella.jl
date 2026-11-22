@@ -1642,6 +1642,33 @@ function _stl_is_binary(path)
     end
 end
 
+# Gmsh's readSTL reads coordinates with `sscanf("%lf")`. The Gmsh 4.15.2
+# Windows build (MinGW-w64, ANSI stdio) converts through the 80-bit long
+# double and then rounds to double, so a decimal lying within half a long
+# double ulp of a halfway point between two doubles rounds twice: "-0.529113"
+# becomes -0.5291129999999999 (examples/simple_geo/sphere-surf.stl). Gmsh on
+# Linux and macOS parses correctly rounded, like `parse(Float64, s)`.
+const _STL_MINGW_DOUBLE_ROUNDING=Sys.iswindows()
+
+function _stl_scanf_double(s::AbstractString)
+    x=parse(Float64,s)
+    (_STL_MINGW_DOUBLE_ROUNDING && isfinite(x) && x!=0) || return x
+    # Plain decimals d.ddd with up to 15 digits: the exact residual of x
+    # against the decimal, in units of x's ulp, through an error-free
+    # product; only a residual near half an ulp can round twice.
+    m=match(r"^[-+]?(\d*)\.?(\d*)$",s)
+    if m!==nothing && length(m[1])+length(m[2])<=15 && length(m[2])<=22
+        N=Float64(parse(Int,isempty(m[1]*m[2]) ? "0" : m[1]*m[2]))
+        P=exp10(length(m[2]))
+        ax=abs(x);hi=ax*P;lo=fma(ax,P,-hi)
+        t=((N-hi)-lo)/P/eps(ax)
+        abs(abs(t)-0.5)<1/1024 || return x
+    end
+    return Float64(setprecision(BigFloat,64) do
+        parse(BigFloat,s)
+    end)
+end
+
 function _read_stl_ascii(path,facet_limit::Int=Int(typemax(Int32)))
     open(path,"r") do stream
         _read_stl_ascii(stream,facet_limit)
@@ -1669,7 +1696,7 @@ function _read_stl_ascii(stream::Base.IO,facet_limit::Int=Int(typemax(Int32)))
         elseif tok == "vertex"
             (infacet&&inloop) || throw(ArgumentError("read_stl: vertex outside an ASCII facet loop"))
             length(s) == 4 || throw(ArgumentError("read_stl: malformed ASCII vertex record '$line'"))
-            p=(parse(Float64,s[2]),parse(Float64,s[3]),parse(Float64,s[4]))
+            p=(_stl_scanf_double(s[2]),_stl_scanf_double(s[3]),_stl_scanf_double(s[4]))
             (isfinite(p[1])&&isfinite(p[2])&&isfinite(p[3])) ||
                 throw(ArgumentError("read_stl: ASCII vertex has non-finite coordinates"))
             push!(verts,p)
