@@ -1700,6 +1700,9 @@ function _validate_surface_loop(m::GeoModel,surfaces,caller::AbstractString)
         geometry!==nothing &&
             Base.inferencebarrier(_occ_natural_surface_closed)(geometry) && return nothing
     end
+    # A closed discrete surface (a merged STL sphere) has no boundary curves.
+    isempty(curve_incidence) &&
+        all(s->!haskey(m.surfaces,s) && haskey(m.discrete,(2,s)),unsigned) && return nothing
     isempty(curve_incidence) && throw(ArgumentError(
         "$caller: a surface loop must contain boundary curves"))
     # Two incidence patterns extend the planar-manifold rule for OCC-style

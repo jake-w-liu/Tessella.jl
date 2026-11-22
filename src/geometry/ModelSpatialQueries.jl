@@ -170,7 +170,10 @@ function _model_volume_bounds(
 
     shelled || throw(ArgumentError(
         "$caller: $entity has no native solid encoding"))
-    if any(hasproperty(get(m.surface_geometry,abs(surface),nothing),:natural_bounds)
+    # Gmsh's GRegion::bounds is the union of its faces' boxes; a discrete
+    # face (a merged STL) is boxed by its mesh and may have no curves at all.
+    if any(hasproperty(get(m.surface_geometry,abs(surface),nothing),:natural_bounds) ||
+           (!haskey(m.surfaces,abs(surface)) && haskey(m.discrete,(2,abs(surface))))
             for shell in m.volumes[tag] for surface in m.surface_loops[shell])
         bounds=_MODEL_EMPTY_BOUNDS
         for shell in m.volumes[tag],surface in m.surface_loops[shell]
