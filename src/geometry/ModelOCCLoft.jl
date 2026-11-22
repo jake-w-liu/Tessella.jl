@@ -1477,7 +1477,6 @@ function _model_occ_thick_solid(m::GeoModel,tag,volume_tag,exclude_tags,
             push!(in_volume,ftag)
             σ=rev ? -1.0 : 1.0
             n=_occ3_scale(fg.geometry.axis,σ)
-            get(fg.geometry,:reversed,false) && (n=(.-n))
             n=_occ3_scale(n,1.0/_occ_modulus(n))
             push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
             push!(kept,!(ftag in excl))
@@ -1742,7 +1741,6 @@ function _model_occ_defeature(m::GeoModel,volume_tag,remove_tags;
             ftag in rem && continue
             σ=rev ? -1.0 : 1.0
             n=_occ3_scale(fg.geometry.axis,σ)
-            get(fg.geometry,:reversed,false) && (n=(.-n))
             n=_occ3_scale(n,1.0/_occ_modulus(n))
             push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
         end
@@ -1833,6 +1831,12 @@ function _occ_unbind_orphans!(kernel,dead::Set{UInt64})
         delete!(kernel.bindings,entry);delete!(kernel.shape_tags,id)
         push!(kernel.removed,entry)
     end
+    # Gmsh's `_unbind` recomputes the highest tag of each dimension, so a
+    # later shape reuses released tags.
+    for d in -2:3
+        kernel.maxima[d+3]=maximum((t for (dd,t) in keys(kernel.bindings)
+                                    if dd==d);init=0)
+    end
     kernel.changed=true
     return nothing
 end
@@ -1906,53 +1910,90 @@ end
 # removed side means the chamfer overruns a neighboring corner — a
 # loud rejection like upstream's "chamfer could not be computed".
 function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
-                            distance1,distance2;
+                            distance1::Real,distance2::Real;
+                            caller="OCC.chamfer")
+    n=length(curve_tags)
+    _model_occ_chamfer(m,volume_tags,curve_tags,fill(0,n),
+                       repeat(Float64[distance1,distance2],n);caller)
+end
+
+# Gmsh's `chamfer(volumeTags, curveTags, surfaceTags, distances)`
+# (`OCC_Internals::_fillet`, mode 1): one surface per curve, on which the
+# first distance of the curve is measured; `distances` holds one value for
+# every curve, one per curve, or a pair per curve (on the given surface,
+# then on the other face of the edge). A surface tag 0 leaves the choice
+# to the first face that uses the edge.
+function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
+                            surface_tags::AbstractVector,
+                            distances::AbstractVector;
                             caller="OCC.chamfer")
     kernel=m.occ_kernel
+    ncurve=length(curve_tags)
+    length(surface_tags)==ncurve || throw(ArgumentError(
+        "$caller: Different number of curves and surfaces for chamfer"))
+    nd=length(distances)
+    (nd==1 || nd==ncurve || nd==2ncurve) || throw(ArgumentError(
+        "$caller: distances must hold one value, one per curve or two " *
+        "per curve"))
+    dist=Float64[Float64(d) for d in distances]
+    dist_of(i)=nd==1 ? (dist[1],dist[1]) :
+        nd==ncurve ? (dist[i],dist[i]) : (dist[2i-1],dist[2i])
     out=Tuple{Int,Int}[]
     for volume_tag in volume_tags
         vt=abs(_model_occ_requested_tag(volume_tag,caller))
         vid=get(kernel.bindings,(3,vt),nothing)
         vid===nothing && throw(ArgumentError(
             "$caller: unknown OCC Volume[$vt]"))
-        # Outward planes + edge→adjacent-face map.
+        # Planes + edge→adjacent-face map. The half-space intersection is
+        # exact for a convex planar solid, so every plane is oriented by
+        # the solid's own vertices (all on its inner side) rather than by
+        # face-use flags.
         planes=NTuple{3,Float64}[]; bs=Float64[]
         fnormals=Dict{UInt64,NTuple{3,Float64}}()
-        fcenters=Dict{UInt64,NTuple{3,Float64}}()
         edge_faces=Dict{UInt64,Vector{UInt64}}()
+        corner_pts=NTuple{3,Float64}[]
+        face_ids=UInt64[]
         for shell_id in kernel.shapes[vid].children
-            for (fid,rev) in kernel.shapes[shell_id].geometry.uses
+            for (fid,_) in kernel.shapes[shell_id].geometry.uses
                 fg=kernel.shapes[fid].geometry
                 get(fg.geometry,:occ,nothing)!==:plane &&
                     throw(ArgumentError(
                         "$caller: chamfer needs planar faces (got " *
                         "occ=$(get(fg.geometry,:occ,nothing)))"))
-                σ=rev ? -1.0 : 1.0
-                n=_occ3_scale(fg.geometry.axis,σ)
-                get(fg.geometry,:reversed,false) && (n=(.-n))
-                n=_occ3_scale(n,1.0/_occ_modulus(n))
-                fnormals[fid]=n; fcenters[fid]=fg.geometry.center
-                push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
+                push!(face_ids,fid)
                 for wid in kernel.shapes[fid].children
                     wsh=kernel.shapes[wid]
                     hasproperty(wsh.geometry,:uses) || continue
                     for (u,_) in wsh.geometry.uses
                         push!(get!(edge_faces,u,UInt64[]),fid)
+                        for c in kernel.shapes[u].children
+                            push!(corner_pts,kernel.shapes[c].geometry.point)
+                        end
                     end
                 end
             end
         end
-        overs=_occ_halfspace_verts(planes,bs)
-        if isempty(overs)
-            planes=[(.-n) for n in planes]; bs=(.-bs)
-            fnormals=Dict(k=>(.-v) for (k,v) in fnormals)
-            overs=_occ_halfspace_verts(planes,bs)
-            isempty(overs) && throw(ArgumentError(
-                "$caller: Volume[$vt] faces bound an empty body"))
+        for fid in face_ids
+            fg=kernel.shapes[fid].geometry.geometry
+            n=_occ3_scale(fg.axis,1.0/_occ_modulus(fg.axis))
+            b=_dot3(n,fg.center)
+            hi=maximum(x->_dot3(n,x)-b,corner_pts)
+            lo=minimum(x->_dot3(n,x)-b,corner_pts)
+            if hi>1e-7
+                lo< -1e-7 && throw(ArgumentError(
+                    "$caller: chamfer needs a convex solid (Volume[$vt])"))
+                n=(.-n); b=-b
+            end
+            fnormals[fid]=n
+            push!(planes,n); push!(bs,b)
         end
+        overs=_occ_halfspace_verts(planes,bs)
+        isempty(overs) && throw(ArgumentError(
+            "$caller: Volume[$vt] faces bound an empty body"))
         # Chamfer half-space per requested edge.
         nplanes=copy(planes); nbs=copy(bs)
-        for curve_tag in curve_tags
+        for (ci,curve_tag) in enumerate(curve_tags)
+            distance1,distance2=dist_of(ci)
             et=abs(_model_occ_requested_tag(curve_tag,caller))
             eid=get(kernel.bindings,(1,et),nothing)
             eid===nothing && throw(ArgumentError(
@@ -1969,13 +2010,21 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
             em=_occ3_add(eg.origin,
                          _occ3_scale(eg.dir,(eg.t0+eg.t1)/2))
             fA,fB=fids
+            st=abs(Int(surface_tags[ci]))
+            if st!=0
+                sid=get(kernel.bindings,(2,st),nothing)
+                (sid===nothing || !(sid in fids)) && throw(ArgumentError(
+                    "$caller: Surface[$st] is not a face of Curve[$et]"))
+                sid==fB && ((fA,fB)=(fB,fA))
+            end
             nA,nB=fnormals[fA],fnormals[fB]
             # In-face inward directions perpendicular to the edge.
             uA=_occ_cross(t,nA); uB=_occ_cross(t,nB)
             uA=_occ3_scale(uA,1.0/_occ_modulus(uA))
             uB=_occ3_scale(uB,1.0/_occ_modulus(uB))
-            _dot3(uA,_occ3_sub(fcenters[fA],em))<0 && (uA=(.-uA))
-            _dot3(uB,_occ3_sub(fcenters[fB],em))<0 && (uB=(.-uB))
+            # inward along a face = away from the other (outward) face
+            _dot3(uA,nB)>0 && (uA=(.-uA))
+            _dot3(uB,nA)>0 && (uB=(.-uB))
             qA=_occ3_add(em,_occ3_scale(uA,distance1))
             qB=_occ3_add(em,_occ3_scale(uB,distance2))
             w=_occ3_sub(qB,qA)
@@ -2004,8 +2053,10 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
         verts=_occ_halfspace_verts(nplanes,nbs)
         isempty(verts) && throw(ArgumentError(
             "$caller: chamfer leaves an empty body"))
-        # Old sub-shape ids become orphans once the volume rebinds —
-        # collected here, unbound below if nothing else uses them.
+        # `_fillet` unbinds the volume with its sub-shapes before binding
+        # the result (`removeVolume`), so the new faces, curves and points
+        # take the lowest free tags as in Gmsh: the old sub-shapes nothing
+        # else uses are released first.
         old_ids=UInt64[]
         stack=copy(kernel.shapes[vid].children)
         while !isempty(stack)
@@ -2015,10 +2066,11 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
                 append!(stack,(u for (u,_) in
                                kernel.shapes[x].geometry.uses))
         end
+        kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[])
+        _occ_unbind_orphans!(kernel,Set(old_ids))
         shell=_occ_solid_from_planes!(m,nplanes,nbs,verts,caller)
         sid=kernel.bindings[(-2,shell)]
         kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
-        _occ_unbind_orphans!(kernel,Set(old_ids))
         _occ_invalidate_volume_tables!(m,vt)
         kernel.changed=true
         push!(out,(3,vt))
@@ -3485,8 +3537,7 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             if isplane[fid]
                 σ=rev ? -1.0 : 1.0
                 n=_occ3_scale(fg.geometry.axis,σ)
-                get(fg.geometry,:reversed,false) && (n=(.-n))
-                n=_occ3_scale(n,1.0/_occ_modulus(n))
+                    n=_occ3_scale(n,1.0/_occ_modulus(n))
                 fnormals[fid]=n; fcenters[fid]=fg.geometry.center
                 push!(planes,n); push!(bs,_dot3(n,fg.geometry.center))
             end

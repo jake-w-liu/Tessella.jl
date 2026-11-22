@@ -6344,17 +6344,17 @@ function _geo_occ_corner_run(m::GeoModel,name::AbstractString,groups,
             return nothing
         end
     else
-        # `Chamfer{regions}{edges}{surfaces}{distances}` — the surface list
-        # is a hint upstream resolves against the solid; Tessella derives
-        # the adjacent faces from the edge map and only needs the group
-        # evaluated.
-        _geo_exec_entity_rhs_tags(
+        # `Chamfer{regions}{edges}{surfaces}{distances}`: one surface per
+        # edge, on which the edge's first distance is measured; one
+        # distance, one per edge or a pair per edge (`OCC_Internals::
+        # _fillet`).
+        sts=_geo_exec_entity_rhs_tags(
             "{"*groups[3]*"}",context,"$caller surfaces";abs_refs=true)
         dist=_geo_numeric_list_values(
             "{"*groups[4]*"}",context,"$caller distances";depth=1)
-        if !(length(dist) in (1,2))
+        if length(sts)!=length(cs)
             _geo_msg_error!(context,
-                "Chamfer distances must have 1 or 2 elements")
+                "Different number of curves and surfaces for chamfer")
             _geo_yyerror!(context,"Could not chamfer shapes")
             return nothing
         end
@@ -6366,7 +6366,7 @@ function _geo_occ_corner_run(m::GeoModel,name::AbstractString,groups,
                 Base.inferencebarrier(_geo_occ_pipe_edge!)(m,c,kernel,caller)
             end
             Base.inferencebarrier(Model._model_occ_chamfer)(
-                m,vols,cs,dist[1],length(dist)==2 ? dist[2] : dist[1])
+                m,vols,cs,Int[Int(t) for t in sts],Float64[d for d in dist])
         catch err
             err isa InterruptException && rethrow()
             err isa ArgumentError || rethrow()

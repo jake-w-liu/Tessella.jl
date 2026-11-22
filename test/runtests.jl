@@ -406,6 +406,8 @@ end
         "interfaces/api_view_tag_counter_test.jl",
         "geometry/geo_exec_params_test.jl",
         "geometry/geo_classify_faces_gmsh_test.jl",
+        "interfaces/api_occ_chamfer_gmsh_test.jl",
+        "interfaces/api_occ_sweep_curved_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

@@ -134,6 +134,16 @@ chamfer(volume_tags,curve_tags,distance1,distance2)=_with_model() do m
         Float64(distance1),Float64(distance2))
 end
 
+# Gmsh's form: `chamfer(volumeTags, curveTags, surfaceTags, distances)`,
+# the first distance of each curve measured on its surface.
+chamfer(volume_tags,curve_tags,surface_tags::AbstractVector,
+        distances::AbstractVector;removeVolume=true)=_with_model() do m
+    Model._model_occ_chamfer(m,Int[abs(Int(t)) for t in volume_tags],
+        Int[abs(Int(t)) for t in curve_tags],
+        Int[abs(Int(t)) for t in surface_tags],
+        Float64[Float64(d) for d in distances])
+end
+
 fillet(volume_tags,curve_tags,radii)=_with_model() do m
     Model._model_occ_fillet(m,Int[abs(Int(t)) for t in volume_tags],
         Int[abs(Int(t)) for t in curve_tags],radii)
