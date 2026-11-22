@@ -377,6 +377,7 @@ end
         "structured/quadtotri_general_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         "meshing/optimize_exact_orientation_test.jl",
+        "meshing/gmsh_insertion_sheet_sizes_test.jl",
     )
         println("Testing ", path, "...")
         flush(stdout)

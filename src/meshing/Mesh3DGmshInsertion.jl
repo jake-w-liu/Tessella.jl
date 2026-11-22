@@ -209,7 +209,8 @@ end
     return nothing
 end
 
-function _gmsh3_initial_sizes(T,mesh,exterior,minimize,embedded_sizes;native_arithmetic=false)
+function _gmsh3_initial_sizes(T,mesh,exterior,minimize,embedded_sizes;native_arithmetic=false,
+                              sheet_faces=())
     sizes=fill(minimize ? Inf : 0.0,T.nreal)
     boundary=falses(T.nreal)
     for (node,value) in embedded_sizes
@@ -228,6 +229,18 @@ function _gmsh3_initial_sizes(T,mesh,exterior,minimize,embedded_sizes;native_ari
     # Embedded surface triangles also contribute sizes and boundary markers.
     for column in axes(mesh.tris,2)
         face=(mesh.tris[1,column],mesh.tris[2,column],mesh.tris[3,column])
+        for node in face;boundary[node]=true;end
+        for (i,j) in ((1,2),(2,3),(3,1))
+            _gmsh3_update_size!(sizes,face[i],face[j],T,minimize,native_arithmetic)
+        end
+    end
+    # setLcs runs over the triangles of every GFace, embedded ones included:
+    # the protected sheet faces of an embedded Surface are boundary vertices
+    # sized by their own triangle edges, never by the tetrahedra around them.
+    # (A face also in `exterior` or `mesh.tris` changes nothing: the update
+    # is idempotent.)
+    for face in sheet_faces
+        all(node->1<=node<=T.nreal,face) || continue
         for node in face;boundary[node]=true;end
         for (i,j) in ((1,2),(2,3),(3,1))
             _gmsh3_update_size!(sizes,face[i],face[j],T,minimize,native_arithmetic)
@@ -525,7 +538,8 @@ function _refine_gmsh_delaunay3(mesh::Mesh,background_size;
     vertex_number=_gmsh3_birth_maximum(node_high_water,vertex_numbers,caller,"node")
     storage=native_storage_order ? NTuple{4,Int32}[
         ntuple(slot->mesh.tets[slot,column],4) for column in axes(mesh.tets,2)] : nothing
-    sizes,background=_gmsh3_initial_sizes(T,mesh,exterior,minimize_boundary,embedded_sizes;native_arithmetic=native_storage_order)
+    sizes,background=_gmsh3_initial_sizes(T,mesh,exterior,minimize_boundary,embedded_sizes;native_arithmetic=native_storage_order,
+        sheet_faces=protected_faces)
     queue=_GmshTetQueue();skipped=Set{NTuple{4,Int32}}()
     shell_scratch=_GmshShellScratch()
     # `protected_edges` is not edited while this loop runs.
