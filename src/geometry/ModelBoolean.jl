@@ -7526,6 +7526,70 @@ function _brep_regions_from_first_vertex(S,f,regions,arcs,cycles)
     return vcat([regions[k]],regions[1:k-1],regions[k+1:end])
 end
 
+# The order of a split sheet face's pieces in OpenCASCADE: as its own edges
+# meet them, edge by edge in stored order and each edge's pieces along it;
+# then the pieces bounded only by other shapes' edges, as those edges meet
+# them: the last operand's edges first, each operand's edges in stored
+# order, the piece inside the operand owning the edge first. Gmsh
+# 4.15.2 (extrude.geo's fragment of a rectangle, a square inside it and a
+# disk): rectangle rest 1, rectangle∩disk 2, square∩disk 3, square rest 4;
+# with the disk before the square the last two swap. A square cut by a
+# strip lists its pieces along its first edge. `opof` maps a curve tag to
+# (operand, position among that operand's stored edges).
+function _brep_regions_sheet_order(S,f,regions,arcs,cycles,
+                                   opof=Dict{Int,Tuple{Int,Int}}(),
+                                   where=ar->nothing,inside=(j,r)->false)
+    length(regions)<2 && return regions
+    on=Dict{Int,Vector{Tuple{Int,Bool}}}()      # arc -> (region, fwd)
+    for (ri,r) in enumerate(regions), c in r, (a,fwd) in cycles[c]
+        push!(get!(Vector{Tuple{Int,Bool}},on,a),(ri,fwd))
+    end
+    order=Int[]
+    add(ri)=(ri in order || push!(order,ri))
+    for wire in f.wires, (eidx,sgn,_) in wire
+        ct=S.ctags[eidx]
+        pieces=Tuple{Float64,Int}[]
+        for (a,ar) in enumerate(arcs)
+            k=ar.key
+            (k isa Tuple && length(k)>=4 && k[1]===:e && k[2]==ct) || continue
+            push!(pieces,(sgn>0 ? min(k[3],k[4]) : -max(k[3],k[4]),a))
+        end
+        sort!(pieces)
+        for (_,a) in pieces, (ri,_) in get(on,a,())
+            add(ri)
+        end
+    end
+    # other operands' edge pieces: last operand first, then along each edge
+    rank=Tuple{Int,Int,Float64,Int}[]
+    for (a,ar) in enumerate(arcs)
+        k=ar.key
+        o,pos=k isa Tuple && length(k)>=4 && k[1]===:e ?
+            get(opof,k[2],(0,0)) : (0,0)
+        if o!=0
+            push!(rank,(-o,pos,min(k[3],k[4]),a))
+        else
+            # a section arc: the operand edge it lies on, found by position
+            w=where(ar)
+            push!(rank,w===nothing ? (1,0,0.0,a) : (-w[1],w[2],w[3],a))
+        end
+    end
+    sort!(rank)
+    for (o,_,_,a) in rank
+        hits=get(on,a,())
+        # the piece inside the operand whose edge this is comes first
+        for (ri,_) in hits
+            o<0 && inside(-o,regions[ri]) && add(ri)
+        end
+        for (ri,_) in hits
+            add(ri)
+        end
+    end
+    for ri in eachindex(regions)
+        add(ri)
+    end
+    return regions[order]
+end
+
 # Operands whose distinct vertices coincide (two boxes touching at a corner)
 # share that vertex in OpenCASCADE's result, so both are rebuilt around it
 # (Gmsh 4.15.2: 15 points, not 16). Vertices that are already one entity —

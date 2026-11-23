@@ -823,6 +823,16 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
     N=length(reps)
     N<=62 || throw(ArgumentError(
         "$caller: at most 62 Boolean operands per operation"))
+    # curve tag -> (operand, position in its stored edge order), for the
+    # order of split sheet pieces
+    opof=Dict{Int,Tuple{Int,Int}}()
+    for (j,r) in enumerate(reps)
+        pos=0
+        for face in r.faces, w in face.wires, (e,_,_) in w
+            pos+=1
+            haskey(opof,r.ctags[e]) || (opof[r.ctags[e]]=(j,pos))
+        end
+    end
     coinc=NTuple{4,Int}[]
     sections=NamedTuple[]
     touched=falses(N)
@@ -1129,11 +1139,15 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
         for (fidx,f) in enumerate(S.faces)
             regions,arcs,cycles=_brep_face_regions(
                 S,f,i,es,secs_pf[i][fidx],extras[fidx],tol,caller)
+            isvol[i] || (regions=_brep_regions_sheet_order(S,f,regions,arcs,
+                cycles,opof,ar->_occ_arc_operand_edge(reps,i,ar),
+                (j,region)->_occ_region_in_operand(reps[j],f,arcs,cycles,
+                                                   region,tol,caller)))
             (length(regions)==1 &&
              wires_original(S,arcs,cycles,regions[1])) ||
                 (touched[i]=true)
             cofaces=get(coinc_by_face[i],fidx,Tuple{Int,Int}[])
-            for region in regions
+            for (ri,region) in enumerate(regions)
                 uv=_brep_region_sample(arcs,cycles,region,tol,caller)
                 P=_brep_surface_eval(f.sg,uv[1],uv[2])
                 same_p=Int[];opp_p=Int[]
@@ -1193,8 +1207,14 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                 keep_out=_brep_label_keep(op,loutL,nobj)
                 uses=Tuple{UInt64,Int}[]
                 if coincident
-                    if minimum(vcat(i,same_p,opp_p))!=i
-                        touched[i]=true;continue
+                    owner=minimum(vcat(i,same_p,opp_p))
+                    if owner!=i
+                        touched[i]=true
+                        # the owner's piece stands in for this sheet's own
+                        # region in its image order
+                        isvol[i] || _occ_mark_standin!(sheet_out,kept,owner,
+                                                       i,ri,P,tol)
+                        continue
                     end
                     if !isempty(opp_p) &&
                             (op===:union || op===:intersection)
@@ -1216,7 +1236,7 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                             !isempty(uses)
                         push!(sheet_out,
                               (sg=f.sg,stag=f.stag,wires=wires,
-                               uses=Tuple{UInt64,Int}[],oi=i,ruv=uv,sgn=1,
+                               uses=Tuple{UInt64,Int}[],oi=i,ruv=uv,rk=ri,sgn=1,
                                sev=sec_edges))
                     else
                         touched[i]=true
@@ -1231,7 +1251,7 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                     else
                         push!(sheet_out,(sg=f.sg,stag=f.stag,wires=wires,
                                          uses=Tuple{UInt64,Int}[],oi=i,
-                                         ruv=uv,sgn=1,sev=sec_edges))
+                                         ruv=uv,rk=ri,sgn=1,sev=sec_edges))
                         continue
                     end
                 end
@@ -1241,12 +1261,12 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
                     # face — upstream binds the section as the sheet's
                     # image; it is not a cell wall of any volume piece
                     push!(sheet_out,(sg=f.sg,stag=f.stag,wires=wires,
-                                     uses=Tuple{UInt64,Int}[],oi=i,ruv=uv,
+                                     uses=Tuple{UInt64,Int}[],oi=i,ruv=uv,rk=ri,
                                      sgn=1,sev=sec_edges))
                     continue
                 end
                 push!(kept,(sg=f.sg,stag=f.stag,wires=wires,uses=uses,
-                            sgn=uses[1][2],oi=i,ruv=uv,sev=sec_edges))
+                            sgn=uses[1][2],oi=i,ruv=uv,rk=ri,sev=sec_edges))
             end
         end
     end
@@ -1770,6 +1790,70 @@ function _occ_sheet_spec_canon(spec,rep)
     return merge(spec,(wires=wires,))
 end
 
+# The operand edge (other than operand `i`'s) a section arc lies on:
+# (operand, position in its stored edge order, parameter), or `nothing`.
+function _occ_arc_operand_edge(reps,i::Int,ar)
+    ar.crv.kind===:degenerate && return nothing
+    pm=_brep_vertex_eval(ar.crv,(ar.vt0+ar.vt1)/2)
+    scale=max(1.0,abs(pm[1]),abs(pm[2]),abs(pm[3]))
+    for (j,r) in enumerate(reps)
+        j==i && continue
+        pos=0
+        for face in r.faces, w in face.wires, (e,_,_) in w
+            pos+=1
+            ed=r.edges[e]
+            ed.curve.kind===:degenerate && continue
+            t=_brep_curve_param(ed.curve,pm,(ed.t0+ed.t1)/2)
+            t===nothing && continue
+            lo,hi=minmax(ed.t0,ed.t1)
+            (lo-_BREP_TOL<=t<=hi+_BREP_TOL) || continue
+            _b3dist(_brep_curve_eval(ed.curve,t),pm)<=1e-9*scale || continue
+            return (j,pos,t)
+        end
+    end
+    return nothing
+end
+
+# Whether a region of face `f` lies on a face of operand rep `R` (a sheet
+# piece covered by another sheet) or inside it (a solid).
+function _occ_region_in_operand(R,f,arcs,cycles,region,tol,caller)
+    uv=_brep_region_sample(arcs,cycles,region,tol,caller)
+    P=_brep_surface_eval(f.sg,uv[1],uv[2])
+    for of in R.faces
+        uv2=_brep_surface_uv(of.sg,P)
+        _b3dist(_brep_surface_eval(of.sg,uv2[1],uv2[2]),P)<=1e-7*max(1.0,
+            abs(P[1]),abs(P[2]),abs(P[3])) || continue
+        _brep_uv_in_face(R.edges,of,uv2,tol) && return true
+    end
+    return false
+end
+
+# Record on the owner's piece covering `P` that it stands in for region `ri`
+# of sheet operand `i` (`standin`: operand => rank), so `i`'s image lists
+# its pieces in its own order.
+function _occ_mark_standin!(sheet_out,kept,owner::Int,i::Int,ri::Int,P,tol)
+    for list in (sheet_out,kept), k in eachindex(list)
+        s=list[k]
+        get(s,:oi,0)==owner || continue
+        uv=_brep_surface_uv(s.sg,P)
+        _occ_spec_in_uv(s,uv[1],uv[2],tol) || continue
+        list[k]=merge(s,(standin=vcat(get(s,:standin,Tuple{Int,Int}[]),
+                                      [(i,ri)]),))
+        return nothing
+    end
+    return nothing
+end
+
+# A sheet operand's rank of a piece: its own region index, or the region a
+# coincident owner's piece stands in for.
+function _occ_sheet_rank(spec,i::Int)
+    get(spec,:oi,0)==i && return get(spec,:rk,typemax(Int))
+    for (j,r) in get(spec,:standin,())
+        j==i && return r
+    end
+    return typemax(Int)
+end
+
 # A spec's uv interior sample — merged specs (union/intersection unify)
 # carry no `ruv`, so rebuild one over the spec's own wires.
 function _occ_spec_ruv(spec,tol,caller)
@@ -2175,6 +2259,7 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
     faces_out=NamedTuple[]    # (stag,credit)
     face_image=[Int[] for _ in 1:nops]
     shell_img=[Int[] for _ in 1:nops]
+    srank=Dict{Tuple{Int,Int},Int}()
     try
         ptag=Vector{Int}(undef,length(res_verts))
         for (i,p) in enumerate(res_verts)
@@ -2343,7 +2428,9 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             cr=_occ_face_credits(reps,isvol,spec,tol)
             push!(faces_out,(stag=stag[fi],credit=cr))
             for i in 1:nops
-                (cr&_brep_bit(i))!=0 && push!(face_image[i],stag[fi])
+                (cr&_brep_bit(i))!=0 || continue
+                push!(face_image[i],stag[fi])
+                srank[(i,stag[fi])]=_occ_sheet_rank(spec,i)
             end
             # a face inside one result solid is an internal face of it
             # (OpenCASCADE's TopAbs_INTERNAL): Gmsh's synchronize embeds it
@@ -2367,7 +2454,9 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             cr=_occ_face_credits(reps,isvol,spec,tol)
             push!(faces_out,(stag=st,credit=cr))
             for i in 1:nops
-                (cr&_brep_bit(i))!=0 && push!(face_image[i],st)
+                (cr&_brep_bit(i))!=0 || continue
+                push!(face_image[i],st)
+                srank[(i,st)]=_occ_sheet_rank(spec,i)
             end
         end
         # faces kept bound on a pseudo (unmodified) operand still credit
@@ -2382,7 +2471,10 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
                 (cr&_brep_bit(i))!=0 && push!(shell_img[i],spec.stag)
             end
         end
+        # a sheet lists its free pieces in its own region order
         for i in 1:nops
+            isvol[i] || sort!(face_image[i];
+                by=st->get(srank,(i,st),typemax(Int)))
             append!(face_image[i],shell_img[i])
         end
     catch

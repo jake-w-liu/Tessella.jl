@@ -93,4 +93,36 @@ point(t)=Tuple(A.model.get_value(0,t,Float64[]))
         A.finalize()
     end
 end
+
+# extrude.geo's fragment: a rectangle, a square inside it and a disk over
+# both. A split sheet lists its pieces as its own edges meet them, then as
+# the other operands' edges meet them, last operand first, the piece inside
+# that operand first; a coincident piece stands where its own region was.
+# Gmsh 4.15.2, by piece centroid.
+@testset "OCC fragment order of split sheet pieces" begin
+    r2(x)=round(x;digits=2)
+    for (ord,maps,cs) in (
+            ((1,2,3),[[1,2,3,4],[4,3],[5,2,3]],
+             [(0.45,0.43),(0.6,0.62),(0.37,0.42),(0.33,0.28),(1.04,0.6)]),
+            ((1,3,2),[[1,2,3,4],[5,2,4],[3,4]],
+             [(0.45,0.43),(0.6,0.62),(0.33,0.28),(0.37,0.42),(1.04,0.6)]),
+            ((2,1,3),[[1,2],[3,4,2,1],[5,4,2]],
+             [(0.33,0.28),(0.37,0.42),(0.45,0.43),(0.6,0.62),(1.04,0.6)]))
+        A.initialize()
+        try
+            A.option("General.Terminal",0)
+            occ=A.model.occ
+            occ.add_rectangle(0,0,0,1,1;tag=1)
+            occ.add_rectangle(0.2,0.2,0,0.3,0.3;tag=2)
+            occ.add_disk(0.6,0.6,0,0.5,0.3;tag=3)
+            occ.synchronize()
+            out,images=occ.fragment([(2,ord[1])],[(2,t) for t in ord[2:end]])
+            occ.synchronize()
+            @test [[t for (_,t) in m] for m in images]==maps
+            @test [Tuple(r2.(occ.get_center_of_mass(2,t)[1:2])) for t in 1:5]==cs
+        finally
+            A.finalize()
+        end
+    end
+end
 end
