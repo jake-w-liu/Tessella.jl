@@ -719,6 +719,27 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
             NaN
         end)
     end
+    # the sanity check runs on the staged result, before the kernel changes:
+    # a raise leaves the model as it was, as Gmsh does on a failed Boolean
+    out_ids=UInt64[]
+    for v in out
+        push!(out_ids,_model_occ_boolean_result_id(kernel,pub,ktagmap,rvmap[v]))
+    end
+    img_ids=Vector{UInt64}[]
+    for im in image
+        ids=UInt64[]
+        for v in im
+            push!(ids,_model_occ_boolean_result_id(kernel,pub,ktagmap,rvmap[v]))
+        end
+        push!(img_ids,ids)
+    end
+    added=_model_occ_boolean_show_staged!(kernel,pub)
+    try
+        _model_occ_boolean_sanity(kernel,op,omass,length(obj_tags),out_ids,
+                                  img_ids,caller;obounds=obounds)
+    finally
+        _model_occ_boolean_hide_staged!(kernel,added)
+    end
     for t in in_tags
         (haskey(sm.volumes,t) && !haskey(sm.booleans,t)) && continue
         id=get(kernel.bindings,(3,t),nothing)
@@ -734,9 +755,45 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     out_map=Vector{Tuple{Int,Int}}[
         Tuple{Int,Int}[(3,get(ktagmap,rvmap[v],rvmap[v])) for v in im]
         for im in image]
-    _model_occ_boolean_sanity(kernel,op,omass,length(obj_tags),out_dt,
-                              out_map,caller;obounds=obounds)
     return out_dt,out_map
+end
+
+# Volume of a kernel solid, NaN when it cannot be measured.
+_model_occ_boolean_measure(kernel,id)=try
+    id==0 ? NaN : first(_model_occ_solid_measure(kernel,id;want_centroid=false))
+catch
+    NaN
+end
+
+# The shape of result volume `sv` of the scratch model: staged when it is
+# published, else the kept operand's binding.
+_model_occ_boolean_result_id(kernel,pub,ktagmap,sv)=
+    haskey(ktagmap,sv) ? pub.ids[(3,sv)] : get(kernel.bindings,(3,sv),UInt64(0))
+
+# Make the staged shapes of `pub` visible to shape measures; the caller
+# removes the returned ids again. Nothing is bound, so the model is
+# unchanged.
+function _model_occ_boolean_show_staged!(kernel,pub)
+    added=UInt64[]
+    for (sid,sh) in pub.staged
+        haskey(kernel.shapes,sid) && continue
+        kernel.shapes[sid]=sh
+        push!(added,sid)
+    end
+    # their planned tags, for measures that read a shape's tag
+    for (dim,tag,id) in pub.planned
+        id in added || continue
+        haskey(kernel.shape_tags,id) || (kernel.shape_tags[id]=(dim,tag))
+    end
+    return added
+end
+
+function _model_occ_boolean_hide_staged!(kernel,added)
+    for sid in added
+        delete!(kernel.shapes,sid)
+        delete!(kernel.shape_tags,sid)
+    end
+    return nothing
 end
 
 # A result that contradicts its operands' volumes is an engine failure, not
@@ -745,16 +802,19 @@ end
 # and each fragmented operand is the sum of its pieces. A fuse of two
 # crossed cylinders once returned one of them unchanged; this raises
 # instead. Volumes that cannot be measured are not checked.
-function _model_occ_boolean_sanity(kernel,op,omass,nobj,out_dt,out_map,caller;
-                                   obounds=Any[])
+function _model_occ_boolean_sanity(kernel,op,omass,nobj,out_ids,img_ids,
+                                   caller;obounds=Any[])
     all(isfinite,omass) || return nothing
-    vol(dt)=try
-        first(_model_occ_solid_measure(kernel,kernel.bindings[dt];
-                                       want_centroid=false))
+    vol(id)=try
+        id==0 ? NaN :
+            first(_model_occ_solid_measure(kernel,id;want_centroid=false))
     catch
         NaN
     end
-    rmass=Float64[vol(dt) for dt in unique(out_dt)]
+    rmass=Float64[]
+    for id in unique(out_ids)
+        push!(rmass,vol(id))
+    end
     all(isfinite,rmass) || return nothing
     scale=max(1.0,maximum(abs,omass;init=0.0))
     tol=1e-6*scale
@@ -768,9 +828,12 @@ function _model_occ_boolean_sanity(kernel,op,omass,nobj,out_dt,out_map,caller;
         mo-mt-tol<=M<=mo+tol
     else
         good=true
-        for (i,im) in enumerate(out_map)
+        for (i,im) in enumerate(img_ids)
             isempty(im) && continue
-            s=sum(vol(dt) for dt in im)
+            s=0.0
+            for id in im
+                s+=vol(id)
+            end
             isfinite(s) && abs(s-omass[i])>tol && (good=false)
         end
         good && M<=sum(omass)+tol && M>=maximum(omass)-tol
@@ -2830,13 +2893,33 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
         end
     end
     base==cursor || ((pub,ktag3,ktag2)=stage_mixed(base))
-    # volume operands' volumes, for the sanity check of the result
-    omass=Float64[d==3 ? (try
-            first(_model_occ_solid_measure(kernel,kernel.bindings[(d,t)];
-                                           want_centroid=false))
-        catch
-            NaN
-        end) : 0.0 for (d,t) in in_dt]
+    # a volume operand is the sum of its pieces (a sheet only divides it),
+    # checked on the staged result before the kernel changes, so a raise
+    # leaves the model as it was
+    added=_model_occ_boolean_show_staged!(kernel,pub)
+    try
+        for (i,(d,t)) in enumerate(in_dt)
+            (d==3 && isvol[i] && !preserved[i]) || continue
+            isempty(vol_image[i]) && continue
+            om=_model_occ_boolean_measure(kernel,
+                get(kernel.bindings,(d,t),UInt64(0)))
+            isfinite(om) || continue
+            s=0.0
+            for pi in vol_image[i]
+                p=pieces[pi]
+                id=p.pseudo!=0 ?
+                    get(kernel.bindings,(3,tags[p.pseudo]),UInt64(0)) :
+                    get(pub.ids,(3,p.vtag),UInt64(0))
+                s+=_model_occ_boolean_measure(kernel,id)
+            end
+            (isfinite(s) && abs(s-om)>1e-5*max(1.0,abs(om))) &&
+                throw(ErrorException("$caller: the pieces of Volume[$t] "*
+                    "measure $(s) where it measured $(om); the operation is "*
+                    "not supported for this input"))
+        end
+    finally
+        _model_occ_boolean_hide_staged!(kernel,added)
+    end
     # kernel mutation: unbind removed operands recursively, then bind the
     # staged shapes — upstream's remove-then-bind order. With
     # remove=false modified operands stay bound beside their images.
@@ -2923,23 +3006,6 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
             end
         end
         push!(out_map,lst)
-    end
-    # a volume operand is the sum of its pieces (a sheet only divides it)
-    for (i,(d,t)) in enumerate(in_dt)
-        (d==3 && isfinite(omass[i]) && !isempty(out_map[i])) || continue
-        s=0.0
-        for dt in out_map[i]
-            s+=try
-                first(_model_occ_solid_measure(kernel,kernel.bindings[dt];
-                                               want_centroid=false))
-            catch
-                NaN
-            end
-        end
-        (isfinite(s) && abs(s-omass[i])>1e-5*max(1.0,abs(omass[i]))) &&
-            throw(ErrorException("$caller: the pieces of Volume[$t] "*
-                "measure $(s) where it measured $(omass[i]); the "*
-                "operation is not supported for this input"))
     end
     return out,out_map
 end

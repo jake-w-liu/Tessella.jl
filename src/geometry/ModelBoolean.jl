@@ -3995,13 +3995,26 @@ end
 # first box's z=1 piece, reached from its x=0 face through the z=1 face.
 # Returns face index => rank.
 function _brep_block_rank(kept,wires,i::Int)
-    L=Int[]
+    # own faces in order, a coincident wall owned by a lower operand where
+    # this operand's own face was (`also`)
+    own=Tuple{Float64,Int}[]
     for (fi,spec) in enumerate(kept)
-        get(spec,:oi,0)==i && push!(L,fi)
+        if get(spec,:oi,0)==i
+            push!(own,(Float64(fi),fi))
+        else
+            for (j,p) in get(spec,:also,())
+                j==i && (push!(own,(Float64(p),fi));break)
+            end
+        end
+    end
+    sort!(own)
+    L=Int[]
+    for (_,fi) in own
+        fi in L || push!(L,fi)
     end
     bit=_brep_bit(i)
     for (fi,spec) in enumerate(kept)
-        get(spec,:oi,0)==i && continue
+        fi in L && continue
         any(u->(u[1]&bit)!=0,spec.uses) && push!(L,fi)
     end
     adj=Dict{Any,Vector{Int}}()
@@ -6384,6 +6397,17 @@ function _brep_merge_edge_pieces(kept,tol,caller)
                 end
             end
         end
+        # a closed ellipse keeps its vertex at its own origin (OpenCASCADE's
+        # intersection ellipse; Gmsh 4.15.2 keeps it in a fuse of crossed
+        # cylinders)
+        if !wrap && r1.crv.kind===:ellipse && r2.crv.kind===:ellipse
+            for (s1,p1) in ((r1.vt0,r1.p0),(r1.vt1,r1.p1)),
+                (_,p2) in ((r2.vt0,r2.p0),(r2.vt1,r2.p1))
+                _b3dist(p1,p2)<tol3 || continue
+                m=mod(s1,_OCC_TWO_PI)
+                (m<tol || _OCC_TWO_PI-m<tol) && (wrap=true;break)
+            end
+        end
         wrap && continue
         adj=false
         for p in (r1.p0,r1.p1), p2 in (r2.p0,r2.p1)
@@ -7568,6 +7592,20 @@ end
 # fuse of two such cylinders returned one of them unchanged.
 function _brep_section_crossings!(sec_cuts,sections,skip,tol)
     n=length(sections)
+    # a closed ellipse section has a vertex at its own origin (the +X end
+    # of its major axis), as OpenCASCADE's intersection curve: Gmsh 4.15.2
+    # splits the crossed cylinders' ellipses at (r,±r,0)
+    for si in 1:n
+        skip[si] && continue
+        A=sections[si]
+        (A.closed && A.curve.kind===:ellipse) || continue
+        for (lo,hi) in A.spans, k in -2:3
+            t=k*_OCC_TWO_PI
+            (lo+tol<t<hi-tol) || continue
+            cuts=get!(Vector{Float64},sec_cuts,si)
+            any(c->abs(c-t)<tol,cuts) || push!(cuts,t)
+        end
+    end
     for si in 1:n, sj in 1:n
         si==sj && continue
         (skip[si] || skip[sj]) && continue
@@ -8225,6 +8263,41 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         end
         for i in 1:nops
             sort!(image[i],by=pi->(get(first_own,(pi,i),Inf),pi))
+        end
+    end
+    # On the OpenCASCADE route the pieces follow the order in which each
+    # owner's shell splitter meets them (`_brep_block_rank`), and each
+    # operand's image likewise: Gmsh 4.15.2 lists the common piece of two
+    # crossed cylinders between their end pieces ([1,2,3], [4,2,5]) and a
+    # box pierced by a cylinder's piece inside the box second.
+    if natural && op!==:union
+        wires0=Vector{Any}(undef,length(kept))
+        for (fi,s) in enumerate(kept)
+            wires0[fi]=s.wires
+        end
+        prank(pi,i,rk)=begin
+            best=typemax(Int)
+            for cf in pieces[pi].comps, fi in cf
+                best=min(best,get(rk,fi,typemax(Int)))
+            end
+            best
+        end
+        rks=Dict{Int,Dict{Int,Int}}()
+        for i in 1:nops
+            rks[i]=_brep_block_rank(kept,wires0,i)
+        end
+        perm=sortperm(collect(eachindex(pieces));by=pi->begin
+            o=trailing_zeros(pieces[pi].srcs)+1
+            (o,prank(pi,o,rks[o]),pi)
+        end)
+        inv=invperm(perm)
+        permute!(pieces,perm)
+        for i in 1:nops
+            for k in eachindex(image[i])
+                image[i][k]=inv[image[i][k]]
+            end
+            rk=rks[i]
+            sort!(image[i];by=pj->(prank(pj,i,rk),pj))
         end
     end
     emit=falses(length(kept))

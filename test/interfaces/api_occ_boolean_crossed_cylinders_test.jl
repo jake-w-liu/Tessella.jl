@@ -7,8 +7,9 @@ const A=Tessella.API
 # one cylinder unchanged and the fragment both untouched. Exact volumes: the
 # common part 16r³/3 (Steinmetz), the three-cylinder common part 8(2−√2)r³;
 # Gmsh 4.15.2 gives 28.7727878844, pieces 5.93827430/5.01969066 and
-# 40.0403459044. Gmsh also has 8/14/8/1 and 8/14/12/5 entities (it keeps
-# the cylinders' seam vertices); Tessella has 6/12/8/1 and 6/12/12/5.
+# 40.0403459044, and 8/14/8/1 and 8/14/12/5 entities: each section ellipse
+# keeps a vertex at its own origin (r,±r,0), and the pieces come as each
+# cylinder's shell splitter meets them, the common piece between the ends.
 # Interpreted these take over half an hour (the fitted ellipse pcurves and
 # the sphere): compiled runs only.
 @testset "OCC Booleans of crossed cylinders of equal radius" begin
@@ -33,14 +34,15 @@ const A=Tessella.API
         out,_=occ.fuse([(3,4)],[(3,5)];tag=7)
         @test out==[(3,7)]
         @test occ.get_mass(3,7)≈2cyl-common rtol=1e-8
-        @test_broken Tuple(length(occ.get_entities(d)) for d in 0:3)==(8,14,8,1)
+        @test Tuple(length(occ.get_entities(d)) for d in 0:3)==(8,14,8,1)
     end
     run(2) do occ
         out,images=occ.fragment([(3,4)],[(3,5)])
         @test length(out)==5
         ms=sort([occ.get_mass(3,t) for (_,t) in out])
         @test ms≈sort([fill((cyl-common)/2,4);common]) rtol=1e-8
-        @test images==[[(3,1),(3,2),(3,3)],[(3,4),(3,2),(3,5)]] broken=true
+        @test images==[[(3,1),(3,2),(3,3)],[(3,4),(3,2),(3,5)]]
+        @test Tuple(length(occ.get_entities(d)) for d in 0:3)==(8,14,12,5)
     end
     run(3) do occ
         out,_=occ.fuse([(3,4)],[(3,5),(3,6)];tag=7)
