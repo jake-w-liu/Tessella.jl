@@ -151,6 +151,7 @@ include("APIPartitionNative.jl")
 include("APIPartitionProducer.jl")
 include("APIPartitionBRep.jl")
 include("APIPartitionGmsh.jl")
+include("APIMetisGmsh.jl")
 include("APIGmshWriters.jl")
 include("APIPlugins.jl")
 include("APIOnelab.jl")
@@ -224,9 +225,8 @@ const DEFAULT_OPTIONS = Dict{String,Float64}(
     "Mesh.OptimizeThreshold"=>0.3,
     "Mesh.OptimizeNetgen"=>0.0,
     "Mesh.OptimizePyramids"=>0.0,
-    # Preserve the existing assignment-only default; nonzero values request
-    # actual, bounded Tet4 partition topology or ghost products.
-    "Mesh.PartitionCreateTopology"=>0.0,
+    # Gmsh's default: partitioning builds the partition entities' topology.
+    "Mesh.PartitionCreateTopology"=>1.0,
     "Mesh.PartitionTopologyFile"=>0.0,
     # Upstream `partitionCreatePhysicals` defaults on: partition entities gain
     # `_part{..}_physical{X}_dim{d}` named groups (see `_partition_create_physicals!`).
@@ -8975,7 +8975,18 @@ function _partition(num_part,element_tags=(),partitions=())
                 "element partition list"))
             # Upstream assigns only the top-dimension dual; lower cells then
             # inherit an adjacent higher-dimension carrier's partition.
-            assignment=_partition_lower_inherit(_partition_elements(cached,count),cached)
+            assignment=if _mg_gmsh_default_options()
+                # Gmsh's own METIS run (APIMetisGmsh.jl): every element's
+                # partition, lower-dimension cells included.
+                parts=_mg_gmsh_partition(Int(count))
+                result=zeros(Int32,total)
+                for (tag,part) in parts
+                    result[_mesh_public_element_index(cached,tag,caller)]=Int32(part)
+                end
+                result
+            else
+                _partition_lower_inherit(_partition_elements(cached,count),cached)
+            end
         else
             assignment=zeros(Int32,total)
             supplied=Dict{Int,Int}()

@@ -11017,8 +11017,13 @@ function _geo_exec_partition_mesh!(m::GeoModel,args::AbstractString,
             _geo_option_number(context,"Mesh",0,"PartitionLineWeight"),-1.0))),
         PartitionTrihedronWeight=Int(round(something(
             _geo_option_number(context,"Mesh",0,"PartitionTrihedronWeight"),0.0))))
-    assignment=api._partition_lower_inherit(
-        api._partition_elements(actual,count;options=solver_opts),actual)
+    # Gmsh's METIS run (APIMetisGmsh.jl) under its default settings.
+    gmsh_metis=class!==nothing && solver_opts.MetisAlgorithm==1 &&
+        solver_opts.MetisEdgeMatching==2 && solver_opts.MetisMaxLoadImbalance<0 &&
+        solver_opts.MetisObjective==1
+    assignment=gmsh_metis ? api._mg_gmsh_partition_assignment(actual,class,count) :
+        api._partition_lower_inherit(
+            api._partition_elements(actual,count;options=solver_opts),actual)
     # `Mesh.PartitionCreatePhysicals` gates the `_part{..}_physical{X}_dim{d}`
     # naming pass inside the production plans; scope the `.geo` context value
     # into the session option for the duration of the call.
