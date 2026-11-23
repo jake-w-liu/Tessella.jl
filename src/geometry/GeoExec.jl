@@ -6103,7 +6103,9 @@ function _geo_occ_apply_transform!(m::GeoModel,entities,t::Model._AffineTransfor
         _geo_occ_bind_entities!(m,_geo_occ_lazy_owners(m,entities,kernel),
                                 kernel,caller)
         _geo_occ_bind_entities!(m,entities,kernel,caller)
-        Model._model_occ_transform!(m,entities,t,caller)
+        # `Dilate` and `Symmetry` are `BRepBuilderAPI_GTransform`s upstream
+        Model._model_occ_transform!(m,entities,t,caller;
+            gtransform=what in ("dilate","apply symmetry to"))
     catch err
         err isa InterruptException && rethrow()
         err isa ArgumentError || rethrow()

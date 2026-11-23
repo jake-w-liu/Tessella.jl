@@ -67,6 +67,26 @@ _occ_xp_same_plane(p,q)=p!==nothing && q!==nothing &&
 
 # What the rebuild needs of the solid before the blend: its explorer orders,
 # its planes and its vertex positions (the old shapes may be released).
+struct _OCCExplorerSnapshot
+    faces::Vector{UInt64}
+    fedges::Dict{UInt64,Vector{UInt64}}
+    everts::Dict{UInt64,Vector{UInt64}}
+    efaces::Dict{UInt64,Vector{UInt64}}
+    estart::Dict{UInt64,UInt64}
+    vpos::Dict{UInt64,NTuple{3,Float64}}
+    plane::Dict{UInt64,Any}
+    pgeom::Dict{UInt64,Any}
+    frev::Dict{UInt64,Bool}
+end
+
+# A blend face: the old edge it blends and its edges along the edge's first
+# and second face.
+struct _OCCBlendSource
+    src::UInt64
+    S1::Vector{UInt64}
+    S2::Vector{UInt64}
+end
+
 function _occ_explorer_snapshot(kernel,vid)
     faces=_occ_xp_faces(kernel,vid)
     fedges=Dict{UInt64,Vector{UInt64}}()
@@ -98,8 +118,8 @@ function _occ_explorer_snapshot(kernel,vid)
             end
         end
     end
-    return (faces=faces,fedges=fedges,everts=everts,efaces=efaces,
-            estart=estart,vpos=vpos,plane=plane,pgeom=pgeom,frev=frev)
+    return _OCCExplorerSnapshot(faces,fedges,everts,efaces,estart,vpos,plane,
+                                pgeom,frev)
 end
 
 # Order the blended solid `vid` as OpenCASCADE's builder does, from the solid
@@ -107,7 +127,7 @@ end
 # the new explorer orders, puts the shell's faces in that order, starts each
 # rebuilt wire at its face's first edge, and returns the shapes in the order
 # `_multiBind` numbers them (for `_occ_retag_result!`).
-function _occ_explorer_rebuild!(kernel,old,vid,blended)
+function _occ_explorer_rebuild!(kernel,old::_OCCExplorerSnapshot,vid,blended)
     faces=_occ_xp_faces(kernel,vid)
     oldset=Set(old.faces)
     fmatch=Dict{UInt64,Union{Nothing,UInt64}}()
@@ -171,7 +191,7 @@ function _occ_explorer_rebuild!(kernel,old,vid,blended)
     end
     # blend faces: their blended edge, end edges and edges along the blend
     forder=Dict{UInt64,Vector{UInt64}}()
-    bsrc=Dict{UInt64,Any}()
+    bsrc=Dict{UInt64,_OCCBlendSource}()
     for f in faces
         fmatch[f]===nothing || continue
         nb=Dict(e=>[fmatch[h] for h in efaces[e] if h!=f] for e in wedges[f])
@@ -186,7 +206,7 @@ function _occ_explorer_rebuild!(kernel,old,vid,blended)
         along(e,g)=g in nb[e]
         S1=[e for e in wedges[f] if along(e,g1)]
         S2=[e for e in wedges[f] if along(e,g2) && !(e in S1)]
-        bsrc[f]=(src=src,S1=S1,S2=S2)
+        bsrc[f]=_OCCBlendSource(src,S1,S2)
         ends=[e for e in wedges[f] if !(e in S1) && !(e in S2)]
         # which end of the blended edge an end edge sits at, and whether it
         # meets another blend there (a corner) or a face of the solid
@@ -303,7 +323,7 @@ function _occ_explorer_rebuild!(kernel,old,vid,blended)
         kernel.explorer[e]=vorder[e]
     end
     frev_new=_occ_xp_orient!(kernel,old,faces,oldset,fmatch,ematch,efaces,
-                             vorder,bsrc,verts)
+                             vorder,bsrc)
     # the shell in explorer order; each rebuilt wire from its first edge
     for sh in kernel.shapes[vid].children
         g=kernel.shapes[sh].geometry
@@ -340,10 +360,11 @@ end
 #   points into the solid;
 # - every wire turns counterclockwise about its plane's normal.
 # Returns the new shell orientation of each reoriented face.
-function _occ_xp_orient!(kernel,old,faces,oldset,fmatch,ematch,efaces,vorder,
-                         bsrc,verts)
+function _occ_xp_orient!(kernel,old::_OCCExplorerSnapshot,faces,oldset,fmatch,
+                         ematch,efaces,vorder,bsrc)
     caller="OCC.fillet"
     pos(v)=kernel.shapes[v].geometry.point
+    verts(e)=unique(kernel.shapes[e].children)
     isplane(h)=_occ_xp_plane(kernel,h)!==nothing
     for e in keys(efaces)
         sh=kernel.shapes[e]; g=sh.geometry.geometry

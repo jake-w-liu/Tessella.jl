@@ -531,26 +531,25 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
     # start.
     fresh=!ruled && nsec>=3
     sec_ids=Dict{Tuple{Int,Int},UInt64}(); sec_tags=Dict{Tuple{Int,Int},Int}()
+    seam_ids=zeros(UInt64,nseams); seam_tags=zeros(Int,nseams)
     if fresh
-        seam_ids=zeros(UInt64,nseams); seam_tags=zeros(Int,nseams)
-        function draw_seam!(c)
-            seam_ids[c]==0 || return
-            seam_ids[c]=_model_occ_sweep_id!(sw,kernel)
-            seam_tags[c]=_model_occ_sweep_tag!(sw,kernel,1)
-        end
-        function draw_sec!(j,k)
-            sec_ids[(j,k)]=_model_occ_sweep_id!(sw,kernel)
-            sec_tags[(j,k)]=_model_occ_sweep_tag!(sw,kernel,1)
-        end
         for k in 1:ne
-            draw_sec!(1,k)
-            draw_seam!(k==ne ? (closed[1] ? 1 : ne+1) : k+1)
-            draw_sec!(nsec,k)
-            draw_seam!(k)
+            for (j,c) in ((1,k==ne ? (closed[1] ? 1 : ne+1) : k+1),(nsec,k))
+                sec_ids[(j,k)]=_model_occ_sweep_id!(sw,kernel)
+                sec_tags[(j,k)]=_model_occ_sweep_tag!(sw,kernel,1)
+                if seam_ids[c]==0
+                    seam_ids[c]=_model_occ_sweep_id!(sw,kernel)
+                    seam_tags[c]=_model_occ_sweep_tag!(sw,kernel,1)
+                end
+            end
         end
     else
-        seam_ids=UInt64[_model_occ_sweep_id!(sw,kernel) for _ in 1:nseams]
-        seam_tags=Int[_model_occ_sweep_tag!(sw,kernel,1) for _ in 1:nseams]
+        for i in 1:nseams
+            seam_ids[i]=_model_occ_sweep_id!(sw,kernel)
+        end
+        for i in 1:nseams
+            seam_tags[i]=_model_occ_sweep_tag!(sw,kernel,1)
+        end
     end
     wire_ids=UInt64[_model_occ_sweep_id!(sw,kernel) for _ in 1:nfaces+2]
     wire_tags=Int[_model_occ_sweep_tag!(sw,kernel,-1) for _ in 1:nfaces+2]

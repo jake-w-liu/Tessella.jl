@@ -521,7 +521,7 @@ function _model_occ_rebind_owned_vertex!(m::GeoModel,kernel,id,from,to,caller)
 end
 
 function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
-                               caller::AbstractString)
+                               caller::AbstractString;gtransform::Bool=false)
     kernel=m.occ_kernel
     entries=Tuple{Int,Int,UInt64}[]
     seen=Set{Tuple{Int,Int}}()
@@ -591,6 +591,18 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
                 (new,_model_occ_reflection_flips(kernel.shapes[old]) ? !rev : rev)
                 for ((new,rev),(old,_)) in
                     zip(geometry.uses,shape.geometry.uses)],))
+        end
+        if gtransform && shape.dimension in (1,2) && hasproperty(geometry,:geometry) &&
+                geometry.geometry isa NamedTuple &&
+                get(geometry,:kind,nothing)!==:degenerate &&
+                get(geometry.geometry,:occ,nothing)!==:degenerate
+            # `BRepBuilderAPI_GTransform` NURBS-converts the shape: Gmsh 4.15.2
+            # types every curve TrimmedCurve and every face BSpline surface
+            # after a mirror, dilation or affine map (also a similarity, also
+            # a line or a plane); the records stay exact
+            geometry=merge(geometry,(geometry=merge(geometry.geometry,
+                (native_type=shape.dimension==1 ? "TrimmedCurve" :
+                                                  "BSpline surface",)),))
         end
         newshapes[remap[id]]=_ModelOCCShape(shape.dimension,geometry,
             UInt64[remap[c] for c in shape.children])
@@ -773,14 +785,14 @@ end
 function _model_occ_dilate!(m::GeoModel,dim_tags,x,y,z,a,b,c)
     caller="OCC.dilate"
     t=_affine_dilation((x,y,z),(a,b,c),caller)
-    _model_occ_transform!(m,dim_tags,t,caller)
+    _model_occ_transform!(m,dim_tags,t,caller;gtransform=true)
     return nothing
 end
 
 function _model_occ_mirror!(m::GeoModel,dim_tags,a,b,c,d)
     caller="OCC.mirror"
     t=_affine_symmetry(a,b,c,d,caller)
-    _model_occ_transform!(m,dim_tags,t,caller)
+    _model_occ_transform!(m,dim_tags,t,caller;gtransform=true)
     return nothing
 end
 
@@ -802,7 +814,7 @@ function _model_occ_affine_transform!(m::GeoModel,dim_tags,matrix)
     loc=(entries[4],entries[8],entries[12])
     t=_AffineTransform(linear,loc,NTuple{16,Float64}[],
                        (linear=linear,loc=loc))
-    _model_occ_transform!(m,dim_tags,t,caller)
+    _model_occ_transform!(m,dim_tags,t,caller;gtransform=true)
     return nothing
 end
 

@@ -896,8 +896,27 @@ end
 # so touching them in that order fixes the tags.
 function _model_occ_revol_edge_order!(sw,kernel,edge_id,p,n,a,Ma,loca,spec,
                                       caller)
+    # A vertex on the axis sweeps a degenerate edge, in its place in that
+    # order (shell_sewing.geo's cone: degenerate 104 then circle 105) —
+    # unless the edge is radial and its swept face a plane, which has none.
+    ch=kernel.shapes[edge_id].children
+    radial=false
+    if kernel.shapes[edge_id].geometry.kind===:line && length(ch)==2
+        pa=kernel.shapes[ch[1]].geometry.point
+        pb=kernel.shapes[ch[2]].geometry.point
+        radial=abs(_model_occ_revol_rh(pa,p,n)[2]-
+                   _model_occ_revol_rh(pb,p,n)[2])<=
+            _OCC_CONFUSION*max(1.0,_occ_modulus(_arc_sub(pb,pa)))
+    end
     for vid in kernel.shapes[edge_id].children
-        _model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
+        id=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
+        if id==0 && !radial && !haskey(sw.lmap,vid)
+            # reserve the degenerate edge's tag; `_model_occ_revol_apex!`
+            # binds it
+            rid=_model_occ_sweep_id!(sw,kernel)
+            sw.tags[rid]=_model_occ_sweep_tag!(sw,kernel,1)
+            sw.lmap[vid]=rid
+        end
     end
     a==_OCC_TWO_PI || _model_occ_revol_top_edge!(
         sw,kernel,edge_id,p,n,Ma,loca,spec,caller)
@@ -935,8 +954,14 @@ end
 # the producer convention binds the collapsed meridian limit to the
 # (shared) profile vertex. Partial sweeps collapse over `[0,a]`.
 function _model_occ_revol_apex!(sw,kernel,vid,face_geometry,a,caller)
-    id=_model_occ_sweep_id!(sw,kernel)
-    tag=_model_occ_sweep_tag!(sw,kernel,1)
+    # a tag reserved in OCC's edge order (`_model_occ_revol_edge_order!`)
+    rid=get(sw.lmap,vid,zero(UInt64))
+    if rid!=0 && !haskey(sw.shapes,rid) && haskey(sw.tags,rid)
+        id=rid; tag=sw.tags[rid]
+    else
+        id=_model_occ_sweep_id!(sw,kernel)
+        tag=_model_occ_sweep_tag!(sw,kernel,1)
+    end
     _model_occ_sweep_bind!(sw,1,tag,id,
         _ModelOCCShape(1,(kind=:degenerate,
             geometry=(occ=:degenerate,t0=0.0,t1=a,
@@ -1175,15 +1200,23 @@ function _model_occ_revol_spline!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     return face_id
 end
 
+# The profile edge's trace on its surface of revolution: u fixed at the
+# seam's angle, v the profile's normalized parameter (`_loft_umap_pcurve`
+# with the two coordinates exchanged).
+function _occ_revol_seam_pcurve(umap,u_side)
+    umap[1]===:lin && return (lin2d=((u_side,umap[2]),(0.0,umap[3])),)
+    return (tan2dv=(umap[2],u_side,umap[3],umap[4]),)
+end
+
 # Surface of revolution of a conic (or other NURBS-convertible) profile edge
-# that is not itself a B-spline record: the exact tensor product of the
-# edge's rational form (u, on the normalized parameter the loft uses) and
-# each pole's rational circle (v, the ring's parameter, equal to the angle at
-# its knots). The profile edge and its rotated copy are u-traces through the
-# conic chart, the rims v-traces through the ring's. Wire, CCW in (u,v): the
-# profile, the end-vertex rim, the rotated copy reversed, the start-vertex
-# rim reversed; a full turn uses the profile on both v sides. Gmsh's getType
-# names the face "Surface of Revolution".
+# that is not itself a B-spline record: the exact tensor product of each
+# pole's rational circle (u, the ring's parameter, equal to the angle at its
+# knots) and the edge's rational form (v, on the normalized parameter the
+# loft uses). The profile edge and its rotated copy are v-traces through the
+# conic chart, the rims u-traces through the ring's. Wire as for the B-spline
+# profiles: start-vertex rim, the rotated copy, the end-vertex rim reversed,
+# the profile reversed; a full turn uses the profile on both u sides. Gmsh's
+# getType names the face "Surface of Revolution".
 function _model_occ_revol_curved!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     haskey(sw.fmap,src_id) && return sw.fmap[src_id]
     source=kernel.shapes[src_id]
@@ -1191,54 +1224,61 @@ function _model_occ_revol_curved!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
     profile,um=_loft_edge_nc(g,false,caller)
     a_id,b_id=source.children
     full=a==_OCC_TWO_PI
-    vals,qs,ws,V,vrep=_occ_nurbs_conic_axis(0.0,a)
-    nu,nv=length(profile.controls),length(vals)
+    # OpenCASCADE's `Geom_SurfaceOfRevolution` layout, as for the B-spline
+    # profiles above: u the angle (the ring's rational parameter), v the
+    # profile's (normalized) parameter. Profile-major u/v made the face's
+    # normal and parametrization the transpose of Gmsh's (examples/boolean/
+    # shell_sewing.geo then sewed its shell the other way round).
+    vals,qs,ws,U,urep=_occ_nurbs_conic_axis(0.0,a)
+    nu,nv=length(vals),length(profile.controls)
     controls=Matrix{NTuple{3,Float64}}(undef,nu,nv)
     W=Matrix{Float64}(undef,nu,nv)
-    for i in 1:nu
-        _,h,radial=_model_occ_revol_rh(profile.controls[i],p,n)
+    for j in 1:nv
+        _,h,radial=_model_occ_revol_rh(profile.controls[j],p,n)
         on_axis=_occ3_add(p,_occ3_scale(n,h))
         side=_occ_cross(n,radial)
-        for j in 1:nv
-            sn,cs=_gm_sincos(vals[j])
-            controls[i,j]=ntuple(k->fma(qs[j]*cs,radial[k],
-                fma(qs[j]*sn,side[k],on_axis[k])),3)
-            W[i,j]=profile.weights[i]*ws[j]
+        for i in 1:nu
+            sn,cs=_gm_sincos(vals[i])
+            controls[i,j]=ntuple(k->fma(qs[i]*cs,radial[k],
+                fma(qs[i]*sn,side[k],on_axis[k])),3)
+            W[i,j]=ws[i]*profile.weights[j]
         end
     end
     patch=_ModelNURBSSurface(:bspline,NURBS.NURBSSurface(
-        profile.degree,2,copy(profile.knots),V,controls,W))
-    tag_of=id->_model_occ_sweep_tag_of(sw,kernel,id,caller)
+        2,profile.degree,U,copy(profile.knots),controls,W))
     pcurves=Dict{Int,NamedTuple}()
     geometry=(occ=:tensor_bspline,patch=patch,pcurves=pcurves,
               vertex_uv=Dict{Int,NTuple{2,Float64}}(),reversed=false,
               native_type="Surface of Revolution")
     rims=UInt64[]
-    for (vid,uside) in ((a_id,0.0),(b_id,1.0))
+    for (vid,vside) in ((a_id,0.0),(b_id,1.0))
         rho,_,_=_model_occ_revol_rh(kernel.shapes[vid].geometry.point,p,n)
         if rho<=_OCC_CONFUSION
             eid=_model_occ_revol_apex!(sw,kernel,vid,geometry,a,caller)
-            trace=(lin2d=((uside,0.0),(0.0,1.0)),)
+            trace=(lin2d=((0.0,vside),(1.0,0.0)),)
         else
             eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
-            trace=(brep_conversion2d=((lin2d=((uside,0.0),(0.0,1.0)),),
-                                      nothing,(u=nothing,v=vrep)),)
+            trace=(brep_conversion2d=((lin2d=((0.0,vside),(1.0,0.0)),),
+                                      nothing,(u=urep,v=nothing)),)
         end
-        pcurves[tag_of(eid)]=(fwd=trace,rev=trace)
+        pcurves[_model_occ_sweep_tag_of(sw,kernel,eid,caller)]=
+            (fwd=trace,rev=trace)
         push!(rims,eid)
     end
     rot_id=full ? src_id :
         _model_occ_revol_top_edge!(sw,kernel,src_id,p,n,Ma,loca,spec,caller)
-    at_start=_loft_umap_pcurve(um,0.0)
-    at_end=_loft_umap_pcurve(um,a)
+    at_start=_occ_revol_seam_pcurve(um,0.0)
+    at_end=_occ_revol_seam_pcurve(um,a)
+    src_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
     if full
-        pcurves[tag_of(src_id)]=(fwd=at_start,rev=at_end)
+        pcurves[src_tag]=(fwd=at_end,rev=at_start)
     else
-        pcurves[tag_of(src_id)]=(fwd=at_start,rev=at_start)
-        pcurves[tag_of(rot_id)]=(fwd=at_end,rev=at_end)
+        pcurves[src_tag]=(fwd=at_start,rev=at_start)
+        pcurves[_model_occ_sweep_tag_of(sw,kernel,rot_id,caller)]=
+            (fwd=at_end,rev=at_end)
     end
-    wire=Tuple{UInt64,Bool}[(src_id,false),(rims[2],false),(rot_id,true),
-                            (rims[1],true)]
+    wire=Tuple{UInt64,Bool}[(rims[1],false),(rot_id,false),(rims[2],true),
+                            (src_id,true)]
     wire_id=_model_occ_sweep_id!(sw,kernel)
     wire_tag=_model_occ_sweep_tag!(sw,kernel,-1)
     _model_occ_sweep_bind!(sw,-1,wire_tag,wire_id,
@@ -1363,6 +1403,7 @@ function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
                                    caller)
     top_tag=_model_occ_sweep_tag_of(sw,kernel,top_eid,caller)
     face_tag=_model_occ_sweep_tag_of(sw,kernel,face_id,caller)
+    full && _model_occ_revol_explorer!(sw,kernel,face_id,src_id)
     laterals=Int[]
     for vid in (a_id,b_id)
         eid=_model_occ_revol_rim!(sw,kernel,vid,p,n,a,Ma,loca,spec,caller)
@@ -1373,6 +1414,23 @@ function _model_occ_revol_line!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
             _model_occ_sweep_tag_of(sw,kernel,eid,caller))
     end
     return top_tag,face_tag,laterals
+end
+
+# `TopExp_Explorer` order of a full-turn face of revolution (what a later
+# sewing or blend renumbers from): the parallel swept by the profile's start
+# vertex, the one swept by its end vertex, then the profile as the seam — the
+# order its edges take their tags in.
+function _model_occ_revol_explorer!(sw,kernel,face_id,src_id)
+    face=_model_occ_sweep_shape_of(sw,kernel,face_id)
+    a_id,b_id=kernel.shapes[src_id].children
+    edges=UInt64[u for w in face.children
+                 for (u,_) in _model_occ_sweep_shape_of(sw,kernel,w).geometry.uses]
+    rim(v)=findfirst(e->e!=src_id &&
+        v in _model_occ_sweep_shape_of(sw,kernel,e).children,edges)
+    ia=rim(a_id); ib=rim(b_id)
+    (ia===nothing || ib===nothing || ia==ib) && return nothing
+    kernel.explorer[face_id]=UInt64[edges[ia],edges[ib],src_id]
+    return nothing
 end
 
 # dim-2 disk input: a full-circle profile in an axial plane at radius
@@ -1563,10 +1621,11 @@ function _model_occ_revol_planar!(sw,kernel,src_id,p,n,a,Ma,loca,spec,
             fid=_model_occ_revol_curved!(sw,kernel,edge_id,p,n,a,Ma,loca,
                                          spec,caller)
             rec=_model_occ_sweep_shape_of(sw,kernel,fid).geometry.geometry
-            pm,du,dv=_occ_surface_d1(rec,0.5,a/2)
+            # (u the angle, v the profile's normalized parameter)
+            pm,du,dv=_occ_surface_d1(rec,a/2,0.5)
             # outward at the profile point: the in-plane outward of the
             # edge's traversal, rotated with the sweep
-            _,pdu,_=_occ_surface_d1(rec,0.5,0.0)
+            _,_,pdu=_occ_surface_d1(rec,0.0,0.5)
             o_edge=_occ_crossed(_occ_dir(rev ? _occ3_scale(pdu,-1.0) : pdu),
                                 face_axis)
             # rotate o_edge by a/2 about the axis

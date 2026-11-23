@@ -230,52 +230,80 @@ function _model_occ_sew_surface_loop!(m::GeoModel,face_ids,allocated,caller)
         eid in members || push!(members,eid)
         match==0 && push!(reps,eid)
     end
-    # Upstream recursive-bind order: per member face — face tag, wire
-    # tags, then its unique edges (each followed by its own vertices).
+    # What the sewing changes (Gmsh 4.15.2 keeps the tags of the rest): a
+    # vertex group with several members or on a welded edge becomes a new
+    # vertex; a welded edge, or one ending at a new vertex, a new edge; a
+    # face with a new edge a new face (two rectangles sewn along a common
+    # side: new points 9-10, curves 9-13, faces 3-4, the far sides keep
+    # theirs; faces that already share their edges come back unchanged).
+    vmembers=Dict{UInt64,Vector{UInt64}}()
+    for v in vertices
+        push!(get!(vmembers,vfind(v),UInt64[]),v)
+    end
+    welded(r)=length(emembers[r])>1
+    vchanged=Dict{UInt64,Bool}(g=>length(ms)>1 for (g,ms) in vmembers)
+    for r in reps
+        welded(r) || continue
+        for c in shapes[r].children
+            vchanged[vfind(c)]=true
+        end
+    end
+    echanged=Dict{UInt64,Bool}(r=>welded(r) ||
+        any(c->vchanged[vfind(c)],shapes[r].children) for r in reps)
+    fchanged=[any(echanged[erep[e]] for uses in member_wires[fi] for (e,_) in uses)
+              for fi in eachindex(face_ids)]
     nfaces=length(face_ids)
     nwires=sum(length,member_wires)
-    ngroups_v=length(Set(vfind(v) for v in vertices))
-    count=nfaces+nwires+length(reps)+ngroups_v+1
+    count=nfaces+nwires+length(reps)+length(vmembers)+1
     kernel.maxima[5]<=typemax(Int32)-nfaces || throw(ArgumentError(
         "$caller: OCC surface tag allocation exceeds Int32"))
     kernel.maxima[2]<=typemax(Int32)-nwires || throw(ArgumentError(
         "$caller: OCC wire tag allocation exceeds Int32"))
     kernel.maxima[4]<=typemax(Int32)-length(reps) || throw(ArgumentError(
         "$caller: OCC curve tag allocation exceeds Int32"))
-    kernel.maxima[3]<=typemax(Int32)-ngroups_v || throw(ArgumentError(
+    kernel.maxima[3]<=typemax(Int32)-length(vmembers) || throw(ArgumentError(
         "$caller: OCC vertex tag allocation exceeds Int32"))
     ids=_model_occ_reserve_shapes(kernel,count,caller)
-    cursor=0
-    take!()=(cursor+=1; ids[cursor])
-    vnew=Dict{UInt64,Tuple{UInt64,Int}}()   # vertex group rep → (id, tag)
-    enew=Dict{UInt64,Tuple{UInt64,Int}}()   # edge group rep → (id, tag)
-    epos=Dict{UInt64,Int}()                 # edge group rep → pending index
+    cursor=Ref(0)
+    take!()=(cursor[]+=1; ids[cursor[]])
+    # group → (id, tag): new shapes, or the kept member and its own tag
+    vnew=Dict{UInt64,Tuple{UInt64,Int}}()
+    enew=Dict{UInt64,Tuple{UInt64,Int}}()
+    for (g,ms) in vmembers
+        vchanged[g] || (vnew[g]=(only(ms),_model_occ_shape_tag(kernel,only(ms),caller)))
+    end
+    for r in reps
+        echanged[r] || (enew[r]=(r,_model_occ_shape_tag(kernel,r,caller)))
+    end
+    epos=Dict{UInt64,Int}()                 # new edge group rep → pending index
     pending=Tuple{Int,Int,UInt64,_ModelOCCShape}[]
     # Per-face plan entries: (member index, face tag, new face id,
-    # [(wire tag, new wire id) per wire]).
+    # [(wire tag, new wire id) per wire]) for the faces the sewing rebuilds.
     plans=Tuple{Int,Int,UInt64,Vector{Tuple{Int,UInt64}}}[]
     new_face_ids=UInt64[]
     c0=kernel.maxima[3]; c1=kernel.maxima[4]
     cw=kernel.maxima[2]; cf=kernel.maxima[5]
     for (fi,fid) in enumerate(face_ids)
+        if !fchanged[fi]
+            push!(new_face_ids,fid)
+            continue
+        end
         cf+=1
         fid_new=take!(); push!(new_face_ids,fid_new)
         wplan=Tuple{Int,UInt64}[]
         for _ in member_wires[fi]
             cw+=1; push!(wplan,(cw,take!()))
         end
-        # Unique edge groups in first-use order across this face's wires;
-        # each edge binds its welded endpoint vertices inside its own
-        # recursion, exactly like upstream `bind(edge)`.
-        seen=Set{UInt64}()
-        for uses in member_wires[fi], (eid,_) in uses
+        # New edges in the face's explorer order, each binding its new
+        # endpoint vertices in the edge's own order (upstream `bind(edge)`).
+        for eid in _occ_xp_edges(kernel,fid)
+            haskey(erep,eid) || continue
             r=erep[eid]
-            r in seen || push!(seen,r)
             haskey(enew,r) && continue
             c1+=1
             enew[r]=(take!(),c1)
             cids=UInt64[]
-            for cv in shapes[r].children
+            for cv in _occ_xp_vertices(kernel,r)
                 g=vfind(cv)
                 if !haskey(vnew,g)
                     c0+=1
@@ -285,7 +313,9 @@ function _model_occ_sew_surface_loop!(m::GeoModel,face_ids,allocated,caller)
                         (point=vg.point,
                          mesh_size=get(vg,:mesh_size,0.0)),UInt64[])))
                 end
-                push!(cids,vnew[g][1])
+            end
+            for cv in shapes[r].children
+                push!(cids,vnew[vfind(cv)][1])
             end
             push!(pending,(1,c1,enew[r][1],_ModelOCCShape(1,
                 (kind=shapes[r].geometry.kind,
@@ -298,12 +328,14 @@ function _model_occ_sew_surface_loop!(m::GeoModel,face_ids,allocated,caller)
     # re-key onto the welded edge tags under the member's parameter map
     # (shift for aligned members, reversal for flipped ones).
     new_geos=Dict{Int,Any}()
+    new_uses=Dict{Int,Vector{Tuple{UInt64,Bool}}}()
     for (fi,ftag,fid_new,wplan) in plans
         new_wire_ids=UInt64[]
         for (wi,(wtag,wid)) in enumerate(wplan)
             uses=member_wires[fi][wi]
             nuses=Tuple{UInt64,Bool}[(enew[erep[e]][1],xor(rev,eflip[e]))
                                      for (e,rev) in uses]
+            append!(get!(new_uses,fi,Tuple{UInt64,Bool}[]),nuses)
             push!(pending,(-1,wtag,wid,_ModelOCCShape(-1,(uses=nuses,),
                 UInt64[first(u) for u in nuses])))
             push!(new_wire_ids,wid)
@@ -359,6 +391,7 @@ function _model_occ_sew_surface_loop!(m::GeoModel,face_ids,allocated,caller)
         hasproperty(g,:face) || continue
         owner=typemax(Int)
         for e in emembers[r], fi in edge_faces[e]
+            haskey(new_geos,fi) || continue
             fg=shapes[face_ids[fi]].geometry.geometry
             hasproperty(fg,:pcurves) || continue
             haskey(fg.pcurves,_model_occ_shape_tag(kernel,e,caller)) ||
@@ -366,17 +399,42 @@ function _model_occ_sew_surface_loop!(m::GeoModel,face_ids,allocated,caller)
             fi<owner && (owner=fi)
         end
         owner==typemax(Int) && (owner=minimum(
-            fi for e in emembers[r] for fi in edge_faces[e]))
+            (fi for e in emembers[r] for fi in edge_faces[e]
+             if haskey(new_geos,fi));init=typemax(Int)))
+        owner==typemax(Int) && continue
         pending[idx]=(d,t,i,_ModelOCCShape(1,
             (kind=s.geometry.kind,geometry=merge(g,(face=new_geos[owner],))),
             s.children))
     end
+    # `BRepBuilderAPI_Sewing` orients the shell's faces consistently from
+    # the first one: a face is used reversed when it walks a welded edge the
+    # same way as its neighbour (shell_sewing.geo: [3, -4], an inside-out
+    # shell of volume -5.236 in Gmsh 4.15.2).
+    face_uses(fi)=haskey(new_uses,fi) ? new_uses[fi] :
+        Tuple{UInt64,Bool}[(enew[erep[e]][1],xor(rev,eflip[e]))
+                           for uses in member_wires[fi] for (e,rev) in uses]
+    flag=Dict{Int,Bool}(1=>false)
+    queue=[1]
+    while !isempty(queue)
+        fa=popfirst!(queue)
+        ua=Dict{UInt64,Bool}()
+        for (e,r) in face_uses(fa); ua[e]=r; end
+        for fb in eachindex(face_ids)
+            haskey(flag,fb) && continue
+            for (e,r) in face_uses(fb)
+                haskey(ua,e) || continue
+                da=xor(ua[e],flag[fa])
+                flag[fb]=xor(!da,r)
+                push!(queue,fb)
+                break
+            end
+        end
+    end
     sid=take!()
-    suse=Tuple{UInt64,Bool}[(f,false) for f in new_face_ids]
+    suse=Tuple{UInt64,Bool}[(f,get(flag,fi,false))
+                            for (fi,f) in enumerate(new_face_ids)]
     push!(pending,(-2,allocated,sid,
         _ModelOCCShape(-2,(uses=suse,),new_face_ids)))
-    cursor==count || throw(ArgumentError(
-        "$caller: internal sewn-graph accounting mismatch"))
     for (d,t,i,s) in pending
         _model_occ_bind_shape!(kernel,d,t,i,s)
     end

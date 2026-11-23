@@ -121,7 +121,16 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller;
         if shape.dimension==1
             record=shape.geometry
             converted=_model_occ_nurbs_curve_record(record.geometry,caller)
-            converted===record.geometry && continue
+            # a converted edge is a B-spline whatever Gmsh typed it before
+            # (a mirrored line's TrimmedCurve)
+            if converted===record.geometry
+                hasproperty(converted,:native_type) &&
+                    (staged[id]=merge(record,(geometry=Base.structdiff(
+                        converted,(native_type=nothing,)),)))
+                continue
+            end
+            hasproperty(converted,:native_type) &&
+                (converted=Base.structdiff(converted,(native_type=nothing,)))
             staged[id]=merge(record,(kind=:tensor_bspline,geometry=converted))
             source=get(record.geometry,:curve,nothing)
             source isa _ModelOCCHyperbolaCurve &&
@@ -132,7 +141,14 @@ function _model_occ_convert_to_nurbs!(m::GeoModel,dim_tags,caller;
         elseif shape.dimension==2
             record=shape.geometry
             converted=_model_occ_nurbs_surface_record(record.geometry,caller)
-            converted===record.geometry && continue
+            if converted===record.geometry
+                hasproperty(converted,:native_type) &&
+                    (staged[id]=merge(record,(geometry=Base.structdiff(
+                        converted,(native_type=nothing,)),)))
+                continue
+            end
+            hasproperty(converted,:native_type) &&
+                (converted=Base.structdiff(converted,(native_type=nothing,)))
             staged[id]=merge(record,(geometry=converted,))
             mappings=get(converted,:analytic_chart,_occ_hyperbolic_surface_maps(record.geometry))
             mappings==(u=nothing,v=nothing) || (surface_maps[id]=mappings)

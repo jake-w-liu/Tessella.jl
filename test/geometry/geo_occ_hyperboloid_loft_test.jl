@@ -3,9 +3,9 @@
 # - A plane face bounded by lines and a spline, one line on the axis, revolved
 #   a full turn: the OCC revolve rejected the spline edge and the statement
 #   fell back to the built-in sweep (a Volume of mass 0, the profile kept).
-#   Gmsh: 2 disks and a "Surface of Revolution", volume 16.75519028 by
-#   OpenCASCADE's GProp, 16.7551738395 by 2000x20-point Gauss quadrature of
-#   pi*x^2 dy on the spline; Tessella gives the latter.
+#   Gmsh: 2 disks and a "Surface of Revolution". (hyperboloid.geo's 20-point
+#   spline: volume 16.75519028 by OpenCASCADE's GProp, 16.7551738395 by
+#   2000x20-point Gauss quadrature of pi*x^2 dy; Tessella gives the latter.)
 # - A smooth loft through three sections or more bounds its face with new
 #   B-spline edges at the first and last section (the section curves stay
 #   free); Tessella reused the section curves.
@@ -31,25 +31,26 @@ end
     try
         m = opened("""
             SetFactory("OpenCASCADE");
-            For i In {0:19}
-              u = -1 + 2 / 19 * i;
+            For i In {0:4}
+              u = -1 + 2 / 4 * i;
               Point(1+i) = {Sqrt(1 + u^2), 2 * u, 0};
             EndFor
             Point(100) = {0, -2, 0};
             Point(101) = {0, 2, 0};
             Line(1) = {100, 1};
-            Spline(2) = {1:20};
-            Line(3) = {20, 101};
+            Spline(2) = {1:5};
+            Line(3) = {5, 101};
             Line(4) = {101, 100};
             Curve Loop(1) = {1:4};
             Plane Surface(1) = {1};
             Extrude{{0,1,0}, {0,0,0}, 2*Pi} { Surface{1}; }
             """)
-        @test [length(m.get_entities(d)) for d in 0:3] == [22, 6, 4, 1]
+        @test [length(m.get_entities(d)) for d in 0:3] == [7, 6, 4, 1]
         @test m.get_type(1, 2) == "BSpline"
         @test [m.get_type(2, t) for t in 2:4] ==
             ["Plane", "Surface of Revolution", "Plane"]
-        @test m.occ.get_mass(3, 1) ≈ 16.7551738395 rtol=1e-9
+        # Gauss quadrature of pi*x^2 dy on the spline; Gmsh 16.7332366562
+        @test m.occ.get_mass(3, 1) ≈ 16.7332366424 rtol=1e-9
     finally
         A.finalize()
     end
