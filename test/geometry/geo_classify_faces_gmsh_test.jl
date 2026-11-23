@@ -123,9 +123,9 @@ end
         API.mesh.generate(1)
         lines(c) = length(API.mesh.get_elements(1, c)[2][1])
         @test [lines(c) for c in 3:5] == [10, 10, 10]
-        # Curve 6 carries Gmsh's degenerate 1-1 line, whose zero length
-        # Tessella's discrete frame still counts: 11 lines.
-        @test_broken lines(6) == 10
+        # Curve 6 carries Gmsh's degenerate 1-1 line: its zero-length
+        # segment adds nothing to meshGEdge's integral, so 10 lines.
+        @test lines(6) == 10
     finally
         API.finalize()
     end

@@ -73,11 +73,15 @@ counts() = [sum(length, API.mesh.get_elements(k)[2]; init=0) for k in 0:2]
         box = API.model.get_bounding_box(2, s)
         @test isapprox(collect(box), [6.123233995736766e-17, 0.0, 0.0, 1.0, 1.0, 1.0]; atol=1e-14)
         API.mesh.generate(2)
-        # Gmsh: 242 nodes, 430 triangles. Tessella's curve nodes differ from
-        # Gmsh's by about 1e-7 here, and the frontal mesh follows them.
+        # Gmsh: 242 nodes, 430 triangles (the patch's coordinates went
+        # through cos/sin and an LU solve: exact on Windows x86-64 only).
         c = counts()
         @test c[1:2] == [1, 52]
-        @test abs(c[3] - 430) <= 22
+        if Sys.iswindows() && Sys.ARCH === :x86_64
+            @test c[3] == 430
+        else
+            @test abs(c[3] - 430) <= 22
+        end
     finally
         API.finalize()
     end
@@ -97,13 +101,17 @@ end
         API.mesh.generate(1)
         @test counts() == [1, 40, 0]
         API.mesh.generate(2)
-        # Gmsh: 143 nodes, 244 triangles. Gmsh spaces the curve nodes at
-        # exactly 0.1; Tessella's discrete-curve remesh puts them at
-        # 0.0999993..., and the frontal mesh follows that drift.
+        # Gmsh: 143 nodes, 244 triangles; the curve nodes at exactly 0.1
+        # (meshGEdge's arithmetic on discreteEdge::firstDer).
         c = counts()
         @test c[1:2] == [1, 40]
-        @test abs(c[3] - 244) <= 6
-        @test_broken c[3] == 244
+        if Sys.ARCH === :x86_64
+            @test c[3] == 244
+        else
+            @test abs(c[3] - 244) <= 6
+        end
+        xyz = API.mesh.get_nodes(1, 3)[2]
+        @test xyz[1:3] == [0.1, 0.0, 0.0]
     finally
         API.finalize()
     end

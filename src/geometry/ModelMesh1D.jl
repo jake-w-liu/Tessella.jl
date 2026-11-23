@@ -1783,29 +1783,39 @@ function _model_discrete_curve_grade_params(m::GeoModel,curve::Integer,
     γ=u->_discrete_curve_point(frames,u,caller)
     field=_ModelCurveEntityField(m,options,String(caller))
     boundary=record.boundary
-    endpoints=length(boundary)>=2 ?
-        ((boundary[1][1],abs(boundary[1][2])),(boundary[2][1],abs(boundary[2][2]))) :
-        (nothing,nothing)
-    closed=!isempty(boundary) && first(boundary)[1]==last(boundary)[1] &&
-        abs(first(boundary)[2])==abs(last(boundary)[2])
     size_function=u->_model_discrete_curve_bgm(
         m,curve,u,γ(u),t0,t1,boundary,options,caller)
-    _,parameters=mesh_curve(
-        γ,field;t0=t0,t1=t1,closed=closed,
-        entity=(1,curve),endpoint_entities=endpoints,
-        size_function=size_function,
-        integration_precision=options.integration_precision*options.ctx_lc,
-        minimum_segments=_model_minimum_curve_segments(m,curve,options,caller))
-    # discreteEdge::mesh places the graded stations along the created
-    # geometry and keeps none of the old polyline vertices: t13's curves get
-    # Gmsh's 467 lines (59 on Curve 14, 235.01 long) instead of every
-    # original vertex plus the graded ones (78 lines).
-    # Same open-style storage contract as `_model_curve_grade_params`:
-    # `mesh_curve(closed=true)` leaves the closing `t1` implicit while
-    # every `curve_params` consumer holds the `[t0,…,t1]` list contract —
-    # restore the pinned endpoint, so the stored discretization re-emits its
-    # full cell set.
-    closed && parameters[end]!=t1 && push!(parameters,t1)
+    # meshGEdge on a discreteEdge, in Gmsh's arithmetic (the port the
+    # built-in and OpenCASCADE lines use): F_Lc from discreteEdge::firstDer,
+    # the segment vector, Integration's trapezoid recursion at
+    # LcIntegrationPrecision, smoothPrimitive, N = int(a + 1.99) and the
+    # NUMP inversion t = P1.t + dt/dp*(d - P1.p). The generic kernel took a
+    # difference of points for the speed and a convex combination for the
+    # inversion: a straight polyline's stations came 1e-6 off Gmsh's 0.1.
+    # A closed curve keeps both ends on its one vertex, as meshGEdge does.
+    minimum=_model_minimum_curve_segments(m,curve,options,caller)
+    evaluate=function(t,at_begin,at_end)
+        derivative=_discrete_curve_derivative(frames,t,caller)
+        speed=sqrt(derivative[1]*derivative[1]+derivative[2]*derivative[2]+
+                   derivative[3]*derivative[3])
+        h=size_function(t)
+        return _IntegrationPoint(t,speed/h,0.0,speed,h)
+    end
+    points=_gmsh_curve_integration(evaluate,t0,t1,options.integration_precision,caller)
+    local parameters
+    try
+        mass=_gmsh_curve_smooth_primitive!(points,caller)
+        nedge=_gmsh_edge_count(mass,minimum,10_000_000,caller)
+        parameters=_gmsh_curve_parameters(points,nedge+1,caller)
+    finally
+        _gmsh_curve_close_points!(points)
+    end
+    coordinates=Vector{NTuple{3,Float64}}(undef,length(parameters))
+    for index in eachindex(parameters)
+        coordinates[index]=γ(parameters[index])
+    end
+    _filter_close_points!(coordinates,parameters,γ,field,(1,curve),minimum,
+                          false,false,size_function,caller)
     return parameters
 end
 
