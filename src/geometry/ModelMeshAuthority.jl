@@ -125,15 +125,42 @@ function _model_mesh_carrier_cell_tags(mesh,carrier,bindings,caller)
     blocks=_model_mesh_carrier_blocks(carrier)
     length(bindings)==length(blocks) || throw(ArgumentError(
         "$caller: geometry carrier cell bindings do not align with its blocks"))
-    actual=Dict(tag=>msh_dimension(block.msh) for (block,tags) in
-        zip(mesh.blocks,mesh.entity_data.external_element_tags) for tag in tags)
+    table,sparse,dense=_model_mesh_label_dimensions(mesh)
     for ((msh,cells),tags) in zip(blocks,bindings)
         length(tags)==size(cells,2) || throw(ArgumentError(
             "$caller: geometry carrier cell bindings do not align with its columns"))
-        all(tag->tag===nothing || get(actual,tag,-1)==msh_dimension(msh),tags) ||
-            throw(ArgumentError("$caller: geometry carrier cell binding loses its actual identity"))
+        dimension=msh_dimension(msh)
+        for tag in tags
+            tag===nothing && continue
+            actual=dense ? (0<tag<=length(table) ? Int(table[tag]) : -1) : Int(get(sparse,tag,Int8(-1)))
+            actual==dimension || throw(ArgumentError(
+                "$caller: geometry carrier cell binding loses its actual identity"))
+        end
     end
     return bindings
+end
+
+# The dimension of the actual cell with each label (the last cell of a
+# repeated label; -1 for an absent label): `table[label]` when the labels
+# are dense, as after a renumbering (`dense`), `sparse[label]` otherwise. The
+# dictionary of every cell this replaces was the largest cost of binding an
+# imported carrier.
+function _model_mesh_label_dimensions(mesh::MixedMesh)
+    labels=mesh.entity_data.external_element_tags
+    highest=UInt64(0);lowest=typemax(UInt64);total=0
+    for block_labels in labels,label in block_labels
+        highest=max(highest,label);lowest=min(lowest,label);total+=1
+    end
+    dense=total>0 && lowest>0 && highest<=UInt64(4)*UInt64(total)+UInt64(1024)
+    table=fill(Int8(-1),dense ? Int(highest) : 0)
+    sparse=Dict{UInt64,Int8}()
+    for (block,block_labels) in zip(mesh.blocks,labels)
+        dimension=Int8(msh_dimension(block.msh))
+        for label in block_labels
+            dense ? (table[label]=dimension) : (sparse[label]=dimension)
+        end
+    end
+    return table,sparse,dense
 end
 
 function _model_mesh_rebound_cell_tags(previous,element_tag_map=nothing)
