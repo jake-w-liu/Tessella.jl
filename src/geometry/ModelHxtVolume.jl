@@ -49,7 +49,12 @@ function _model_hxt_volume(m::GeoModel,t::Int,caller;size_field=nothing,
     delete!(run.pending,t)
     isempty(run.pending) && delete!(cache[2],group)
     hm,uids=run.result
-    color=UInt32(findfirst(==(t),group)-1)
+    return _model_hxt_region(hm::Hxt.Mesh,uids::Vector{UInt64},UInt32(findfirst(==(t),group)-1),births)
+end
+
+# One Region's cells and rows of the group's HXT mesh (a function barrier:
+# the cached run is untyped).
+function _model_hxt_region(hm::Hxt.Mesh,uids::Vector{UInt64},color::UInt32,births)
     # Hxt2Gmsh: the cells of the Region in order; a vertex not on the
     # boundary becomes a new MVertex when a cell first names it. The Region's
     # rows are its own input vertices (UID order), then its new ones.
@@ -111,6 +116,43 @@ end
 # Gmsh2Hxt and hxtTetMesh for the Regions `group` (tag order): the meshed HXT
 # structure and the UIDs of its input vertices (its first rows).
 function _model_hxt_run(m::GeoModel,group::Vector{Int},caller;size_field,_mesh_input,options)
+    hm,uids=_model_hxt_input(m,group,caller;_mesh_input,options)
+    # nodalSizesCallBack: BGM_MeshSizeWithoutScaling in the point's Region
+    # (no Min/Max/factor), capped by CTX::lc, and by the interpolated size when
+    # the boundary is extended into the volume.
+    interpolate=m.meshing.lc_extend_from_boundary>0 || m.meshing.lc_extend_from_boundary==-3
+    lc_global=Float64(options.ctx_lc)
+    inner_field=options.inner_field;callback=options.callback
+    size=if inner_field===nothing && size_field===nothing && callback===nothing
+        # no field: every candidate gets CTX::lc (or the interpolated size)
+        lc=min(lc_global,Float64(GMSH_MAX_SIZE))
+        (x,y,z,interpolated,color)->interpolate && interpolated>0.0 ? min(interpolated,lc) : lc
+    else
+        function (x,y,z,interpolated,color)
+            r=group[Int(color)+1]
+            raw=inner_field!==nothing ? Float64(field_value(inner_field,x,y,z,(3,r))) :
+                size_field!==nothing ? Float64(size_at(size_field,x,y,z,(3,r))) : GMSH_MAX_SIZE
+            callback===nothing || (raw=Float64(_model_algorithm_callback(
+                callback,3,r,x,y,z,raw,caller)))
+            return (interpolate && interpolated>0.0 ? min(interpolated,min(lc_global,raw)) :
+                min(lc_global,raw))::Float64
+        end
+    end
+    recovery=hm->try
+        _model_hxt_boundary_recovery(hm)
+    catch err
+        err isa ModelNativeTetgenArena.Unsupported || rethrow()
+        throw(ArgumentError("$caller: HXT boundary recovery of Volumes $group is not supported: $(err.reason)"))
+    end
+    Hxt.tet_mesh!(hm;min_size=Float64(options.lc_min),max_size=Float64(options.lc_max),
+        factor=Float64(options.lc_factor),size_callback=size,
+        quality_min=Float64(options.optimize_threshold),optimize=options.optimize>0,
+        boundary_recovery=recovery)
+    return hm,uids
+end
+
+# Gmsh2Hxt: the HXT input of the Regions `group` and the UIDs of its rows.
+function _model_hxt_input(m::GeoModel,group::Vector{Int},caller;_mesh_input,options)
     region_faces=Dict{Int,Vector{Int}}()
     for r in group
         faces=abs.(_model_volume_boundary_surfaces(m,r,caller))
@@ -214,37 +256,6 @@ function _model_hxt_run(m::GeoModel,group::Vector{Int},caller;size_field,_mesh_i
     for s in surfaces
         push!(hm.curves_per_surface,UInt32.(surface_curves[s]))
     end
-    # nodalSizesCallBack: BGM_MeshSizeWithoutScaling in the point's Region
-    # (no Min/Max/factor), capped by CTX::lc, and by the interpolated size when
-    # the boundary is extended into the volume.
-    interpolate=m.meshing.lc_extend_from_boundary>0 || m.meshing.lc_extend_from_boundary==-3
-    lc_global=Float64(options.ctx_lc)
-    inner_field=options.inner_field;callback=options.callback
-    size=if inner_field===nothing && size_field===nothing && callback===nothing
-        # no field: every candidate gets CTX::lc (or the interpolated size)
-        lc=min(lc_global,Float64(GMSH_MAX_SIZE))
-        (x,y,z,interpolated,color)->interpolate && interpolated>0.0 ? min(interpolated,lc) : lc
-    else
-        function (x,y,z,interpolated,color)
-            r=group[Int(color)+1]
-            raw=inner_field!==nothing ? Float64(field_value(inner_field,x,y,z,(3,r))) :
-                size_field!==nothing ? Float64(size_at(size_field,x,y,z,(3,r))) : GMSH_MAX_SIZE
-            callback===nothing || (raw=Float64(_model_algorithm_callback(
-                callback,3,r,x,y,z,raw,caller)))
-            return (interpolate && interpolated>0.0 ? min(interpolated,min(lc_global,raw)) :
-                min(lc_global,raw))::Float64
-        end
-    end
-    recovery=hm->try
-        _model_hxt_boundary_recovery(hm)
-    catch err
-        err isa ModelNativeTetgenArena.Unsupported || rethrow()
-        throw(ArgumentError("$caller: HXT boundary recovery of Volumes $group is not supported: $(err.reason)"))
-    end
-    Hxt.tet_mesh!(hm;min_size=Float64(options.lc_min),max_size=Float64(options.lc_max),
-        factor=Float64(options.lc_factor),size_callback=size,
-        quality_min=Float64(options.optimize_threshold),optimize=options.optimize>0,
-        boundary_recovery=recovery)
     return hm,uids
 end
 
