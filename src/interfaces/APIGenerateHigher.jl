@@ -2029,6 +2029,9 @@ function _higher_discrete_surface_transport!(assembly,m,entities;options,
         record=get(m.discrete,(2,tag),nothing)
         (record===nothing || !record.geometry_parametrized) &&
             (continue)
+        # A stored discreteFace parametrization meshes through the ordinary
+        # Surface producer (`Model._discrete_face_mesh_model_surface`).
+        Model._discrete_face_param(m,tag)===nothing || continue
         options.mesh_only_visible &&
             model_entity_visibility(m,2,tag)==0 && continue
         owner=(2,Int32(tag))

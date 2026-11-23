@@ -271,6 +271,8 @@ function _dim01_fully_discrete(m,entity)
     # generate deletes its mesh (and cannot remesh it) while partition curves
     # and points keep theirs.
     _dim01_partition_entity(m,entity) && return false
+    # A discreteFace with a parametrization (`haveParametrization`) is not.
+    entity[1]==2 && Model._discrete_face_param(m,entity[2])!==nothing && return false
     return true
 end
 

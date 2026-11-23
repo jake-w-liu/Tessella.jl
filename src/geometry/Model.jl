@@ -7934,6 +7934,7 @@ include("ModelSurfaceAlgorithms.jl")
 include("ModelGmshSurfaceProducer.jl")
 include("ModelMetricSurfaceProducer.jl")
 include("ModelGmshSurfaceRecombine.jl")
+include("ModelDiscreteFaceParam.jl")
 include("ModelGmshFullQuad.jl")
 include("ModelGmshBipartite.jl")
 include("ModelTransfiniteSurfaceProducer.jl")
@@ -10211,6 +10212,11 @@ function mesh_model_surface(m::GeoModel,tag::Integer;min_angle_deg::Real=25.0,
     caller="mesh_model_surface"
     options=_model_algorithm_size_options(m,_mesh1d_options,caller)
     t=_tag(tag,caller,2)
+    # discreteFace::mesh on a stored parametrization (ModelDiscreteFaceParam.jl).
+    !haskey(m.surfaces,t) && _discrete_face_param(m,t)!==nothing &&
+        return _discrete_face_mesh_model_surface(m,t,caller;size_field,
+            _mesh_input,_mesh_node_high_water,_mesh_element_high_water,
+            _mesh1d_options,_return_surface_production)
     haskey(m.surfaces,t) || throw(ArgumentError(
         "$caller: unknown Surface[$t]"))
     _mesh_input===nothing && _model_require_point_mesh_geometry(m,caller)

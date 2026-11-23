@@ -1902,6 +1902,10 @@ function model_parametrization_bounds(m::GeoModel,dim,tag)
                 "$caller: discrete Curve[$entity_tag] has no geometry; run mesh.create_geometry first"))
             return [geometry.t0],[geometry.t1]
         end
+        # `discreteFace::parBounds`.
+        param=_discrete_face_param(m,entity_tag)
+        param===nothing ||
+            return [param.bounds[1],param.bounds[3]],[param.bounds[2],param.bounds[4]]
         coords=_model_record_node_coords(m)
         frames=_discrete_element_frames(
             m,record,dimension,coords,caller)
@@ -2531,6 +2535,10 @@ function _discrete_eval_setup(m::GeoModel,dimension::Int,tag::Int,
         geometry===nothing && throw(ArgumentError(
             "$caller: discrete Curve[$tag] has no geometry; run mesh.create_geometry first"))
         return record,geometry.frames
+    end
+    if dimension==2
+        param=_discrete_face_param(m,tag)
+        param===nothing || return record,_discrete_face_param_frames(param)
     end
     coords=_model_record_node_coords(m)
     frames=_discrete_element_frames(m,record,dimension,coords,caller)

@@ -407,6 +407,7 @@ end
         "geometry/geo_exec_params_test.jl",
         "geometry/geo_classify_faces_gmsh_test.jl",
         "interfaces/api_metis_gmsh_test.jl",
+        "geometry/geo_discrete_param_t13_test.jl",
         "interfaces/api_occ_chamfer_gmsh_test.jl",
         "interfaces/api_occ_sweep_curved_test.jl",
         "meshing/hxt_volume_test.jl",

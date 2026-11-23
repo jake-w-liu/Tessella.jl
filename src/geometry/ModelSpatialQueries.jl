@@ -415,6 +415,12 @@ function _model_discrete_boxes(m::GeoModel)
                 record.node_coords[3,column])
         end
     end
+    # `discreteFace::bounds` reads its stored parametrization (`_param.bbox`).
+    for (key,_) in m.discrete
+        key[1]==2 || continue
+        param=_discrete_face_param(m,key[2])
+        param===nothing || (boxes[key]=param.bbox)
+    end
     # A file's `$Entities` block gives each Point its coordinate even when the
     # point carries no node.
     for (key,receipt) in m.meshing.imported_entities

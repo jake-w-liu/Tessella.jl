@@ -169,11 +169,17 @@ function _gmsh_surface_trace_bind!(trace::_GmshSurfaceTrace,slots::Vector{Int32}
     return nothing
 end
 
+# `GPoint::succeeded` of `GFace::point(u,v)`; a chart that can fail to
+# evaluate (a discreteFace outside its parameter triangles) overrides it.
+_gmsh_surface_point_succeeded(lift,u,v)=true
+
 # insertVertexB evaluates the retained MTriangle slots in UV, but all close
 # point distances use the actual Cartesian MVertex coordinates. The raw
 # insertion path retains its separate existing admission contract.
 function _gmsh_native_trace_cavity_accept(T,cavity,boundary,parameter,onmodel,
                                          length_scale,trace,verify_star)
+    # insertAPoint calls insertVertexB only when `gf->point` succeeded.
+    _gmsh_surface_point_succeeded(trace.lift,parameter[1],parameter[2]) || return false
     length(cavity)==1 && return false
     length(boundary)==length(cavity)+2 || return false
     old_volume=0.0

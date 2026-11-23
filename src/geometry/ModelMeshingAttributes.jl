@@ -2025,10 +2025,12 @@ end
 Compute a parametrization for discrete entities (all discrete entities when
 `dim_tags` is `nothing`), matching Gmsh's `mesh.createGeometry`. Discrete
 curves retain a separate piecewise geometry snapshot with integer segment
-parameters; discrete surfaces
-receive least-squares-plane parameters covering every node their elements
-reference — including nodes owned by boundary entities, stored in the record's
-`aux_params` side table.
+parameters; discrete surfaces get `discreteFace::createGeometry`'s harmonic
+(or, for a flat patch, mean-plane) parametrization, stored apart from the mesh
+in `surface_geometry` (see `ModelDiscreteFaceParam.jl`). The nodes' parameters
+are also recorded on the record (`node_params`, and `aux_params` for nodes
+owned by boundary entities). A patch the harmonic map cannot handle (e.g. a
+non-manifold one) keeps the least-squares-plane parameters.
 """
 function create_geometry!(m::GeoModel,dim_tags=nothing)
     caller="create_geometry!"
@@ -2057,6 +2059,7 @@ function create_geometry!(m::GeoModel,dim_tags=nothing)
     coords,owners=_model_discrete_curve_sources(m,caller)
     discrete=deepcopy(m.discrete)
     geometry=copy(m.curve_geometry)
+    surface_geometry=copy(m.surface_geometry)
     for (dimension,tag) in targets
         record=discrete[(dimension,tag)]
         if dimension==1
@@ -2068,11 +2071,28 @@ function create_geometry!(m::GeoModel,dim_tags=nothing)
                 record.geometry_parametrized=true
             end
         else
-            _parametrize_discrete_surface!(m,record,coords,caller)
+            # discreteFace::createGeometry (ModelDiscreteFaceParam.jl); a
+            # patch it cannot map keeps the least-squares-plane fallback.
+            param=_discrete_face_create_geometry(record,coords)
+            if param===nothing
+                _parametrize_discrete_surface!(m,record,coords,caller)
+            else
+                surface_geometry[tag]=(discrete_surface=true,param=param)
+                column=Dict(node=>index for (index,node) in enumerate(record.node_tags))
+                record.node_params=zeros(2,length(record.node_tags))
+                for (index,node) in enumerate(param.node_tags)
+                    uv=Float64[param.uv[index][1],param.uv[index][2]]
+                    position=get(column,node,0)
+                    position==0 ? (record.aux_params[node]=uv) :
+                        (record.node_params[:,position].=uv)
+                end
+                record.geometry_parametrized=true
+            end
         end
     end
     m.discrete=discrete
     m.curve_geometry=geometry
+    m.surface_geometry=surface_geometry
     return nothing
 end
 
