@@ -263,14 +263,15 @@ end
     end
     @test isempty(r.model.volumes)
     @test isempty(r.model.surfaces)
-    # Wrong arities fail with `PolarSphere requires 2 points`.
-    err=mktemp() do path,io
+    # Wrong arities fail with `PolarSphere requires 2 points` (Gmsh 4.15.2
+    # reports it at the statement's line; `execute_geo` returns it in
+    # `errors`, the API's `open` logs it).
+    r=mktemp() do path,io
         write(io,"Point(1)={0,0,0}; PolarSphere(9) = {1,1,1};\n")
         close(io)
-        try; execute_geo(path); nothing catch e; e end
+        execute_geo(path)
     end
-    @test err isa ArgumentError
-    @test occursin("PolarSphere requires 2 points",sprint(showerror,err))
+    @test any(e->occursin("PolarSphere requires 2 points",e),r.errors)
     # Unknown center/point tags report through `Msg::Error` (recoverable —
     # no `yymsg`, so `execute_geo` does not throw).
     err=mktemp() do path,io
