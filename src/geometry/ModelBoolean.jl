@@ -9385,8 +9385,27 @@ end
 # when `Geometry.OCCBoundsUseStl` is set (t18 selects pieces by it); the
 # untrimmed carrier boxes are far looser and the operand-snapshot Boolean
 # refuses coplanar contact.
+# The bounds are a pure function of the extracted shell (its points, edge
+# curves and trimmed faces), which is cheap to extract and to compare; the
+# sampling below is not. A shell seen before -- the same Volume in the next
+# generate's working copy -- reuses its box, bit for bit; any change to the
+# geometry it reads gives a different shell and a fresh computation.
+const _BREP_BOUNDS_MEMO=Dict{Any,NTuple{6,Float64}}()
+const _BREP_BOUNDS_LOCK=ReentrantLock()
+
 function _brep_shell_bounds(m::GeoModel,tag::Int,caller)
     S=_brep_extract(m,tag,caller)
+    hit=lock(()->get(_BREP_BOUNDS_MEMO,S,nothing),_BREP_BOUNDS_LOCK)
+    hit===nothing || return hit
+    bounds=_brep_shell_bounds(S)
+    lock(_BREP_BOUNDS_LOCK) do
+        length(_BREP_BOUNDS_MEMO)>=64 && empty!(_BREP_BOUNDS_MEMO)
+        _BREP_BOUNDS_MEMO[deepcopy(S)]=bounds
+    end
+    return bounds
+end
+
+function _brep_shell_bounds(S::NamedTuple)
     lo=[Inf,Inf,Inf];hi=[-Inf,-Inf,-Inf]
     add(p)=for k in 1:3
         lo[k]=min(lo[k],p[k]);hi[k]=max(hi[k],p[k])
