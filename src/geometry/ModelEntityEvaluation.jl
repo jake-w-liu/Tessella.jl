@@ -181,7 +181,27 @@ function _model_normalize3(vector,caller::AbstractString,what::AbstractString)
     return normalized
 end
 
+# A Plane's frame is a function of the model alone, but rebuilding it is not
+# cheap: a native Plane without its constructor's frame refits from curve
+# samples and the model's bounding box (every curve sampled). Operations that
+# evaluate thousands of points of an unchanged model (set_order, refine,
+# Laplace2D/Relocate2D) run inside `_model_frame_scope`, where each
+# (model, Plane) frame is built once.
+function _model_frame_scope(f)
+    haskey(task_local_storage(),:_model_plane_frame_cache) && return f()
+    return task_local_storage(f,:_model_plane_frame_cache,
+                              Dict{Tuple{GeoModel,Int},Any}())
+end
+
 function _model_plane_frame(
+    m::GeoModel,tag::Int,caller::AbstractString)
+    cache=get(task_local_storage(),:_model_plane_frame_cache,nothing)
+    cache===nothing && return _model_plane_frame_built(m,tag,caller)
+    return get!(()->_model_plane_frame_built(m,tag,caller),
+                cache::Dict{Tuple{GeoModel,Int},Any},(m,tag))
+end
+
+function _model_plane_frame_built(
     m::GeoModel,tag::Int,caller::AbstractString)
     native=_gmsh_native_surface_evaluation_frame(m,tag,caller)
     native===nothing || return native

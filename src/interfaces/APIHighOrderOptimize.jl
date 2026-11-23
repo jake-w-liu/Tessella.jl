@@ -966,6 +966,9 @@ function _optimize_surface_mixed_linear!(cached::MixedMesh,class,model,pairs,
     params=Union{Nothing,Vector{Float64}}[
         p===nothing ? nothing : copy(p) for p in class.node_parametric]
     moved=false
+    # The model is fixed while vertices move: each Plane frame is built once
+    # (`_model_frame_scope`), not at every lifted trial position.
+    Model._model_frame_scope() do
     for tag in sort!(collect(keys(faces)))
         cells=faces[tag]
         adjacency=Dict{Int,Vector{Int}}()
@@ -1002,6 +1005,7 @@ function _optimize_surface_mixed_linear!(cached::MixedMesh,class,model,pairs,
                 end
             end
         end
+    end
     end
     moved || return nothing
     slid=Dict{Int,Vector{Float64}}()

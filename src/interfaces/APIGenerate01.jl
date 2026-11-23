@@ -2259,8 +2259,10 @@ function _set_order_dim01_plan(source_model,cached,cached_class,order::Int,calle
             _dim01_quadratic!(assembly,m,entities;only_visible,linear,geometry_birth)
         end
     end
-    haskey(task_local_storage(),:_ruled_eval_cache) ? place!() :
-        task_local_storage(place!,:_ruled_eval_cache,Dict{Tuple{Symbol,Int},Any}())
+    Model._model_frame_scope() do
+        haskey(task_local_storage(),:_ruled_eval_cache) ? place!() :
+            task_local_storage(place!,:_ruled_eval_cache,Dict{Tuple{Symbol,Int},Any}())
+    end
     plan=_dim01_finish!(assembly,m,entities,Set{Tuple{Int,Int32}}(),high_order,
                          renumber,order>1;save_all=save_all,
                          node_limit=Int(max_nodes),cell_limit=Int(max_cells),
