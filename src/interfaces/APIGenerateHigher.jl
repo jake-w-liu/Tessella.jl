@@ -5907,3 +5907,188 @@ function _higher_mixed_geometry_view(authority,caller;model=nothing)
         ancillary_sections=carrier.ancillary_sections,data_sections=carrier.data_sections,
         partition_data=carrier.partition_data)
 end
+
+
+# A generate(3) of a model without Volumes, whose surfaces are all meshed, has
+# nothing to mesh: Gmsh's Mesh3D finds no Region and returns. What the full
+# plan still does to such a model is the SetOrder1 pass (every non-Point cell
+# a new element, renumbered to the same labels), and nothing else: the mesh,
+# its classification and the model come out equal to what they were. The
+# plan replays that from the cells in time and memory proportional to the
+# mesh, then to throw almost all of it away. Here only its observable
+# effects are applied, from the columns of the published mesh: the element
+# label counter advances by one label per non-Point cell, the display flags
+# of the renewed cells are dropped, the geometry carrier becomes the actual
+# mesh (as the plan leaves it), and the derived caches are reset.
+#
+# Anything this does not prove equal takes the full plan: a high-order mesh
+# or order, Renumber off, wrapped counters, Volumes or 3-D records, discrete
+# entities, periodic constraints, partitions, imported ghosts, retained
+# native inputs, an incomplete Curve or Surface, and options under which
+# Gmsh's GenerateMesh does more than Mesh3D (subdivision, quasi-structured
+# 2-D algorithms, mesh-only-empty/visible). `test/interfaces/
+# api_generate_noop_test.jl` compares it with the full plan.
+const _HIGHER_NOOP_SHORTCUT=Ref(true)
+
+function _higher_noop_generate_locked!(m,previous,order::Int)
+    _HIGHER_NOOP_SHORTCUT[] || return nothing
+    order==1 && !iszero(OPTIONS["Mesh.Renumber"]) &&
+        iszero(OPTIONS["Mesh.SubdivisionAlgorithm"]) &&
+        !(Int(OPTIONS["Mesh.Algorithm"]) in (9,11)) &&
+        iszero(OPTIONS["Mesh.MeshOnlyEmpty"]) && iszero(OPTIONS["Mesh.MeshOnlyVisible"]) &&
+        iszero(OPTIONS["Mesh.HighOrderOptimize"]) &&
+        !NODE_COUNTER_WRAPPED[] && !ELEMENT_COUNTER_WRAPPED[] || return nothing
+    authority=m.meshing.mesh_authority
+    authority===nothing && return nothing
+    mesh=authority.mesh
+    previous isa MixedMesh && mesh===previous && mesh.entity_data!==nothing &&
+        mesh.partition_data===nothing || return nothing
+    LAST_MESH_HIGH_ORDER[]===nothing || return nothing
+    isempty(m.volumes) && isempty(m.discrete) && isempty(m.periodic) &&
+        isempty(m.meshing.imported_entities) && isempty(authority.native_inputs) &&
+        model_number_of_partitions(m)==0 || return nothing
+    for entity in keys(m.meshing.attached)
+        entity[1]<=2 || return nothing
+    end
+    # Every Curve and Surface is meshed (the plan's status is two).
+    for (dim,tag) in model_entities(m)
+        dim==3 && return nothing
+        dim in (1,2) && ((dim,Int32(tag)) in authority.done || return nothing)
+    end
+    data=mesh.entity_data
+    # The plan rebuilds the entity records and physical tags from the model:
+    # an edit since the last generation (a Physical group, a name, a moved
+    # bounding box) takes the plan.
+    isequal(mesh.physical_names,m.physical_names) || return nothing
+    entities=model_entities(m)
+    metadata,_=_dim01_entities(m,entities,nothing,Int[])
+    length(metadata)==length(data.entities) || return nothing
+    for (key,entity) in metadata
+        stored=get(data.entities,key,nothing)
+        stored!==nothing && _higher_same_mixed_entity(stored,entity) || return nothing
+    end
+    physical_memo=_dim01_physical_memo()
+    for (bi,block) in enumerate(mesh.blocks)
+        dimension=msh_dimension(block.msh);owners=data.block_entities[bi]
+        for column in eachindex(owners)
+            _dim01_physical!(physical_memo,m,(dimension,owners[column]))==block.tags[column] ||
+                return nothing
+        end
+    end
+    renewed=0;surface_cells=0;point_tags=Set{UInt64}()
+    element_max=ELEMENT_TAG_MAX[];node_max=NODE_TAG_MAX[]
+    for (bi,block) in enumerate(mesh.blocks)
+        block isa ElementBlock || return nothing
+        spec=msh_spec(block.msh)
+        spec.family===:pnt || spec.order==1 || return nothing
+        labels=data.external_element_tags[bi]
+        for label in labels
+            element_max=max(element_max,label)
+        end
+        if spec.family===:pnt
+            union!(point_tags,labels)
+        else
+            renewed+=length(labels)
+            msh_dimension(block.msh)==2 && (surface_cells+=length(labels))
+        end
+    end
+    surface_cells>0 || return nothing
+    for label in data.external_node_tags
+        node_max=max(node_max,label)
+    end
+    for (_,record) in Model._discrete_mesh_records_model(m)
+        element_max=max(element_max,maximum(record.element_tags;init=UInt64(0)))
+        node_max=max(node_max,maximum(record.node_tags;init=UInt64(0)))
+    end
+    save_physical=iszero(OPTIONS["Mesh.SaveAll"]) && any(!isempty,values(m.physical))
+    # The plan renumbers: labels the mesh does not already carry in the
+    # plan's order (an API renumbering since, say) take the plan.
+    _higher_noop_published_labels(mesh,save_physical) || return nothing
+    save_physical && nnodes(mesh)>0 && (node_max=max(node_max,UInt64(nnodes(mesh))+UInt64(1)))
+    element_max<=typemax(UInt64)-UInt64(renewed) || return nothing
+    class=_cached_classification_locked(mesh)
+    class!==nothing && class.mesh===mesh || return nothing
+    # Apply: the options the plan stores with the model, its carrier, its
+    # display flags, its counters and the caches its publication resets.
+    _apply_generation_meshing_options!(m,_generation_meshing_options(order))
+    if authority.carrier!==mesh
+        m.meshing.mesh_authority=Model._ModelMeshAuthority(mesh,authority.products,authority.done,
+            authority.private_rank,authority.native_inputs,mesh,collect(Int32,1:nnodes(mesh)),
+            authority.producer_rows,Model._model_mesh_live_cell_tags(data.external_element_tags),
+            authority.surface_constructor_inputs,authority.emitted_geometry)
+    end
+    keep=pair->first(pair) in point_tags
+    filter!(keep,ELEMENT_VISIBILITY[])
+    index=_current_slot_index_locked()
+    if index!=0
+        for flags in values(MODEL_SLOTS[index].window_element_visibility)
+            filter!(keep,flags)
+        end
+    end
+    _replace_mesh_cache_locked!(mesh,class;preserve_visibility=true,reconcile_records=false)
+    NODE_TAG_MAX[]=max(NODE_TAG_MAX[],node_max)
+    ELEMENT_TAG_MAX[]=max(ELEMENT_TAG_MAX[],element_max+UInt64(renewed))
+    return _copy_mesh(mesh)
+end
+
+_higher_same_mixed_entity(a::Elements.MixedEntity,b::Elements.MixedEntity)=
+    a.dim==b.dim && a.tag==b.tag && isequal(a.bbox,b.bbox) && a.physical_tags==b.physical_tags &&
+    a.boundaries==b.boundaries && a.embedded_curves==b.embedded_curves &&
+    a.partitions==b.partitions && a.parent==b.parent
+
+# Whether the labels of `mesh` are those `_dim01_finish!` gives it when it
+# renumbers: nodes by owner, numbered 1..n in row order (nodes of a cell in
+# a Physical group first under `save_physical`), and cells numbered 1..N in
+# publication order (owner, then family, then their order in the block; the
+# cells of Physical groups first under `save_physical`).
+function _higher_noop_published_labels(mesh::MixedMesh,save_physical::Bool)
+    data=mesh.entity_data
+    issorted(data.node_entities) || return false
+    supported=falses(nnodes(mesh));physical_cells=0;total=0
+    for (bi,block) in enumerate(mesh.blocks)
+        total+=size(block.nodes,2)
+        save_physical || continue
+        for column in axes(block.nodes,2)
+            block.tags[column]!=0 || continue
+            physical_cells+=1
+            for row in Base.view(block.nodes,:,column)
+                supported[row]=true
+            end
+        end
+    end
+    first_rest=save_physical ? Base.count(supported) : nnodes(mesh)
+    next_supported=UInt64(0);next_rest=UInt64(first_rest)
+    for (row,label) in enumerate(data.external_node_tags)
+        if !save_physical || supported[row]
+            next_supported+=UInt64(1);label==next_supported || return false
+        else
+            next_rest+=UInt64(1);label==next_rest || return false
+        end
+    end
+    # A cell's place in the publication order is fixed by its key and, among
+    # equal keys, by its column: walk the cells in label order and compare.
+    first_rest=save_physical ? physical_cells : total
+    placed=zeros(UInt64,total)
+    for (bi,block) in enumerate(mesh.blocks)
+        block_labels=data.external_element_tags[bi]
+        for column in axes(block.nodes,2)
+            rest=save_physical && block.tags[column]==0
+            label=block_labels[column]
+            (rest ? first_rest<label<=total : 0<label<=first_rest) || return false
+            placed[label]==0 || return false
+            placed[label]=(UInt64(bi)<<32)|UInt64(column)
+        end
+    end
+    previous_key=(false,(-1,Int32(0)),-1);previous_block=0;previous_column=0
+    for label in 1:total
+        bi=Int(placed[label]>>32);column=Int(placed[label]&0xffffffff)
+        block=mesh.blocks[bi]
+        key=(save_physical && block.tags[column]==0,
+            (msh_dimension(block.msh),data.block_entities[bi][column]),_dim01_family_rank(block.msh))
+        isless(key,previous_key) && return false
+        # Equal keys keep their column order within one block.
+        key==previous_key && (bi!=previous_block || column<previous_column) && return false
+        previous_key=key;previous_block=bi;previous_column=column
+    end
+    return true
+end

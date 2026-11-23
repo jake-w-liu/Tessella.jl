@@ -3028,6 +3028,15 @@ function _generate_native_lookup_live(dim::Integer)
             isempty(CURRENT[].meshing.homology_requests) || Base.inferencebarrier(_compute_homology)()
             return (Base.inferencebarrier(_copy_mesh)(plan.geometry_carrier))::Union{Mesh,MixedMesh}
         end
+        if dimension==3
+            # Nothing to mesh: see `_higher_noop_generate_locked!`.
+            shortcut=(Base.inferencebarrier(_higher_noop_generate_locked!)(source_model,previous,order))::Union{Nothing,Mesh,MixedMesh}
+            if shortcut!==nothing
+                _native_lookup_invalidate_locked!()
+                isempty(CURRENT[].meshing.homology_requests) || Base.inferencebarrier(_compute_homology)()
+                return shortcut
+            end
+        end
         class=previous===nothing ? nothing : _cached_classification_locked(previous)
         actual,actual_class=(Base.inferencebarrier(_dim01_actual_cache)(previous,class;
             physical_names=source_model.physical_names))::Tuple{Union{Nothing,Mesh,MixedMesh},Union{Nothing,_MeshClassification}}
