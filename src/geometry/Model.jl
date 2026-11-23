@@ -5909,8 +5909,16 @@ function _model_surface_projection(
     source_coordinates=coordinates
     constant_axes=ntuple(axis->all(point->point[axis]==source_coordinates[1][axis],
                                   source_coordinates),3)
+    # Snapping to 15 significant digits removes OCC evaluation noise, but far
+    # from the origin (|x| near 2^51) it merges distinct representable
+    # coordinates; an axis the snap would merge keeps its exact values.
+    merges=ntuple(3) do axis
+        constant_axes[axis] && return false
+        length(unique(c[axis] for c in source_coordinates))!=
+            length(unique(_model_occ_snap_coord(c[axis]) for c in source_coordinates))
+    end
     coordinates=NTuple{3,Float64}[
-        ntuple(axis->constant_axes[axis] ? c[axis] : _model_occ_snap_coord(c[axis]),3)
+        ntuple(axis->(constant_axes[axis] || merges[axis]) ? c[axis] : _model_occ_snap_coord(c[axis]),3)
         for c in source_coordinates]
     anchor=coordinates[1]
     # The second plane point must be geometrically distinct from the anchor:

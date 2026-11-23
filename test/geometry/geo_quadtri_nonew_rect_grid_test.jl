@@ -127,14 +127,13 @@ end
         _rgsc_quadratic_reference()
     end
     @testset "Native B3/B2/B0 maps, complete shells and all public surface routes" begin
-        # Without AutoCoherence the sweep leaves coincident Points, which the
-        # conversion to one mixed mesh refuses.
+        # Without AutoCoherence the sweep leaves unmerged copies; Gmsh 4.15.2
+        # stops on it ("FindDiagonalEdgeIndices() encountered unexpected
+        # surface configuration.", 3 of 3 runs), and so does Tessella.
         duplicated=_RGSC.fixture("rectangular";grid=(2,3),plane=:XY,
             height=1.,laterals=false,layers=:one)
-        first=_rgsc_product(merge(duplicated,(;source=replace(duplicated.source,
-            "Geometry.AutoCoherence=1;"=>"Geometry.AutoCoherence=0;"))))
-        @test_throws r"Points\[[0-9]+\] and \[[0-9]+\] map to mesh node" model_to_mixed(
-            first.geometry.model,first.volume,3,Int(first.geometry.lists["sweep"][2]))
+        @test_throws r"FindDiagonalEdgeIndices\(\) encountered unexpected surface configuration" _RGSC.execute(
+            replace(duplicated.source,"Geometry.AutoCoherence=1;"=>"Geometry.AutoCoherence=0;"))
         for (grid,plane,height,laterals,layers) in (
                 ((2,3),:YZ,-1.,true,:three),
                 ((3,3),:ZX,1.,false,:graded),((3,3),:XY,-1.,true,:graded))

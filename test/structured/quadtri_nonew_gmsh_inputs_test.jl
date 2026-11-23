@@ -94,6 +94,15 @@ end
     """
     @test _counts(_run(squares).mesh) in ((18, Dict(2 => 32, 3 => 2, 4 => 20, 7 => 2)),
                                           (18, Dict(2 => 32, 3 => 2, 4 => 16, 7 => 4)))
+    # The two-quadrangle strip swept in three layers. Gmsh, 20 runs: 24
+    # nodes, 40 tri, 2 quad and 24 tets + 6 pyramids 16 times, 18 tets + 2
+    # prisms + 6 pyramids 4 times. The strip catalog gives 32 tets + 2
+    # pyramids (one Layers{1} strip is fine); Tessella's general QuadToTri
+    # port gives Gmsh's first result but the catalog is chosen first.
+    strip = replace(_square(3, "Recombine Surface{1};"), "Transfinite Curve{1,2,3,4}=3;" =>
+        "Transfinite Curve{1,3}=3;Transfinite Curve{2,4}=2;")
+    @test_broken _counts(_run(strip).mesh) in ((24, Dict(2 => 40, 3 => 2, 4 => 24, 7 => 6)),
+                                               (24, Dict(2 => 40, 3 => 2, 4 => 18, 6 => 2, 7 => 6)))
     # A transfinite cap whose diagonals the Region cannot follow: Gmsh stops
     # ("Extruded hexahedron needs subdivision ..."), so does Tessella.
     @test_throws r"do not exactly cover the typed volume boundary" _run(
