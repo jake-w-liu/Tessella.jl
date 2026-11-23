@@ -5626,19 +5626,23 @@ function _higher_geo_renumber_plan(m,mesh,class,operation,caller;
     assembly=_Dim01Assembly(_Dim01Node[],_Dim01Cell[],Dict{UInt64,Int32}(),
         UInt64(initial_max_node_tag),UInt64(initial_max_element_tag),
         Int(typemax(Int32)),Int(typemax(Int32)),String(caller))
-    _dim01_ingest!(assembly,m,mesh,class;preserve_source_order=true)
+    _,columns=_dim01_ingest_columns!(assembly,m,mesh,class;preserve_source_order=true)
     physical=!save_all && any(!isempty,values(m.physical))
     positions=if node
         sortperm(assembly.nodes;by=value->value.owner,alg=Base.Sort.MergeSort)
     else
-        sortperm(assembly.cells;by=_dim01_cell_order,alg=Base.Sort.MergeSort)
+        permutation=_dim01_cell_publication_order(columns)
+        permutation===nothing ? collect(1:length(columns)) : permutation
     end
-    selected=falses(node ? length(assembly.nodes) : length(assembly.cells))
+    selected=falses(node ? length(assembly.nodes) : length(columns))
     if physical
-        for (position,cell) in enumerate(assembly.cells)
-            _dim01_physical(m,(cell.owner[1],Int(cell.owner[2])))!=0 || continue
+        physical_memo=_dim01_physical_memo()
+        for position in 1:length(columns)
+            _dim01_physical!(physical_memo,m,columns.owner[position])!=0 || continue
             if node
-                selected[cell.nodes].=true
+                for slot in columns.first[position]:columns.first[position+1]-1
+                    selected[columns.nodes[slot]]=true
+                end
             else
                 selected[position]=true
             end
@@ -5648,7 +5652,7 @@ function _higher_geo_renumber_plan(m,mesh,class,operation,caller;
     for saved in (true,false),position in positions
         physical && selected[position]!=saved && continue
         !physical && !saved && continue
-        push!(order,node ? assembly.nodes[position].tag : assembly.cells[position].tag)
+        push!(order,node ? assembly.nodes[position].tag : columns.tag[position])
     end
     kind=node ? :node : :element
     plan=_tagged_renumber_plan(m,mesh,class,order,collect(UInt64,1:length(order)),

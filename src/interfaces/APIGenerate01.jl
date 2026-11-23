@@ -301,22 +301,79 @@ function _dim01_physical!(memo::_Dim01PhysicalMemo,m,owner::Tuple{Int,Int32})
     return value
 end
 
+# Where an ingest puts its cells: the assembly's cell objects (`nothing`), or
+# columns (`_Dim01CellColumns`), which hold no object and no vector per cell.
+# The cells are the same, in the same order, with the same checks.
+const _Dim01CellSink=Union{Nothing,_Dim01CellColumns}
+
+_dim01_sink_length(::Nothing,assembly)=length(assembly.cells)
+_dim01_sink_length(columns::_Dim01CellColumns,assembly)=length(columns)
+
+# Cell `index` of the sink has this owner, type and node positions.
+function _dim01_sink_same(::Nothing,assembly,index,owner,msh,nodes;check_owner::Bool=true)
+    old=assembly.cells[index]
+    return (!check_owner || old.owner==owner) && old.msh==msh && old.nodes==nodes
+end
+function _dim01_sink_same(columns::_Dim01CellColumns,assembly,index,owner,msh,nodes;
+                          check_owner::Bool=true)
+    (!check_owner || columns.owner[index]==owner) && columns.msh[index]==msh || return false
+    start=columns.first[index];width=columns.first[index+1]-start
+    width==length(nodes) || return false
+    for slot in 1:width
+        columns.nodes[start+slot-1]==nodes[slot] || return false
+    end
+    return true
+end
+
+# `nodes` is a vector made for this cell: a cell object keeps it, columns
+# copy it, so a caller filling columns may reuse it for the next cell.
+function _dim01_sink_add!(::Nothing,assembly,msh,owner,nodes::Vector{Int32},tag;
+                          physical=Int32(0),preserve_source_order::Bool=false)
+    _dim01_add_cell!(assembly,msh,owner,nodes,tag;physical,preserve_source_order,owned=true)
+    return length(assembly.cells)
+end
+function _dim01_sink_add!(columns::_Dim01CellColumns,assembly,msh,owner,nodes::Vector{Int32},tag;
+                          physical=Int32(0),preserve_source_order::Bool=false)
+    length(columns)+length(assembly.cells)<assembly.max_cells || throw(ArgumentError(
+        "$(assembly.caller): mesh exceeds max_cells=$(assembly.max_cells)"))
+    spec=msh_spec(msh)
+    length(nodes)==spec.nnodes && msh_dimension(msh)==owner[1] ||
+        throw(ArgumentError("$(assembly.caller): invalid source MSH $msh connectivity"))
+    preserve_source_order || spec.family===:pnt || spec.order in (1,2) ||
+        (spec.family===:lin && 3<=spec.order<=10) || throw(ArgumentError(
+        "$(assembly.caller): lower-dimensional generation supports orders one and two; " *
+        "source MSH $msh has order $(spec.order)"))
+    push!(columns.msh,Int(msh));push!(columns.owner,owner)
+    push!(columns.tag,UInt64(tag));push!(columns.source,UInt64(tag));push!(columns.sourced,true)
+    push!(columns.physical,Int32(physical))
+    append!(columns.nodes,nodes);push!(columns.first,length(columns.nodes)+1)
+    assembly.cell_counter_wrapped || (assembly.cell_max=max(assembly.cell_max,UInt64(tag)))
+    return length(columns)
+end
+
+# The node buffer of the next cell: a new vector for a cell object, the same
+# one emptied for columns.
+_dim01_sink_buffer(::Nothing,buffer,width)=sizehint!(Int32[],width)
+_dim01_sink_buffer(::_Dim01CellColumns,buffer,width)=empty!(buffer)
+
 # `raw=false` leaves the set of raw cells empty: only a cache without public
 # labels is matched against it, and a tuple per cell of a large record costs
 # more than the rest of the ingest.
 function _dim01_ingest_record_cells!(assembly,m,records;preserve_source_order::Bool=false,
-                                    retired_nodes=nothing,raw::Bool=true)
+                                    retired_nodes=nothing,raw::Bool=true,
+                                    columns::_Dim01CellSink=nothing)
     cell_tags=Dict{UInt64,Int}()
     raw_cells=Set{Tuple{Int,Tuple{Int,Int32},Tuple}}()
     count=sum(length(record.element_tags) for (_,record) in records;init=0)
     sizehint!(cell_tags,count);raw && sizehint!(raw_cells,count)
+    buffer=Int32[]
     for ((dim,tag),record) in records
         owner=(dim,Int32(tag))
         retired=retired_nodes===nothing ? nothing : get(retired_nodes,owner,nothing)
         # One projection per record, taken with its first cell.
         physical=nothing
         for column in eachindex(record.element_tags)
-            nodes=Int32[];sizehint!(nodes,length(record.element_nodes[column]))
+            nodes=_dim01_sink_buffer(columns,buffer,length(record.element_nodes[column]))
             for source in record.element_nodes[column]
                 position=get(assembly.node_positions,UInt64(source),Int32(0))
                 if retired!==nothing && UInt64(source) in retired
@@ -334,17 +391,16 @@ function _dim01_ingest_record_cells!(assembly,m,records;preserve_source_order::B
             haskey(cell_tags,external) && throw(ArgumentError(
                 "$(assembly.caller): duplicate source element tag $external"))
             physical===nothing && (physical=_dim01_physical(m,(dim,tag)))
-            _dim01_add_cell!(assembly,record.element_types[column],owner,nodes,external;
-                             physical,preserve_source_order)
             raw && push!(raw_cells,(Int(record.element_types[column]),owner,Tuple(nodes)))
-            cell_tags[external]=length(assembly.cells)
+            cell_tags[external]=_dim01_sink_add!(columns,assembly,record.element_types[column],
+                owner,nodes,external;physical,preserve_source_order)
         end
     end
     return cell_tags,raw_cells
 end
 
 function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bool=false,
-                       retired_nodes=nothing)
+                       retired_nodes=nothing,columns::_Dim01CellSink=nothing)
     records=sort!(collect(Model._discrete_mesh_records_model(m));by=first)
     for ((dim,tag),record) in records
         owner=(dim,Int32(tag))
@@ -356,7 +412,7 @@ function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bo
     end
     if cached===nothing
         _dim01_ingest_record_cells!(assembly,m,records;preserve_source_order=preserve_source_order,
-            retired_nodes,raw=false)
+            retired_nodes,raw=false,columns)
         return Int32[]
     end
     cached_class===nothing && throw(ArgumentError(
@@ -422,14 +478,15 @@ function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bo
     # Resolve those exact labels before parsing record connectivity; raw nodes
     # still establish ownership first and parameter enrichment remains intact.
     cell_tags,raw_cells=_dim01_ingest_record_cells!(assembly,m,records;preserve_source_order=preserve_source_order,
-        retired_nodes,raw=!authoritative)
+        retired_nodes,raw=!authoritative,columns)
+    buffer=Int32[]
     for (bi,(msh,dim,offset,cells,owners)) in enumerate(_cache_catalog(cached,cached_class))
         physical=_cache_native_blocks(cached)[bi][3]
         for column in axes(cells,2)
             owner=(dim,owners[column])
-            nodes=Vector{Int32}(undef,size(cells,1))
-            for slot in eachindex(nodes)
-                nodes[slot]=mapping[cells[slot,column]]
+            nodes=_dim01_sink_buffer(columns,buffer,size(cells,1))
+            for slot in axes(cells,1)
+                push!(nodes,mapping[cells[slot,column]])
             end
             retired=retired_nodes===nothing ? nothing : get(retired_nodes,owner,nothing)
             if retired!==nothing
@@ -446,24 +503,34 @@ function _dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order::Bo
                                       data.external_element_tags[bi][column]
             previous=get(cell_tags,external,0)
             if previous!=0
-                old=assembly.cells[previous]
-                if old.owner==owner && old.msh==msh && old.nodes==nodes
-                    continue
-                end
+                _dim01_sink_same(columns,assembly,previous,owner,msh,nodes) && continue
                 # Classification re-owns source elements without republishing
                 # this snapshot: identical type/connectivity under a new
                 # record owner is the same logical element, not a conflict.
-                authoritative && old.msh==Int(msh) && old.nodes==nodes && continue
+                authoritative && _dim01_sink_same(columns,assembly,previous,owner,Int(msh),nodes;
+                    check_owner=false) && continue
                 !authoritative || throw(ArgumentError(
                     "$(assembly.caller): cached element $external conflicts with its source record"))
                 external=_dim01_next_tag!(assembly,false)
             end
-            _dim01_add_cell!(assembly,msh,owner,nodes,external;
-                             physical=physical[column],preserve_source_order)
-            cell_tags[external]=length(assembly.cells)
+            cell_tags[external]=_dim01_sink_add!(columns,assembly,msh,owner,nodes,external;
+                physical=physical[column],preserve_source_order)
         end
     end
     return mapping
+end
+
+# `_dim01_ingest!` with the cells in columns: the node rows of `cached` (its
+# return value, positions in `assembly.nodes`) and the cells, in the order
+# and with the labels `_dim01_ingest!` would give `assembly.cells`, without
+# an object or a node vector per cell. `assembly` receives the nodes only.
+function _dim01_ingest_columns!(assembly,m,cached,cached_class;preserve_source_order::Bool=false,
+                                retired_nodes=nothing)
+    isempty(assembly.cells) || throw(ArgumentError(
+        "$(assembly.caller): a columnar ingest starts from an assembly without cell objects"))
+    columns=_Dim01CellColumns()
+    mapping=_dim01_ingest!(assembly,m,cached,cached_class;preserve_source_order,retired_nodes,columns)
+    return mapping,columns
 end
 
 function _dim01_first_order!(assembly,m;skip_discrete=true,retired_nodes=nothing)
