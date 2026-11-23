@@ -122,10 +122,120 @@ function _dim01_cell_push!(cell::_Dim01Cell,node::Integer)
     return cell
 end
 
+# The assembly's node table: source tag => position in `assembly.nodes`. A
+# generation appends nodes with consecutive fresh tags at consecutive
+# positions, a block of them at a time; such a stretch is held as one run
+# (first tag, first position, length) instead of one hashed entry per node.
+# Other entries, and any entry written over a run, are in `table`, which is
+# read first. It answers `get`, `haskey`, `getindex` and `setindex!` as the
+# Dict it replaces.
+mutable struct _Dim01NodeIndex
+    table::Dict{UInt64,Int32}
+    run_tag::Vector{UInt64}
+    run_position::Vector{Int32}
+    run_length::Vector{Int}
+    # The table entries that would extend into the next run: they are moved
+    # out of the table once there are `_DIM01_RUN_MINIMUM` of them.
+    pending_tag::UInt64
+    pending_position::Int32
+    pending_length::Int
+    runs_sorted::Bool
+end
+const _DIM01_RUN_MINIMUM=256
+_Dim01NodeIndex()=_Dim01NodeIndex(Dict{UInt64,Int32}(),UInt64[],Int32[],Int[],UInt64(0),Int32(0),0,true)
+function _Dim01NodeIndex(table::Dict{UInt64,Int32})
+    index=_Dim01NodeIndex()
+    for (tag,position) in table
+        index.table[tag]=position
+    end
+    return index
+end
+Base.convert(::Type{_Dim01NodeIndex},table::Dict{UInt64,Int32})=_Dim01NodeIndex(table)
+
+function _dim01_run_get(index::_Dim01NodeIndex,tag::UInt64)
+    # Runs are made in allocation order, so their first tags usually ascend.
+    if index.runs_sorted
+        run=searchsortedlast(index.run_tag,tag)
+        run>0 && tag-index.run_tag[run]<UInt64(index.run_length[run]) &&
+            return index.run_position[run]+Int32(tag-index.run_tag[run])
+        return Int32(0)
+    end
+    for run in length(index.run_tag):-1:1
+        first=index.run_tag[run]
+        if first<=tag && tag-first<UInt64(index.run_length[run])
+            return index.run_position[run]+Int32(tag-first)
+        end
+    end
+    return Int32(0)
+end
+
+function Base.get(index::_Dim01NodeIndex,tag::Integer,default)
+    key=UInt64(tag)
+    value=get(index.table,key,Int32(0))
+    value!=0 && return value
+    haskey(index.table,key) && return value
+    value=_dim01_run_get(index,key)
+    return value!=0 ? value : default
+end
+Base.haskey(index::_Dim01NodeIndex,tag::Integer)=
+    haskey(index.table,UInt64(tag)) || _dim01_run_get(index,UInt64(tag))!=0
+function Base.getindex(index::_Dim01NodeIndex,tag::Integer)
+    value=get(index,tag,nothing)
+    value===nothing && throw(KeyError(tag))
+    return value
+end
+
+function Base.setindex!(index::_Dim01NodeIndex,position::Integer,tag::Integer)
+    key=UInt64(tag);value=Int32(position)
+    if !isempty(index.run_tag) && haskey(index.table,key)==false && _dim01_run_get(index,key)!=0
+        # Written over a run: the table entry is read first.
+        index.table[key]=value
+        return index
+    end
+    if !haskey(index.table,key) && !isempty(index.run_tag) && value>0
+        last=length(index.run_tag)
+        if key==index.run_tag[last]+UInt64(index.run_length[last]) &&
+                value==index.run_position[last]+Int32(index.run_length[last])
+            index.run_length[last]+=1
+            return index
+        end
+    end
+    existed=haskey(index.table,key)
+    index.table[key]=value
+    if existed || value<=0
+        index.pending_length=0
+    elseif index.pending_length>0 &&
+            key==index.pending_tag+UInt64(index.pending_length) &&
+            value==index.pending_position+Int32(index.pending_length)
+        index.pending_length+=1
+        if index.pending_length>=_DIM01_RUN_MINIMUM
+            for step in 0:index.pending_length-1
+                delete!(index.table,index.pending_tag+UInt64(step))
+            end
+            isempty(index.run_tag) || index.pending_tag>=index.run_tag[end]+UInt64(index.run_length[end]) ||
+                (index.runs_sorted=false)
+            push!(index.run_tag,index.pending_tag)
+            push!(index.run_position,index.pending_position)
+            push!(index.run_length,index.pending_length)
+            index.pending_length=0
+        end
+    else
+        index.pending_tag=key;index.pending_position=value;index.pending_length=1
+    end
+    return index
+end
+
+function Base.empty!(index::_Dim01NodeIndex)
+    empty!(index.table);empty!(index.run_tag);empty!(index.run_position);empty!(index.run_length)
+    index.pending_length=0;index.runs_sorted=true
+    return index
+end
+Base.sizehint!(index::_Dim01NodeIndex,n::Integer)=(sizehint!(index.table,min(n,1<<16));index)
+
 mutable struct _Dim01Assembly
     nodes::Vector{_Dim01Node}
     cells::Vector{_Dim01Cell}
-    node_positions::Dict{UInt64,Int32}
+    node_positions::_Dim01NodeIndex
     node_max::UInt64
     cell_max::UInt64
     max_nodes::Int
@@ -149,6 +259,19 @@ _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,calle
         node_counter_wrapped,cell_counter_wrapped)=
     _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller,
         node_counter_wrapped,cell_counter_wrapped,0,_Dim01CellStore())
+
+# Room for `nodes` more nodes and `cells` more cells of `width` nodes.
+function _dim01_reserve!(assembly::_Dim01Assembly,nodes::Integer,cells::Integer,width::Integer)
+    sizehint!(assembly.nodes,length(assembly.nodes)+nodes)
+    store=assembly.store;count=length(store.msh)+cells
+    for column in (store.msh,store.owner,store.tag,store.source,store.sourced,store.physical,
+                   store.start,store.width)
+        sizehint!(column,count)
+    end
+    sizehint!(store.nodes,length(store.nodes)+cells*width)
+    sizehint!(assembly.cells,length(assembly.cells)+cells)
+    return assembly
+end
 
 # A new cell of `assembly` (not yet in `assembly.cells`).
 _dim01_new_cell(assembly::_Dim01Assembly,msh,owner,nodes,tag,source_tag,physical)=
@@ -2149,6 +2272,35 @@ end
 _dim01_plan_records_reconciled(plan)=plan.mesh isa MixedMesh &&
     get(plan,:records_mesh,nothing)===plan.mesh
 
+# Room in each record for the cells the blocks give it, so that its columns
+# are allocated once.
+function _dim01_reconcile_reserve!(records::Dict{Tuple{Int,Int},DiscreteEntity},blocks,
+                                   owners::Vector{Vector{Int32}})
+    cells=Dict{Tuple{Int,Int},Int}();slots=Dict{Tuple{Int,Int},Int}()
+    for (bi,block) in enumerate(blocks)
+        dim=msh_dimension(block.msh);width=size(block.nodes,1)
+        run=(-1,-1);count=0
+        for owner in owners[bi]
+            key=(dim,Int(owner))
+            if key!=run
+                run==(-1,-1) || (cells[run]=get(cells,run,0)+count;slots[run]=get(slots,run,0)+count*width)
+                run=key;count=0
+            end
+            count+=1
+        end
+        run==(-1,-1) || (cells[run]=get(cells,run,0)+count;slots[run]=get(slots,run,0)+count*width)
+    end
+    for (key,count) in cells
+        record=get(records,key,nothing)
+        record===nothing && continue
+        sizehint!(record.element_types,length(record.element_types)+count)
+        sizehint!(record.element_tags,length(record.element_tags)+count)
+        sizehint!(record.element_nodes,length(record.element_nodes)+count)
+        sizehint!(record.element_nodes.data,length(record.element_nodes.data)+slots[key])
+    end
+    return records
+end
+
 # The cells of one block into their records: types, labels and the public
 # node tags, written into each record's node column.
 function _dim01_reconcile_block!(records::Dict{Tuple{Int,Int},DiscreteEntity},dim::Int,msh::Int32,
@@ -2231,6 +2383,7 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
             if haskey(node_tag_map,UInt64(source)))
         records[entity]=record
     end
+    _dim01_reconcile_reserve!(records,mesh.blocks,data.block_entities)
     for (bi,block) in enumerate(mesh.blocks)
         _dim01_reconcile_block!(records,msh_dimension(block.msh),Int32(block.msh),block.nodes,
             data.block_entities[bi],data.external_element_tags[bi],data.external_node_tags)

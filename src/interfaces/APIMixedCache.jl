@@ -323,6 +323,19 @@ function _merge_mixed_cells(parts,remaps,counts,cell_identities,::Type{T},caller
     return nodes,physical,cursors,bindings,keeps
 end
 
+function _merge_identity_slots(node_identities,node_capacity)
+    node_identities===nothing && return Int32[]
+    highest=0;total=0
+    for identities in node_identities
+        for identity in identities
+            identity===nothing && continue
+            highest=max(highest,Int(identity));total+=1
+        end
+    end
+    highest<=4*max(total,node_capacity)+1024 && highest<=typemax(Int32) || return Int32[]
+    return zeros(Int32,highest)
+end
+
 function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing,node_identities=nothing,
                                     cell_identities=nothing)
     positions=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
@@ -335,6 +348,10 @@ function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing,node_iden
     sizehint!(coordinates,node_capacity)
     remaps=Vector{Vector{Int32}}(undef,length(parts))
     counts=Dict{Int,Int}()
+    # Identities are usually dense positive rows: the first merged row of
+    # each is read from a vector by identity, and only a row whose point
+    # differs from that first one is looked up by (identity, point).
+    dense=_merge_identity_slots(node_identities,node_capacity)
     for (i,(_,mesh)) in enumerate(parts)
         node_identities===nothing || length(node_identities[i])==nnodes(mesh) ||
             throw(ArgumentError("$caller: produced vertex identities do not align with geometry rows"))
@@ -347,6 +364,22 @@ function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing,node_iden
             identity=node_identities===nothing ? nothing : node_identities[i][column]
             identity===nothing || identity>0 || throw(ArgumentError(
                 "$caller: produced vertex identity must be positive"))
+            if identity!==nothing && identity<=length(dense)
+                first_row=dense[identity]
+                if first_row==0
+                    length(coordinates)<typemax(Int32) || throw(ArgumentError(
+                        "$caller: merged mesh exceeds the Int32 node limit"))
+                    push!(coordinates,p)
+                    first_row=Int32(length(coordinates));dense[identity]=first_row
+                    remap[column]=first_row
+                    continue
+                end
+                q=coordinates[first_row]
+                if isequal((q[1]+0.0,q[2]+0.0,q[3]+0.0),point)
+                    remap[column]=first_row
+                    continue
+                end
+            end
             key=identity===nothing ? (owner[1],owner[2],point) :
                 (typemin(Int),Int32(identity),point)
             remap[column]=get!(positions,key) do

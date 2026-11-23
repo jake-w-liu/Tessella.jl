@@ -773,6 +773,11 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
         # One parametrizer per owner: the entity's geometry is resolved once.
         parametrizers=Dict{Tuple{Int,Int32},Any}()
         matches=Int32[]
+        cell_count=0;cell_width=0
+        for (msh,cells,_) in _cache_native_blocks(mesh)
+            cell_count+=size(cells,2);cell_width=max(cell_width,size(cells,1))
+        end
+        _dim01_reserve!(assembly,nnodes(mesh),cell_count,cell_width)
         for position in (native===nothing ?
             source_row_order===nothing ? axes(mesh.coords,2) : source_row_order : native.rows)
             owner=class.node_entities[position]
@@ -4023,11 +4028,17 @@ end
 # from its actual mesh. A function of its own so that the coordinates have a
 # known type inside the loop: read through the untyped `alternate` they cost
 # a dynamic field access and three boxed numbers per node.
+# A birth that is the node itself (same point, owner and parameter) and
+# replaces no earlier birth says nothing: every reader of the births falls
+# back to the node. Such entries are left out once the table holds one entry
+# (its emptiness is read), so an alternate layout that moved no interior node
+# adds no entry per node.
 function _higher_alternate_births!(births,nodes::Vector{_Dim01Node},mapping,coords::AbstractMatrix{Float64})
     for (row,position) in enumerate(mapping)
         node=nodes[position]
-        births[node.tag]=_Dim01Node(node.tag,(coords[1,row],coords[2,row],coords[3,row]),
-            node.owner,node.parameter)
+        point=(coords[1,row],coords[2,row],coords[3,row])
+        !isempty(births) && isequal(point,node.point) && !haskey(births,node.tag) && continue
+        births[node.tag]=_Dim01Node(node.tag,point,node.owner,node.parameter)
     end
     return births
 end
@@ -4815,21 +4826,9 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
     end
     # The real native producer merge preserves its geometry storage and CRC;
     # the complete public products remain in the independently bound cache.
-    positions=Dict(tag=>Int32(row) for (row,tag) in
-                   enumerate(plan.mesh.entity_data.external_node_tags))
     rows=zeros(Int32,nnodes(carrier))
-    for ((_,_,_,mapping),merged_rows) in zip(parts,remaps)
-        for (position,merged_row) in enumerate(merged_rows)
-            source_tag=assembly.nodes[mapping[position]].tag
-            final_tag=get(plan.node_tag_map,source_tag,nothing)
-            actual_row=get(positions,final_tag,Int32(0))
-            actual_row>0 || throw(ArgumentError(
-                "$caller: produced geometry vertex loses its actual identity"))
-            rows[merged_row]==0 || rows[merged_row]==actual_row || throw(ArgumentError(
-                "$caller: merged geometry vertex has conflicting actual identities"))
-            rows[merged_row]=actual_row
-        end
-    end
+    _higher_carrier_rows!(rows,_higher_tag_rows(plan.mesh.entity_data.external_node_tags),
+        parts,remaps,assembly,plan.node_tag_map,caller)
     all(>(0),rows) && allunique(rows) || throw(ArgumentError(
         "$caller: produced geometry rows do not bind uniquely to actual vertices"))
     for ((_,part,_,mapping),merged_rows) in zip(parts,remaps)
@@ -4846,6 +4845,50 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
         (class.entity[1],tag,mesh) for (tag,mesh,class,_) in parts]
     emitted_rows=Vector{Int32}[collect(Int32,mapping) for mapping in remaps]
     return carrier,rows,carrier_cells,emitted,emitted_rows
+end
+
+# The row of each tag of `tags`, as `get(table,tag,0)` reads it: a vector by
+# tag when the tags are distinct, positive and dense (published tags after a
+# renumbering), otherwise a Dict holding the last row of each tag.
+function _higher_tag_rows(tags::Vector{UInt64})
+    highest=UInt64(0);positive=true
+    for tag in tags
+        highest=max(highest,tag);positive&=tag>0
+    end
+    if positive && highest<=UInt64(4)*UInt64(length(tags))+UInt64(1024)
+        slots=zeros(Int32,Int(highest));distinct=true
+        for (row,tag) in enumerate(tags)
+            slots[tag]==0 || (distinct=false;break)
+            slots[tag]=Int32(row)
+        end
+        distinct && return slots
+    end
+    table=Dict{UInt64,Int32}()
+    for (row,tag) in enumerate(tags)
+        table[tag]=Int32(row)
+    end
+    return table
+end
+_higher_tag_row(slots::Vector{Int32},tag::UInt64)=0<tag<=length(slots) ? slots[tag] : Int32(0)
+_higher_tag_row(table::Dict{UInt64,Int32},tag::UInt64)=get(table,tag,Int32(0))
+
+# The actual row of each merged carrier row: the published row of the node
+# each produced geometry row stands for.
+function _higher_carrier_rows!(rows::Vector{Int32},positions,parts,remaps,assembly,
+                               node_tag_map::Dict{UInt64,UInt64},caller)
+    for ((_,_,_,mapping),merged_rows) in zip(parts,remaps)
+        for (position,merged_row) in enumerate(merged_rows)
+            source_tag=assembly.nodes[mapping[position]].tag
+            final_tag=get(node_tag_map,source_tag,nothing)
+            actual_row=final_tag===nothing ? Int32(0) : _higher_tag_row(positions,final_tag)
+            actual_row>0 || throw(ArgumentError(
+                "$caller: produced geometry vertex loses its actual identity"))
+            rows[merged_row]==0 || rows[merged_row]==actual_row || throw(ArgumentError(
+                "$caller: merged geometry vertex has conflicting actual identities"))
+            rows[merged_row]=actual_row
+        end
+    end
+    return rows
 end
 
 function _higher_geometry_keep_points(parts,assembly,node_tag_map,caller)
