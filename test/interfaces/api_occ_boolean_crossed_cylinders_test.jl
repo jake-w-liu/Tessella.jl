@@ -9,7 +9,10 @@ const A=Tessella.API
 # Gmsh 4.15.2 gives 28.7727878844, pieces 5.93827430/5.01969066 and
 # 40.0403459044. Gmsh also has 8/14/8/1 and 8/14/12/5 entities (it keeps
 # the cylinders' seam vertices); Tessella has 6/12/8/1 and 6/12/12/5.
+# Interpreted these take over half an hour (the fitted ellipse pcurves and
+# the sphere): compiled runs only.
 @testset "OCC Booleans of crossed cylinders of equal radius" begin
+  if Base.JLOptions().compile_enabled==1
     r=1.4*0.7;L=5.6
     cyl=π*r^2*L;common=16r^3/3
     function run(f,n)
@@ -54,6 +57,7 @@ const A=Tessella.API
         @test out==[(3,8)]
         @test occ.get_mass(3,8)≈3.98182885452 rtol=1e-6
     end
+  end
 end
 
 # Two cylinders crossing at right angles, radii 0.5 and 0.3: the fuse once
