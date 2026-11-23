@@ -344,9 +344,9 @@ end
             _qpc_atomic(replace(fixture.source,"Layers{3}"=>"Layers{{1},{0.5}}"),
                 r"normalized final layer height")
             _qpc_atomic(fixture.source*"Transfinite Surface{sweep[0]};\n",
-                r"do not exactly cover the typed volume boundary")
+                r"In QuadToTriHexPri\(\), Extruded hexahedron needs subdivision")
             collapsed=_QPC.fixture("collapsed";laterals,layers=:four,offset=(0.,0.,2.0^50))
-            _qpc_atomic(replace(collapsed.source,"Layers{4}"=>"Layers{8}"),r"QuadTriNoNewVerts")
+            _qpc_atomic(replace(collapsed.source,"Layers{4}"=>"Layers{8}"),r"QuadTriNoNewVerts|QuadToTriHexPri")
             # A later Transfinite Curve change does not remesh, as in Gmsh.
             _qpc_api(fixture.source,(api,geometry)->begin
                 api.mesh.generate(3)

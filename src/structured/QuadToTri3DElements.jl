@@ -13,10 +13,13 @@ mutable struct QTMesh
     lookup::Dict{NTuple{3,Float64},Int}
     next_id::Int
     coord::Function
+    # Gmsh's Msg::Error texts, in order: an element that needs a vertex the
+    # edge generator did not plan for. Gmsh meshes on and reports failure.
+    errors::Vector{String}
 end
 
 QTMesh(coord,next_id)=QTMesh(NTuple{4,Int}[],NTuple{5,Int}[],NTuple{6,Int}[],NTuple{8,Int}[],
-    Int[],NTuple{3,Float64}[],Dict{NTuple{3,Float64},Int}(),next_id,coord)
+    Int[],NTuple{3,Float64}[],Dict{NTuple{3,Float64},Int}(),next_id,coord,String[])
 
 # QtFindVertsCentroid: mean of the distinct swept vertices.
 function verts_centroid(out::QTMesh,v)
@@ -30,7 +33,19 @@ function verts_centroid(out::QTMesh,v)
         c=out.coord(v[p+1])
         x+=c[1];y+=c[2];z+=c[3]
     end
-    return (x/count,y/count,z/count)
+    center=(x/count,y/count,z/count)
+    all(isfinite,center) && return center
+    # Gmsh's double sum overflows near floatmax while every vertex is
+    # finite; the exact mean, rounded once, is the representable centroid.
+    exact=ntuple(3) do axis
+        total=Rational{BigInt}(0)
+        for p in 0:length(v)-1
+            ((length(v)==6 || length(v)==8) && p>n_lat-1 && v[p+1]==v[p-n_lat+1]) && continue
+            total+=Rational{BigInt}(out.coord(v[p+1])[axis])
+        end
+        Float64(total/count)
+    end
+    return all(isfinite,exact) ? exact : center
 end
 
 function make_centroid_vertex!(out::QTMesh,v)
@@ -158,6 +173,7 @@ function pri_pyr_tet!(out::QTMesh,st::QTState,v,j,k,source,problems_new,bnd_elem
         end
     end
     if !is_problem
+        push!(out.errors,"In QuadToTriPriPyrTet(), Extruded prism needs subdivision, but cannot  be divided without internal vertex, and was not previously detected as such.  This is a bug. Please Report.")
         make_centroid_vertex!(out,v)
         add_problem!(problems_new,source,j,k)
         is_problem=true

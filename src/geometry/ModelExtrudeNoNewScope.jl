@@ -389,7 +389,7 @@ function _extrude_nonew_complete_plan(m::GeoModel,t::Int,
         _extrude_nonew_rect_grid_top(working,plan.top_tag,params,
             plan.sweep.cols,plan.catalog,caller) :
         plan.catalog isa _ExtrudeNoNewMultiCellCatalog && plan.catalog.top!==nothing ?
-            _extrude_nonew_general_top(plan.catalog.top) : _extrude_top_mesh(
+            _extrude_nonew_general_top(plan.catalog.top,plan.sweep.cols) : _extrude_top_mesh(
         working,plan.top_tag,params,spec,link[2],caller;
         min_angle_deg=min_angle_deg,max_periodic_passes=max_periodic_passes,
         size_field=size_field,source_mesh=plan.source_mesh)
@@ -1360,8 +1360,11 @@ function _extrude_nonew_scope_selected(m::GeoModel,caller::AbstractString,
                 binder=owners[binder_i]
                 if binder!=tag
                     t_link=working.meshing.extrude_sources[(3,tag)]
+                    # The general QuadToTri port reads the binder's wall as
+                    # QuadToTriGetRegionDiags reads an already meshed lateral.
                     if _extrude_nonew_multi_cell_source(
-                            working,abs(t_link[2]),caller)
+                            working,abs(t_link[2]),caller) ||
+                       _extrude_nonew_general_candidate(working,tag,caller)
                         # The per-column planner reproduces the bound wall
                         # facet-for-facet — each segment quadrangle
                         # independently, whole or split — so the binder's

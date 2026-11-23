@@ -68,10 +68,18 @@ end
         @test _MAP_F.certify(retained.volume,retained.f,retained.source).ncell==retained.certificate.ncell
         # This naked geometry path still has the original strict projection
         # contract. Its completed plan must consume the model's actual products.
-        projected=model_to_mixed(model,retained.volume,3,region)
+        # The QuadToTri port plans on the retained Source and triangulated
+        # cap (Gmsh reads meshed faces as they stand); project its volume.
+        planned=_MAP_M._extrude_nonew_complete_plan(deepcopy(model),region,"retained projection";
+            _working_model=true,_mesh_input=model.meshing.mesh_authority).volume
+        projected=model_to_mixed(model,planned,3,region)
         @test validate(projected).ok
-        @test _MAP_Q.surface_faces([(2,0,projected)],retained.volume)==
-              Set(keys(retained.certificate.boundary))
+        cap=_MAP_M._model_mesh_product(model.meshing.mesh_authority,2,
+            Int(retained.geometry.lists["sweep"][1]))
+        key(mesh,cell)=Set(Tuple(mesh.coords[:,k]) for k in cell)
+        cap_faces=Set(key(cap,c) for b in cap.blocks if b isa ElementBlock && b.msh==2 for c in eachcol(b.nodes))
+        @test issubset(cap_faces,Set(key(projected,c) for b in projected.blocks
+            if b isa ElementBlock && b.msh==2 for c in eachcol(b.nodes)))
         source=_MAP_M._model_mesh_product(model.meshing.mesh_authority,2,retained.f.surface)
         source_projected=model_to_mixed(model,source,retained.f.surface)
         @test _map_cells(source_projected;dimension=2)==_map_cells(source;dimension=2)

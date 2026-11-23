@@ -196,6 +196,28 @@ function _sl_surface_faces(part)
     return faces
 end
 
+# A shared wall in the plane x, read per generatrix segment (the wall's own
+# y values) and per layer (zs): each layer quadrangle whole ('q') or split on
+# the diagonal from its low-y low-z corner ('a') or from its high-y low-z
+# corner ('b'). `codes` lists the walls Gmsh 4.15.2 produced over 20 fresh
+# runs (QuadToTri orders vertices by address, so one input gives several).
+function _sl_wall_code(x,ys,zs,code)
+    faces=Set{Tuple}();k=0
+    for j in 1:length(ys)-1,l in 1:length(zs)-1
+        k+=1
+        A0=(x,ys[j],zs[l]);B0=(x,ys[j+1],zs[l]);A1=(x,ys[j],zs[l+1]);B1=(x,ys[j+1],zs[l+1])
+        cells=code[k]=='q' ? [(A0,B0,A1,B1)] : code[k]=='a' ? [(A0,B0,B1),(A0,B1,A1)] :
+            [(A0,B0,A1),(B0,B1,A1)]
+        for c in cells;push!(faces,Tuple(sort!(collect(c))));end
+    end
+    return faces
+end
+
+function _sl_wall_in(wall,x,zs,codes)
+    ys=sort!(unique(p[2] for f in wall for p in f))
+    return any(code->wall==_sl_wall_code(x,ys,zs,code),codes)
+end
+
 function _sl_part_equal(a,b)
     a isa Mesh && b isa Mesh &&
         return a.coords==b.coords && a.segs==b.segs && a.tris==b.tris &&
@@ -1028,7 +1050,9 @@ end
         # transported through the generic partner's forced chain contract —
         # identical bound part, identical incidences, opposite orientation.
         wall=_sl_surface_faces(bound)
-        @test all(length(key)==3 for key in wall)
+        # Gmsh 4.15.2 (20 runs): first layer split either way or whole,
+        # second layer whole (7/7/6).
+        @test _sl_wall_in(wall,2.0,[0.,.5,1.],("aq","bq","qq"))
         @test Set(keys(_sl_wall_cycles(pass.parts[1],2.0)))==
             Set(keys(_sl_wall_cycles(pass.parts[2],2.0)))==wall
         left=_sl_wall_cycles(pass.parts[1],2.0)
@@ -1131,13 +1155,10 @@ end
         left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
         right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;};
         """;mesh_dim=3)
-        # Two strip Sources welded on one wall: upstream's QuadToTri solve
-        # fails outright on the partner's lateral (37 errors, no volume 2
-        # cells), so the loud planner diagnostic stays here as well — the
-        # partner's three-quad Source matches no bounded catalog and the
-        # boundary-category diagnosis now reaches it before the wall
-        # contract is consulted.
-        @test_throws r"planner" _sl_model("""
+        # Two strip Sources welded on one wall: Gmsh 4.15.2 fails in 20 of
+        # 20 runs ("Could not find extruded node ... in surface 3"); Tessella
+        # refuses too, earlier, with its own diagnostic.
+        @test_throws r"planner|classified constraint was not recovered" _sl_model("""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
         Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
         Line(1)={1,2};Line(2)={2,3};Line(3)={3,4};Line(4)={4,1};
@@ -1158,20 +1179,13 @@ end
         # A reversed source loop makes its whole Region inside-out — every
         # lateral shell sign flips — while upstream still welds the shared
         # wall. The geometric side test (generatrix × sweep against each
-        # Source's interior) admits exactly that reversal; the Gmsh 4.15.2
-        # oracle emits 18 nodes and a welded shared wall for both loop
-        # directions. Upstream's wall decomposition itself is
-        # solver-dependent across runs (all-split, split+whole-quad and
-        # all-quad walls all observed on the same fixture); the
-        # deterministic emission pinned here is the all-split member of
-        # that observed family.
-        oracle_wall=Set((
-            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
-            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
-        for (loop1,loop2) in (("{-4,-3,-2,-1}","{5,6,7,-2}"),
-                             ("{1,2,3,4}","{2,-7,-6,-5}"))
+        # Source's interior) admits exactly that reversal; Gmsh 4.15.2
+        # emits 18 nodes and a welded shared wall for both loop directions.
+        # The wall itself depends on vertex addresses: the codes list every
+        # wall Gmsh produced over 20 fresh runs.
+        zs=[0.,.5,1.]
+        for (loop1,loop2,codes) in (("{-4,-3,-2,-1}","{5,6,7,-2}",("aq","bq","qq")),
+                             ("{1,2,3,4}","{2,-7,-6,-5}",("aq","bq","qq","ba","aa")))
             execution=_sl_model("""
             Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
             Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
@@ -1196,7 +1210,7 @@ end
             bound=pass.scope.surfaces[s]
             @test validate(bound).ok
             wall=_sl_surface_faces(bound)
-            @test wall==oracle_wall
+            @test _sl_wall_in(wall,1.0,zs,codes)
             @test _sl_dim2_faces_on(merged,1,1.0)==wall
             left=_sl_wall_cycles(pass.parts[1],1.0)
             right=_sl_wall_cycles(pass.parts[2],1.0)
@@ -1210,8 +1224,10 @@ end
                 all(v->v[1]==1.0,k))==wall
         end
         # The inside-out partner may also be an ordinary unrecombined
-        # sweep — the seeded subdivision welds it the same way upstream
-        # (Gmsh 4.15.2 `a_rev_loop_mixed` capture: 18 nodes).
+        # sweep. Gmsh's global SubdivideExtrudedMesh splits the wall first
+        # and the QuadToTri Region is meshed again on it; the reversed loop
+        # turns both diagonals (Gmsh 4.15.2, 20 of 20 runs: 18 nodes, 34
+        # triangles, 1 quadrangle, 22 tetrahedra, 1 pyramid, this wall).
         execution=_sl_model("""
         Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
         Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
@@ -1232,7 +1248,8 @@ end
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         wall=_sl_surface_faces(pass.scope.surfaces[s])
-        @test wall==oracle_wall
+        @test wall==_sl_wall_code(1.0,[0.,1.],zs,"bb")
+        @test _sl_msh_counts(merged)==Dict(1=>26,2=>34,3=>1,4=>22,7=>1)
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
             _sl_positive(pass.parts[tag])
@@ -1241,7 +1258,8 @@ end
         # published windings. `Reverse Curve{2}` on the generatrix and
         # `Reverse Surface{2}` on the Source both weld identically
         # upstream (Gmsh 4.15.2: 18 nodes, same observed wall family).
-        for suffix in ("Reverse Curve{2};\n","Reverse Surface{2};\n")
+        for (suffix,codes) in (("Reverse Curve{2};\n",("qq","bq","aq","qb")),
+                               ("Reverse Surface{2};\n",("qq","aq","bq","aa")))
             execution=_sl_model(_sl_squares()*"""
             left[]=Extrude{0,0,1}{Surface{1};Layers{2};Recombine;QuadTriNoNewVerts;};
             right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};
@@ -1253,7 +1271,7 @@ end
             pass=_extrude_volume_pass(execution.model,_SL_CALLER)
             bound=pass.scope.surfaces[s]
             wall=_sl_surface_faces(bound)
-            @test wall==oracle_wall
+            @test _sl_wall_in(wall,1.0,zs,codes)
             @test _sl_dim2_faces_on(merged,1,1.0)==wall
             for tag in (1,2)
                 @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
@@ -1279,7 +1297,7 @@ end
         pass=_extrude_volume_pass(reversed.model,_SL_CALLER)
         bound=pass.scope.surfaces[s]
         wall=_sl_surface_faces(bound)
-        @test wall==oracle_wall
+        @test _sl_wall_in(wall,1.0,zs,("aq","bq","qq","ba"))
         @test _sl_dim2_faces_on(reversed.mesh,1,1.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
@@ -1293,9 +1311,7 @@ end
         @test _sl_part_equal(mesh_model_surface(reversed.model,s),bound)
         @test _sl_surface_faces(geo_entity_mesh(reversed,2,s))==wall
         # A generatrix defined in the opposite direction (Line(2)={3,2}
-        # with both loops re-ordered) welds the same wall — the solver
-        # pins the mirror diagonal, which is the diagonal orientation the
-        # oracle's own split-layer emission shows on this fixture.
+        # with both loops re-ordered) welds one of Gmsh's walls too.
         execution=_sl_model("""
         Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
         Point(3)={1,1,0,1}; Point(4)={0,1,0,1};
@@ -1316,11 +1332,7 @@ end
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         wall=_sl_surface_faces(pass.scope.surfaces[s])
-        @test wall==Set((
-            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.0)),
-            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.5),(1.0,1.0,0.0),(1.0,1.0,0.5)),
-            ((1.0,0.0,1.0),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_wall_in(wall,1.0,zs,("qq","aq","bq","bb","aa"))
         @test _sl_dim2_faces_on(merged,1,1.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
@@ -1329,11 +1341,8 @@ end
     end
 
     @testset "multi-cell and strip sources on the shared lateral" begin
-        # Two-quad strip Sources on both sweeps: the 1-segment wall at
-        # x=2 welds four triangles bitwise (Gmsh 4.15.2 `b_strip_short`
-        # capture: 30 nodes, same four facets); the all-split emission is
-        # the strip catalog's own boundary policy transported through the
-        # bitwise shared-part dedup rather than a diagonal contract.
+        # Two-quad strip Sources on both sweeps: the 1-segment wall at x=2
+        # (Gmsh 4.15.2, 20 runs: 30 nodes; walls 'aq' 10, 'qq' 6, 'bq' 4).
         execution=_sl_model("""
         Point(1)={0,0,0,1}; Point(2)={2,0,0,1};
         Point(3)={2,1,0,1}; Point(4)={0,1,0,1};
@@ -1355,19 +1364,14 @@ end
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         bound=pass.scope.surfaces[s]
         wall=_sl_surface_faces(bound)
-        @test wall==Set((
-            ((2.0,0.0,0.0),(2.0,0.0,0.5),(2.0,1.0,0.5)),
-            ((2.0,0.0,0.0),(2.0,1.0,0.0),(2.0,1.0,0.5)),
-            ((2.0,0.0,0.5),(2.0,0.0,1.0),(2.0,1.0,1.0)),
-            ((2.0,0.0,0.5),(2.0,1.0,0.5),(2.0,1.0,1.0))))
+        @test _sl_wall_in(wall,2.0,[0.,.5,1.],("aq","qq","bq"))
         @test _sl_dim2_faces_on(merged,1,2.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],2.0)))==wall
             _sl_positive(pass.parts[tag])
         end
-        # The 2-segment generatrix welds eight triangles — the oracle's
-        # `b_strip_long` capture (27 nodes) including its transfinite
-        # evaluation noise on the interior generatrix node.
+        # The 2-segment generatrix (Gmsh 4.15.2, 20 runs: 27 nodes, six
+        # walls; codes run segment by segment, layer by layer).
         execution=_sl_model("""
         Point(1)={0,0,0,1}; Point(2)={1,0,0,1};
         Point(3)={1,2,0,1}; Point(4)={0,2,0,1};
@@ -1388,16 +1392,7 @@ end
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         wall=_sl_surface_faces(pass.scope.surfaces[s])
-        mid=0.9999999999973842
-        @test wall==Set((
-            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,mid,0.5)),
-            ((1.0,0.0,0.0),(1.0,mid,0.0),(1.0,mid,0.5)),
-            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,mid,1.0)),
-            ((1.0,0.0,0.5),(1.0,mid,0.5),(1.0,mid,1.0)),
-            ((1.0,mid,0.0),(1.0,mid,0.5),(1.0,2.0,0.5)),
-            ((1.0,mid,0.0),(1.0,2.0,0.0),(1.0,2.0,0.5)),
-            ((1.0,mid,0.5),(1.0,mid,1.0),(1.0,2.0,1.0)),
-            ((1.0,mid,0.5),(1.0,2.0,0.5),(1.0,2.0,1.0))))
+        @test _sl_wall_in(wall,1.0,[0.,.5,1.],("aqbq","abbq","aqba","aqqa","abqq","abqa"))
         @test _sl_dim2_faces_on(merged,1,1.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
@@ -1825,12 +1820,10 @@ end
     end
 
     @testset "constrained and compound shared-wall boundaries" begin
-        # `Recombine Surface{...}` applied to the generated wall — the same
-        # outcome an end-of-file `Recombine Surface{:}` reaches — makes the
-        # oracle keep the welded wall in whole quadrangles while every free
-        # lateral stays split (Gmsh 4.15.2 `r2_recomb_*` captures: both
-        # Regions fan, 2 quads on the wall). The certified owners fan their
-        # layers and the bound part is the oracle's whole-quad pair.
+        # `Recombine Surface{...}` on the generated wall (or an end-of-file
+        # `Recombine Surface{:}`) changes nothing for a lateral of two
+        # QuadToTri Regions: Gmsh 4.15.2 recombines it regardless
+        # (IsValidQuadToTriLateral) and splits what the Regions need.
         for suffix in (
                 "Recombine Surface{left[3]};\n",
                 "Recombine Surface{:};\n")
@@ -1845,8 +1838,9 @@ end
             pass=_extrude_volume_pass(model,_SL_CALLER)
             bound=pass.scope.surfaces[s]
             wall=_sl_surface_faces(bound)
-            @test all(length(key)==4 for key in wall)
-            @test length(wall)==2
+            # Gmsh 4.15.2, 20 runs each: the recombined wall is still
+            # QuadToTri's ('aq' 9/8, 'qq' 8/8, 'bq' 3/4).
+            @test _sl_wall_in(wall,1.0,[0.,.5,1.],("aq","qq","bq"))
             for tag in (1,2)
                 @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
                 _sl_positive(pass.parts[tag])
@@ -1927,19 +1921,16 @@ end
         merged=execution.mesh
         @test validate(merged).ok
         @test nnodes(merged)==22
-        @test _sl_msh_counts(merged)==Dict(1=>26,2=>32,3=>2,4=>20,7=>2)
+        # Gmsh 4.15.2, 20 runs (type => count; 1 => 26 lines in all).
+        gmsh_counts=[Dict(1=>26,2=>30,3=>3,4=>16,7=>4),Dict(1=>26,2=>28,3=>4,4=>11,6=>1,7=>5),
+            Dict(1=>26,2=>28,3=>4,4=>10,6=>2,7=>4),Dict(1=>26,2=>28,3=>4,4=>12,7=>6),
+            Dict(1=>26,2=>32,3=>2,4=>20,7=>2)]
+        @test _sl_msh_counts(merged) in gmsh_counts
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(model,_SL_CALLER)
         bound=pass.scope.surfaces[s]
         wall=_sl_surface_faces(bound)
-        # Oracle wall facets at x=1 (the all-split member of the observed
-        # solver-dependent family — the same deterministic emission the
-        # planar-source certificates carry).
-        @test wall==Set((
-            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
-            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_wall_in(wall,1.0,[0.,.5,1.],("aq","qq","bq","ab"))
         @test _sl_dim2_faces_on(merged,1,1.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
@@ -1982,15 +1973,12 @@ end
         merged=execution.mesh
         @test validate(merged).ok
         @test nnodes(merged)==20
-        @test _sl_msh_counts(merged)==Dict(1=>26,2=>32,3=>2,4=>20,7=>2)
+        @test _sl_msh_counts(merged) in vcat(gmsh_counts,[Dict(1=>26,2=>30,3=>3,4=>15,6=>1,7=>3),
+            Dict(1=>26,2=>30,3=>3,4=>14,6=>2,7=>2)])
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         wall=_sl_surface_faces(pass.scope.surfaces[s])
-        @test wall==Set((
-            ((1.0,0.0,0.0),(1.0,0.0,0.5),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,0.5)),
-            ((1.0,0.0,0.5),(1.0,0.0,1.0),(1.0,1.0,1.0)),
-            ((1.0,0.0,0.5),(1.0,1.0,0.5),(1.0,1.0,1.0))))
+        @test _sl_wall_in(wall,1.0,[0.,.5,1.],("qq","bq","aq","qb","ba","qa"))
         @test _sl_dim2_faces_on(merged,1,1.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall
@@ -2051,18 +2039,15 @@ end
         merged=execution.mesh
         @test validate(merged).ok
         @test nnodes(merged)==26
-        @test _sl_msh_counts(merged)==Dict(1=>32,2=>46,3=>2,4=>32,7=>2)
+        @test _sl_msh_counts(merged) in [Dict(1=>32,2=>42,3=>4,4=>24,7=>6),
+            Dict(1=>32,2=>40,3=>5,4=>20,7=>8),Dict(1=>32,2=>40,3=>5,4=>19,6=>1,7=>7),
+            Dict(1=>32,2=>40,3=>5,4=>18,6=>2,7=>6),Dict(1=>32,2=>42,3=>4,4=>23,6=>1,7=>5),
+            Dict(1=>32,2=>44,3=>3,4=>28,7=>4)]
         s=_sl_shared_tag(execution)
         pass=_extrude_volume_pass(execution.model,_SL_CALLER)
         third=1/3
         wall=_sl_surface_faces(pass.scope.surfaces[s])
-        @test wall==Set((
-            ((1.0,0.0,0.0),(1.0,0.0,third),(1.0,1.0,third)),
-            ((1.0,0.0,0.0),(1.0,1.0,0.0),(1.0,1.0,third)),
-            ((1.0,0.0,third),(1.0,0.0,2*third),(1.0,1.0,2*third)),
-            ((1.0,0.0,third),(1.0,1.0,third),(1.0,1.0,2*third)),
-            ((1.0,0.0,2*third),(1.0,0.0,1.0),(1.0,1.0,1.0)),
-            ((1.0,0.0,2*third),(1.0,1.0,2*third),(1.0,1.0,1.0))))
+        @test _sl_wall_in(wall,1.0,[0.,third,2*third,1.],("qqq","aqq","bqq","qbq","bqa"))
         @test _sl_dim2_faces_on(merged,1,1.0)==wall
         for tag in (1,2)
             @test Set(keys(_sl_wall_cycles(pass.parts[tag],1.0)))==wall

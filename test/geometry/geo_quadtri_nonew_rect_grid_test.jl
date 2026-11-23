@@ -62,7 +62,7 @@ end
 function _rgsc_original_frames(f)
     M=Tessella.Model;g=_RGSC.execute(f.source;dim=0);m=g.model;out=Int.(g.lists["sweep"])
     t=out[2];caller="independent rectangular source frames"
-    completed=M._extrude_nonew_plan(deepcopy(m),t,caller)
+    completed=M._extrude_nonew_catalog_plan(deepcopy(m),t,caller)
     original=completed.source_mesh;nodes=only(_RGSC.blocks(original)).nodes
     params=M._extrude_gate(m,3,t);spec=m.meshing.extrude_specs[(3,t)]
     baseline=_RGSC.certify(completed.sweep.volume,f,original)
@@ -157,7 +157,9 @@ end
         _rgsc_malformed_source(_RGSC.fixture("malformed";grid=(3,3),layers=:one))
         for laterals in (false,true)
             f=_RGSC.fixture("collapsed_layers";grid=(2,3),laterals,layers=:four,offset=(0.,0.,2.0^50),height=.25)
-            _rgsc_atomic(f,r"strictly ordered|collapse")
+            # Gmsh stops too ("bad number of degenerate corners"); the port
+            # stops on the hexahedron it cannot divide.
+            _rgsc_atomic(f,r"strictly ordered|collapse|QuadToTriHexPri")
             # Gmsh 4.15.2 meshes the oblique translation (20 runs, all alike);
             # so does Tessella, through the general QuadToTri planner.
             f=_RGSC.fixture("oblique";grid=(2,3),laterals,layers=:one)

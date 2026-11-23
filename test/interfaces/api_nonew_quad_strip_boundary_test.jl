@@ -406,12 +406,13 @@ function run_tests()
                 for i in f.long_pair
                     API.mesh.set_transfinite_curve(f.curve_tags[i],6)
                 end
-                # Arbitrary free and recombined strips are supported;
-                # reject unmatched opposite source chains.
+                # A later Transfinite Curve change does not remesh in Gmsh
+                # 4.15.2: generate(3) keeps the meshed curves' nodes and
+                # re-emits the cells at order one (fresh element tags).
                 API.mesh.set_transfinite_curve(f.curve_tags[last(f.long_pair)],7)
-                before=snapshot()
-                @test_throws r"QuadTriNoNewVerts" API.mesh.generate(3)
-                unchanged(before)
+                cells=sum(length,API.mesh.get_elements()[2])
+                API.mesh.generate(3)
+                @test sum(length,API.mesh.get_elements()[2])==cells
             end)
         end
     end

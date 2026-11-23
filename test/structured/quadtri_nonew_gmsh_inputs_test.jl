@@ -94,18 +94,41 @@ end
     """
     @test _counts(_run(squares).mesh) in ((18, Dict(2 => 32, 3 => 2, 4 => 20, 7 => 2)),
                                           (18, Dict(2 => 32, 3 => 2, 4 => 16, 7 => 4)))
-    # The two-quadrangle strip swept in three layers. Gmsh, 20 runs: 24
-    # nodes, 40 tri, 2 quad and 24 tets + 6 pyramids 16 times, 18 tets + 2
-    # prisms + 6 pyramids 4 times. The strip catalog gives 32 tets + 2
-    # pyramids (one Layers{1} strip is fine); Tessella's general QuadToTri
-    # port gives Gmsh's first result but the catalog is chosen first.
+    # The same pair without the transfinite wall: the first Region meshes the
+    # wall, keeping its quadrangles whole where it can, the second reads it.
+    # Gmsh, 20 runs: 30 tri, 3 quad, 16 tets, 4 pyramids 13 times; 28 tri, 4
+    # quad with 12 tets + 6 pyramids 4 times, 11 tets + 1 prism + 5 pyramids
+    # twice, 10 tets + 2 prisms + 4 pyramids once.
+    pair = replace(squares, "Transfinite Surface{20};" => "")
+    @test _counts(_run(pair).mesh) in ((18, Dict(2 => 30, 3 => 3, 4 => 16, 7 => 4)),
+        (18, Dict(2 => 28, 3 => 4, 4 => 12, 7 => 6)), (18, Dict(2 => 28, 3 => 4, 4 => 11, 6 => 1, 7 => 5)),
+        (18, Dict(2 => 28, 3 => 4, 4 => 10, 6 => 2, 7 => 4)))
+    # Next to an unrecombined layered Region, Gmsh's global
+    # SubdivideExtrudedMesh splits the wall first and the QuadToTri Region is
+    # meshed again on it; with the partner's loop reversed both diagonals
+    # turn. Gmsh, 20 of 20 runs: 18 nodes, 34 tri, 1 quad, 22 tets, 1 pyramid.
+    ordinary = replace(replace(pair, "Curve Loop(2)={5,6,7,-2}" => "Curve Loop(2)={2,-7,-6,-5}"),
+        "Recombine Surface{1,2};" => "Recombine Surface{1};",
+        "right[]=Extrude{0,0,1}{Surface{2};Layers{2};Recombine;QuadTriNoNewVerts;};" =>
+        "right[]=Extrude{0,0,1}{Surface{2};Layers{2};};")
+    mesh = _run(ordinary).mesh
+    @test _counts(mesh) == (18, Dict(2 => 34, 3 => 1, 4 => 22, 7 => 1))
+    wall = Set(Tuple(sort([(mesh.coords[2, v], mesh.coords[3, v]) for v in c]))
+               for b in mesh.blocks if b.msh == 2 for c in eachcol(b.nodes)
+               if all(mesh.coords[1, v] == 1.0 for v in c))
+    @test wall == Set([((0.0, 0.0), (0.0, 0.5), (1.0, 0.0)), ((0.0, 0.5), (0.0, 1.0), (1.0, 0.5)),
+                       ((0.0, 0.5), (1.0, 0.0), (1.0, 0.5)), ((0.0, 1.0), (1.0, 0.5), (1.0, 1.0))])
+    # The two-quadrangle strip swept in three layers, through the general
+    # QuadToTri port. Gmsh, 20 runs: 24 nodes, 40 tri, 2 quad and 24 tets
+    # + 6 pyramids 16 times, 18 tets + 2 prisms + 6 pyramids 4 times (the
+    # retired strip catalog gave 32 tets + 2 pyramids).
     strip = replace(_square(3, "Recombine Surface{1};"), "Transfinite Curve{1,2,3,4}=3;" =>
         "Transfinite Curve{1,3}=3;Transfinite Curve{2,4}=2;")
-    @test_broken _counts(_run(strip).mesh) in ((24, Dict(2 => 40, 3 => 2, 4 => 24, 7 => 6)),
-                                               (24, Dict(2 => 40, 3 => 2, 4 => 18, 6 => 2, 7 => 6)))
+    @test _counts(_run(strip).mesh) in ((24, Dict(2 => 40, 3 => 2, 4 => 24, 7 => 6)),
+                                        (24, Dict(2 => 40, 3 => 2, 4 => 18, 6 => 2, 7 => 6)))
     # A transfinite cap whose diagonals the Region cannot follow: Gmsh stops
-    # ("Extruded hexahedron needs subdivision ..."), so does Tessella.
-    @test_throws r"do not exactly cover the typed volume boundary" _run(
+    # with this message (20 of 20 runs), so does Tessella's port.
+    @test_throws r"In QuadToTriHexPri\(\), Extruded hexahedron needs subdivision" _run(
         patch * "Transfinite Surface{sweep[0]};\n")
     # A reversed top copy places its nodes at the swept generatrix vertices:
     # Gmsh's node at x = 0.4999999999986921 (the inverted parameter gave

@@ -147,8 +147,9 @@ function certify(mesh,f,source;oracle=false,native_top=!oracle,check_separation=
         diagonal=intersect(Set(selected[1]),Set(selected[2]));require(length(diagonal)==2,"top diagonal is missing")
         push!(top_diagonals,Set(node for node in cell if grid[n+1,node] in diagonal))
         if native_top
-            start=findfirst(==(minimum(cell)),cell);opposite=cell[mod1(start+2,4)]
-            require(diagonal==Set((grid[n+1,minimum(cell)],grid[n+1,opposite])),"top cap differs from original source-node identity")
+            # Gmsh's MeshQuadToTriTopSurface picks the diagonal by vertex address;
+            # the cap is either diagonal of its own Source quadrangle.
+            require(diagonal in (Set((grid[n+1,cell[1]],grid[n+1,cell[3]])),Set((grid[n+1,cell[2]],grid[n+1,cell[4]]))),"top cap differs from original source-node identity")
         end
         setdiff!(remaining,selected)
         for layer in 1:n-1;require(states[(parent,layer)][6]==states[(parent,layer+1)][5],"intermediate cap carry differs");end

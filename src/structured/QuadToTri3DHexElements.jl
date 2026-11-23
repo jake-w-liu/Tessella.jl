@@ -441,6 +441,7 @@ function hex_pri!(out::QTMesh,st::QTState,v,j,k,source,problems_new,bnd_elem,is_
         full_hex_elems!(out,v,n1,n2,found_diags) && return
     end
     if !is_problem
+        push!(out.errors,"In QuadToTriHexPri(), Extruded hexahedron needs subdivision, but cannot  be divided without internal vertex, and was not previously detected as such.  This is a bug. Please Report.")
         make_centroid_vertex!(out,v)
         add_problem!(problems_new,source,j,k)
     end

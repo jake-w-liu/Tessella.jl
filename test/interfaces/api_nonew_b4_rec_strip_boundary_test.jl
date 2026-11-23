@@ -376,7 +376,9 @@ function run_tests()
         end
         f=Cert.fixture("collapsed";coherent=true,strip_length=5,layers=:three,height=.25,offset=(0.,0.,2.0^50+2.))
         with_model(f,carriers->begin
-            before=snapshot();@test_throws r"QuadTriNoNewVerts" API.mesh.generate(3);unchanged(before)
+            # Gmsh stops on collapsed layers too ("bad number of degenerate
+            # corners"); the QuadToTri port stops on the hexahedron.
+            before=snapshot();@test_throws r"QuadTriNoNewVerts|QuadToTriHexPri" API.mesh.generate(3);unchanged(before)
         end)
         # Each last fan mean is represented for N2, but the requested elevated
         # edge nodes can collapse at a large normal offset. Certify P1 first.

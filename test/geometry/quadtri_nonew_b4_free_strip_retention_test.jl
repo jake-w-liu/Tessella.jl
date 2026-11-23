@@ -61,7 +61,7 @@ end
     f=merge(f,(source=replace(f.source,"Layers{1}"=>"Layers{2}"),levels=[0.,.5,1.],intervals=2))
     execution=B4.execute(f.source;dim=0);model=execution.model
     out=Int.(execution.lists["sweep"]);volume_tag=out[2]
-    original=Model._extrude_nonew_plan(model,volume_tag,caller)
+    original=Model._extrude_nonew_catalog_plan(model,volume_tag,caller)
     @test original.catalog isa Free.Catalog
     catalog=original.catalog;cols=original.sweep.cols
     phase=Free.SourcePhase.Phase(catalog.source,2);Free.SourcePhase.run!(phase)

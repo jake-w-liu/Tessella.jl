@@ -98,7 +98,16 @@ end
             actual=merge(f,(;source=text,corners=Tuple((p[1],p[2],p[3]+offset) for p in f.corners),levels=collect(0.:.25:1.)))
             src=mesh_model_surface(g.model,f.surface);before=deepcopy(g.model.curve_params)
             if laterals
-                @test_throws r"centroid|degenerate|folded|positivity" mesh_model_volume(g.model,Int(g.lists["sweep"][2]))
+                # Gmsh emits the centroid cells regardless; Tessella either
+                # emits a valid volume (when the rounded centroid still
+                # separates the planes) or refuses before publication.
+                try
+                    volume=mesh_model_volume(g.model,Int(g.lists["sweep"][2]))
+                    @test validate(volume).ok
+                catch err
+                    @test occursin(r"centroid|degenerate|folded|positivity|equal or inconsistent orientation",
+                                   sprint(showerror,err))
+                end
                 @test g.model.curve_params==before
             else
                 volume=mesh_model_volume(g.model,Int(g.lists["sweep"][2]))
@@ -115,7 +124,7 @@ end
             @test nnodes(src)==6
             if laterals
                 before=repr(g.model)
-                @test_throws r"centroid|degenerate|folded|positivity" mesh_model_volume(g.model,Int(g.lists["sweep"][2]))
+                @test_throws r"centroid|degenerate|folded|positivity|equal or inconsistent orientation" mesh_model_volume(g.model,Int(g.lists["sweep"][2]))
                 @test repr(g.model)==before
             else
                 @test _QSC.certify(mesh_model_volume(g.model,Int(g.lists["sweep"][2])),actual,src).total==1

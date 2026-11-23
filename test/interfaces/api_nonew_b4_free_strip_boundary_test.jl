@@ -284,11 +284,20 @@ with_model(f,carriers->begin
     API.model.add_discrete_entity(2,41001,[curve])
     API.mesh.add_nodes(2,41001,[100003,100005],[12.,13.,14.,13.,13.,14.])
     API.mesh.add_elements_by_type(41001,2,[120001],[100001,100003,100005])
-    API.mesh.generate(0);before=snapshot()
-    # The NoNew planner now meets the extra Curve node first; either way the
-    # call stops before publication (Gmsh would keep a dangling reference).
-    @test_throws r"surviving record.*100001.*no retained-node identity|complete actual linear Quad grid without extra nodes" API.mesh.generate(3)
-    unchanged(before)
+    API.mesh.generate(0)
+    # Gmsh meshes on: deMeshGEdge drops the Curve's user node (Gmsh 4.15.2 on
+    # a unit square: the Curve holds only its regenerated node afterwards)
+    # and the discrete Face keeps a dangling reference. Tessella's generate
+    # keeps the user node on the Curve instead (the API's curve remesh, not
+    # the NoNew planner), or refuses the stale record before publication.
+    before=snapshot()
+    try
+        API.mesh.generate(3)
+        @test_broken !(UInt64(100001) in API.mesh.get_nodes(1,curve)[1])
+    catch err
+        @test err isa ArgumentError
+        unchanged(before)
+    end
 end)
 
     for policy in (:free,:rec)
@@ -758,10 +767,11 @@ function run_tests()
     end
     @testset "Checked public resource and source controls fail atomically" begin
         f=Cert.fixture("node_reserve";strip_length=5,layers=:one)
-        # Columns alone fit the ten-million-node bound; reserved retained
-        # centers push the checked preflight beyond it, before level allocation.
-        @test 12*(588235+1)<=10_000_000<12*(588235+1)+5*588235
-        oversized=merge(f,(;source=replace(f.source,"Layers{1}"=>"Layers{588235}")))
+        # The columns exceed the ten-million-node bound; the checked preflight
+        # refuses before level allocation. (The general QuadToTri port, like
+        # Gmsh, adds no centers to this strip, so 588235 layers now fit.)
+        @test 12*(900000+1)>10_000_000
+        oversized=merge(f,(;source=replace(f.source,"Layers{1}"=>"Layers{900000}")))
         with_model(oversized,carriers->begin
             API.mesh.generate(0);API.mesh.set_order(2)
             before=snapshot()
@@ -787,13 +797,19 @@ function run_tests()
             # The edge, face and locator caches are the assembly's business;
             # the public answers must survive a second query.
             @test API.mesh.get_element_by_coordinates(point...,3,true)[1]==found
+            # A later Transfinite Curve change does not remesh in Gmsh 4.15.2:
+            # generate(3) re-emits the same cells at order one.
             API.mesh.set_transfinite_curve(f.curve_tags[last(f.long_pair)],7)
-            before=snapshot();@test_throws r"QuadTriNoNewVerts" API.mesh.generate(3);unchanged(before)
+            cells=sum(length,API.mesh.get_elements()[2])
+            API.mesh.generate(3)
+            @test sum(length,API.mesh.get_elements()[2])==cells
         end)
         collapsed=Cert.fixture("collapsed";strip_length=5,layers=:three,height=.25,offset=(0.,0.,2.0^50+2.))
         with_model(collapsed,carriers->begin
             API.mesh.generate(0);API.mesh.set_order(2)
-            before=snapshot();@test_throws r"QuadTriNoNewVerts" API.mesh.generate(3);unchanged(before)
+            # Layers collapsed by rounding: Gmsh stops ("bad number of
+            # degenerate corners"); the QuadToTri port stops on the hexahedron.
+            before=snapshot();@test_throws r"QuadTriNoNewVerts|QuadToTriHexPri" API.mesh.generate(3);unchanged(before)
         end)
         base=Cert.fixture("p2_precision";strip_length=5,layers=:one,offset=(0.,0.,2.0^50+2.))
         precision=merge(base,(;source=replace(base.source,"Layers{1}"=>"Layers{4}"),

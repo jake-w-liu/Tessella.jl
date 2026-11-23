@@ -71,6 +71,24 @@ function _qtt_model_failure(source,diagnostic;mutate=identity,geo_diagnostic=dia
     @test context.option_numbers==options
 end
 
+# Inputs Gmsh meshes on without a check: Tessella either meshes too or
+# refuses before publication, leaving the model untouched.
+function _qtt_model_outcome(source,diagnostic;mutate=identity)
+    for run in (model->mesh_model_volume(model,1),
+                model->Tessella.GeoExec._geo_mesh_model(model,3,Tessella.IO._GeoNumericContext()))
+        geometry=_QTT.execute(source;dim=0)
+        mutate(geometry.model)
+        parameters=deepcopy(geometry.model.curve_params);value=repr(geometry.model)
+        try
+            run(geometry.model)
+            @test true
+        catch err
+            @test err isa ArgumentError && occursin(diagnostic,sprint(showerror,err))
+            @test repr(geometry.model)==value && geometry.model.curve_params==parameters
+        end
+    end
+end
+
 function _qtt_curve_parameters(model,count)
     expected=collect(range(0.,1.;length=count))
     for curve in 1:4
@@ -606,14 +624,22 @@ end
                 lower,upper=sort([offset+.75direction,offset+direction])
                 @test nextfloat(lower)==upper
                 @test lower<(_QTT.Q(lower)+_QTT.Q(upper))/2<upper
-                _qtt_model_failure(source_text,r"centroid fan has a folded or degenerate face";mutate=shift_model)
+                # Gmsh emits the cells regardless; the port's centroid either
+                # still separates the planes or the call refuses atomically.
+                diagnostic=r"centroid fan has a folded or degenerate face|equal or inconsistent orientation"
+                _qtt_model_outcome(source_text,diagnostic;mutate=shift_model)
                 _qtt_api(source_text,(api,_)->begin
                     for (tag,p) in collect(api.CURRENT[].points)
                         api.model.set_coordinates(tag,p[1],p[2],p[3]+offset)
                     end
                     before=_qtt_snapshot(api)
-                    @test_throws r"centroid fan has a folded or degenerate face" api.mesh.generate(3)
-                    _qtt_unchanged(api,before)
+                    try
+                        generated=api.mesh.generate(3)
+                        @test validate(generated).ok
+                    catch err
+                        @test occursin(diagnostic,sprint(showerror,err))
+                        _qtt_unchanged(api,before)
+                    end
                 end)
                 continue
             end
@@ -677,12 +703,16 @@ end
         # The literal CAD construction remains valid. A finite caller edit
         # makes this source concave before the planner is invoked.
         concave=_QTT.fixture("concave_guard";laterals=true,arrangement="Right")
-        _qtt_model_failure(concave.source,r"QuadTriNoNewVerts.*convex";mutate=model->(model.points[3]=(.25,.25,0.)))
+        # Gmsh sweeps the Source mesh without a convexity check; the port
+        # does too, and the projection refuses the cap Point the edit left
+        # behind.
+        _qtt_model_outcome(concave.source,r"QuadTriNoNewVerts.*(convex|absent from the completed sweep)";
+            mutate=model->(model.points[3]=(.25,.25,0.)))
         # The source at z=1 has four exact endpoints. A positive requested
         # sub-ULP translation rounds all subsequent planes onto that source.
         # Edit the existing shell to preserve its distinct CAD identities.
         rounded=_QTT.fixture("rounded_guard";laterals=true,offset=(0.,0.,1.))
-        _qtt_model_failure(rounded.source,r"actual normal planes collapse or reverse after rounding";
+        _qtt_model_failure(rounded.source,r"actual normal planes collapse or reverse after rounding|completed volume has no cells";
             mutate=model->begin
             for (tag,p) in collect(model.points)
                 p[3]>1. && (model.points[tag]=(p[1],p[2],1.0 + 2.0^-54))

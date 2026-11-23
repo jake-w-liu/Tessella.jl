@@ -5,7 +5,7 @@ function b4_source_frames(f)
     execution=B4.execute(f.source;dim=0);m=execution.model
     out=Int.(execution.lists["sweep"]);t=out[2]
     caller="independent B4 original source frames"
-    completed=M._extrude_nonew_plan(deepcopy(m),t,caller)
+    completed=M._extrude_nonew_catalog_plan(deepcopy(m),t,caller)
     original=completed.source_mesh
     nodes=only(B4.blocks(original)).nodes
     params=M._extrude_gate(m,3,t);spec=m.meshing.extrude_specs[(3,t)]
@@ -59,7 +59,7 @@ end
 function b4_node_frames(f)
     M=Tessella.Model;g=B4.execute(f.source;dim=0);m=g.model
     out=Int.(g.lists["sweep"]);t=out[2];caller="independent B4 node permutations"
-    completed=M._extrude_nonew_plan(deepcopy(m),t,caller)
+    completed=M._extrude_nonew_catalog_plan(deepcopy(m),t,caller)
     original=completed.source_mesh;nodes=only(B4.blocks(original)).nodes;n=nnodes(original)
     params=M._extrude_gate(m,3,t);spec=m.meshing.extrude_specs[(3,t)]
     orders=[collect(1:n),collect(n:-1:1),circshift(collect(1:n),1),

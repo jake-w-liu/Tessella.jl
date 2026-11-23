@@ -30,15 +30,100 @@ function _extrude_nonew_general_candidate(m::GeoModel,t::Int,caller)
             entry=_extrude_entity_params(m,3,owner,caller)
             entry!==nothing && _extrude_is_nonew(entry[1]) &&
                 entry[3][1]==2 && abs(entry[3][2])==source
-        end || return false
+        end && continue
+        # A lateral of two NoNewVerts Regions with the same layer record:
+        # the first Region meshes it (its quadrangles free), the second reads
+        # its cells (QuadToTriGetRegionDiags).
+        _extrude_nonew_general_shared_lateral(m,t,surface,owners,caller) && continue
+        # A lateral of an unrecombined layered Region: Gmsh's global
+        # SubdivideExtrudedMesh splits it first and the QuadToTri Region is
+        # meshed again on those diagonals (meshQuadToTriRegionAfterGlobalSubdivide).
+        _extrude_nonew_general_ordinary_partner(m,t,surface,owners,caller) || return false
     end
     _extrude_nonew_unmerged_b4_incidence(m,t,caller) && return false
     return true
 end
 
+function _extrude_nonew_general_shared_lateral(m::GeoModel,t::Int,surface::Int,owners,caller)
+    length(owners)==2 && t in owners || return false
+    s_link=get(m.meshing.extrude_sources,(2,surface),nothing)
+    s_link!==nothing && s_link[1]==1 || return false
+    t_entry=_extrude_entity_params(m,3,t,caller)
+    for owner in owners
+        entry=_extrude_entity_params(m,3,owner,caller)
+        entry!==nothing && _extrude_is_nonew(entry[1]) && entry[3][1]==2 || return false
+        isequal(entry[1].layers,t_entry[1].layers) && isequal(entry[1].heights,t_entry[1].heights) &&
+            isequal(entry[2],t_entry[2]) || return false
+        abs(entry[3][2])==surface && return false
+        abs(s_link[2]) in _model_projection_surface_curves(m,abs(entry[3][2])) || return false
+    end
+    return true
+end
+
+function _extrude_nonew_general_ordinary_partner(m::GeoModel,t::Int,surface::Int,owners,caller)
+    length(owners)==2 && t in owners || return false
+    s_link=get(m.meshing.extrude_sources,(2,surface),nothing)
+    s_link!==nothing && s_link[1]==1 || return false
+    t_entry=_extrude_entity_params(m,3,t,caller)
+    partner=only(o for o in owners if o!=t)
+    entry=_extrude_entity_params(m,3,partner,caller)
+    entry===nothing && return false
+    params,spec,link=entry
+    (_extrude_is_nonew(params) || params.recombine || params.quad_to_tri!==:none) && return false
+    link[1]==2 && abs(link[2])!=surface || return false
+    # A recombined Source cannot be swept without Recombine; Gmsh stops there.
+    haskey(m.meshing.recombine,(2,abs(link[2]))) && return false
+    isequal(params.layers,t_entry[1].layers) && isequal(params.heights,t_entry[1].heights) &&
+        isequal(spec,t_entry[2]) || return false
+    return abs(s_link[2]) in _model_projection_surface_curves(m,abs(link[2]))
+end
+
+# The diagonal set of Gmsh's global SubdivideExtrudedMesh over every
+# unrecombined layered Region of the model, run before any seed exists.
+function _extrude_nonew_general_subdivision(m::GeoModel,caller;_mesh_input=nothing)
+    sweeps=_ExtrudeVolumeSweep[]
+    for tag in sort!(collect(keys(m.volumes)))
+        _extrude_gate(m,3,tag)===nothing && continue
+        entry=_extrude_entity_params(m,3,tag,caller;_mesh_input)
+        entry===nothing && continue
+        params,spec,link=entry
+        (_extrude_is_nonew(params) || params.recombine) && continue
+        push!(sweeps,_extrude_volume_sweep(m,tag,params,spec,link[2],caller;_mesh_input))
+    end
+    return _extrude_subdivide!(sweeps,caller)
+end
+
+# The wall an unrecombined partner's subdivision leaves on lateral `s`:
+# two triangles per layer quadrangle, split on the subdivision diagonal.
+function _extrude_nonew_general_subdivided_wall(cols,lines,edges,caller)
+    coords=NTuple{3,Float64}[];index=Dict{NTuple{3,Float64},Int32}()
+    node(p)=get!(index,p) do
+        push!(coords,p);Int32(length(coords))
+    end
+    tris=NTuple{3,Int32}[]
+    has(p,q)=(p,q) in edges || (q,p) in edges
+    for (a,b) in lines,l in 1:size(cols,1)-1
+        A0=cols[l,a];B0=cols[l,b];A1=cols[l+1,a];B1=cols[l+1,b]
+        if has(A0,B1)
+            push!(tris,(node(A0),node(B0),node(B1)),(node(A0),node(B1),node(A1)))
+        elseif has(B0,A1)
+            push!(tris,(node(A0),node(B0),node(A1)),(node(B0),node(B1),node(A1)))
+        else
+            throw(ArgumentError("$caller: QuadTriNoNewVerts shared wall quadrangle " *
+                "has no subdivision diagonal"))
+        end
+    end
+    xyz=Matrix{Float64}(undef,3,length(coords))
+    for (k,p) in enumerate(coords);xyz[:,k].=p;end
+    nodes=Matrix{Int32}(undef,3,length(tris))
+    for (k,c) in enumerate(tris);nodes[:,k].=c;end
+    return MixedMesh(xyz,[ElementBlock(2,nodes)])
+end
+
 function _extrude_nonew_general_plan(m::GeoModel,t::Int,caller::AbstractString;
         min_angle_deg::Real=25.0,max_periodic_passes=8,
-        size_field::Union{Nothing,AbstractSizeField}=nothing,_mesh_input=nothing)
+        size_field::Union{Nothing,AbstractSizeField}=nothing,_mesh_input=nothing,
+        _given_walls=nothing)
     params=_extrude_gate(m,3,t)
     spec=m.meshing.extrude_specs[(3,t)]
     source=abs(m.meshing.extrude_sources[(3,t)][2])
@@ -178,11 +263,64 @@ function _extrude_nonew_general_plan(m::GeoModel,t::Int,caller::AbstractString;
         Set(source_id[r] for r in values(point_row)) ∪ Set(source_id[r] for r in keys(curve_rank)),
         spec.type===:rotate || spec.type===:twist,
         [[(source_id[a],source_id[b]) for (a,b) in lines] for lines in lateral_lines],
-        fill(params.recomb_laterals ? 0 : 2,length(lateral_lines)),
-        fill(params.recomb_laterals,length(lateral_lines)),
+        Int[_extrude_quadtri_regions(m,s,caller)==[t] ? (params.recomb_laterals ? 0 : 2) : 1
+            for s in lateral_tags],
+        Bool[_extrude_quadtri_regions(m,s,caller)==[t] ? params.recomb_laterals : true
+            for s in lateral_tags],
         false,true,length(point_of)+1)
-    result=QuadToTri3D.qt_mesh_region(region)
+    # Laterals shared with the other NoNewVerts Region: given cells when that
+    # Region was meshed first, else free quadrangles this Region splits.
+    given=Dict{Int,Any}();free=Set{Int}();initial=Dict{Int,Any}()
+    subdivision=nothing
+    for (index,s) in enumerate(lateral_tags)
+        owners=_extrude_quadtri_regions(m,s,caller)
+        owners==[t] && continue
+        if _extrude_nonew_general_ordinary_partner(m,t,s,owners,caller)
+            subdivision===nothing &&
+                (subdivision=_extrude_nonew_general_subdivision(deepcopy(m),caller;_mesh_input))
+            wall=_extrude_nonew_general_subdivided_wall(cols,lateral_lines[index],subdivision,caller)
+            given[index]=_extrude_nonew_general_wall_cells(wall,ids,lateral_lines[index],
+                source_id,region,caller)
+            continue
+        end
+        part=_given_walls===nothing ? nothing : get(_given_walls,s,nothing)
+        if part===nothing
+            push!(free,index)
+            # A transfinite wall is meshed before either Region; its
+            # triangles' diagonals are adjustable, not fixed.
+            if haskey(m.meshing.transfinite_surfaces,s)
+                wall=_transfinite_surface_mesh(m,s,Dict{Tuple{Int,Float64},Float64}(),caller;size_field)
+                initial[index]=_extrude_nonew_general_wall_cells(wall,ids,lateral_lines[index],
+                    source_id,region,caller)
+            end
+        else
+            given[index]=_extrude_nonew_general_wall_cells(part,ids,lateral_lines[index],
+                source_id,region,caller)
+        end
+    end
+    # A transfinite cap is meshed before the Region (meshGFace's order); the
+    # Region reads its triangles and their diagonals.
+    top_override=nothing
+    if haskey(m.meshing.transfinite_surfaces,top)
+        actual=_mesh_input isa _ModelMeshAuthority ?
+            _model_mesh_product(_mesh_input,2,top;caller) : nothing
+        cap=actual!==nothing && any(block->!isempty(block.nodes),actual.blocks) ? actual :
+            mesh_model_surface(m,top;min_angle_deg,max_periodic_passes,size_field,_mesh_input)
+        top_override=_extrude_nonew_general_cap(cap,ids,region,caller)
+    elseif _mesh_input isa _ModelMeshAuthority
+        # A cap the model already holds as triangles (a retained product being
+        # projected) is read as it stands, as Gmsh reads a meshed face.
+        actual=_model_mesh_product(_mesh_input,2,top;caller)
+        if (actual isa Mesh && size(actual.tris,2)>0) || (actual isa MixedMesh &&
+           any(b->b isa ElementBlock && b.msh==2 && !isempty(b.nodes),actual.blocks) &&
+           all(b->!(b isa ElementBlock) || b.msh in (1,2) || isempty(b.nodes),actual.blocks))
+            top_override=_extrude_nonew_general_cap(actual,ids,region,caller)
+        end
+    end
+    result=QuadToTri3D.qt_mesh_region(region;top=top_override,given,free,initial)
     out=result.mesh
+    # Gmsh logs these and meshes on; its API call then fails with the text.
+    isempty(out.errors) || throw(ArgumentError("$caller: "*first(out.errors)))
     coordinate(id)=id<=length(point_of) ? point_of[id] :
         out.new_coords[findfirst(==(id),out.new_ids)]
     P(c)=map(coordinate,c)
@@ -204,9 +342,92 @@ function _extrude_nonew_general_plan(m::GeoModel,t::Int,caller::AbstractString;
         top_tag=top,lateral_tags=sort!(lateral_tags),catalog=catalog)
 end
 
-# The general planner's cap: its own triangles (MeshQuadToTriTopSurface).
-function _extrude_nonew_general_top(cells)
+# The cells of a shared lateral the other Region already emitted, in this
+# planner's vertex ids, grouped per source line as createQuaTri made them.
+function _extrude_nonew_general_wall_cells(part,ids,lines,source_id,region,caller)
+    nlev=sum(region.layers)
+    blocks=part isa Mesh ? [part.tris] : [b.nodes for b in part.blocks if b isa ElementBlock && b.msh in (2,3)]
+    cells=Vector{Tuple{Vararg{Int}}}()
+    for nodes in blocks,column in axes(nodes,2)
+        cell=Tuple(begin
+            p=(part.coords[1,v],part.coords[2,v],part.coords[3,v])
+            id=get(ids,p,0)
+            id==0 && throw(ArgumentError(
+                "$caller: QuadTriNoNewVerts shared wall node is off this Region's columns"))
+            id
+        end for v in @view nodes[:,column])
+        push!(cells,cell)
+    end
+    per_line=Vector{Vector{Tuple{Vararg{Int}}}}()
+    used=falses(length(cells))
+    for (a,b) in lines
+        column=Set{Int}(region.vid(v,l) for v in (source_id[a],source_id[b]) for l in 0:nlev)
+        mine=Tuple{Vararg{Int}}[]
+        for (k,cell) in enumerate(cells)
+            used[k] && continue
+            all(v->v in column,cell) || continue
+            used[k]=true;push!(mine,cell)
+        end
+        push!(per_line,mine)
+    end
+    all(used) || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts shared wall cell spans two source lines"))
+    return per_line
+end
+
+# A cap meshed ahead of the Region, in the planner's vertex ids: its
+# triangles, and as diagonals the triangle edges that cross a swept source
+# quadrangle. A cap with nodes off the swept columns, quadrangles, or a
+# triangle across two source cells cannot be followed; Gmsh stops there too.
+function _extrude_nonew_general_cap(cap,ids,region,caller)
+    top=sum(region.layers)
+    blocks=cap isa Mesh ? [(2,cap.tris)] : [(Int(b.msh),b.nodes) for b in cap.blocks if b isa ElementBlock]
+    cells=NTuple{3,Int}[]
+    for (msh,nodes) in blocks
+        msh==1 && continue
+        msh==2 || throw(ArgumentError(
+            "$caller: QuadTriNoNewVerts cap mesh cannot be followed by the Region"))
+        for column in axes(nodes,2)
+            cell=ntuple(3) do k
+                p=(cap.coords[1,nodes[k,column]],cap.coords[2,nodes[k,column]],cap.coords[3,nodes[k,column]])
+                id=get(ids,p,0)
+                id==0 && throw(ArgumentError(
+                    "$caller: QuadTriNoNewVerts cap mesh has a node off the swept columns"))
+                id
+            end
+            push!(cells,cell)
+        end
+    end
+    quads=[map(v->region.vid(v,top),q) for q in region.quads]
+    edge_quads=Dict{QuadToTri3D.Edge,Int}()
+    diagonal_of=Dict{QuadToTri3D.Edge,Int}()
+    for (k,q) in enumerate(quads)
+        for i in 1:4
+            edge_quads[QuadToTri3D._ekey(q[i],q[mod1(i+1,4)])]=k
+        end
+        diagonal_of[QuadToTri3D._ekey(q[1],q[3])]=k
+        diagonal_of[QuadToTri3D._ekey(q[2],q[4])]=k
+    end
+    diagonals=QuadToTri3D.Edge[]
+    for cell in cells,i in 1:3
+        e=QuadToTri3D._ekey(cell[i],cell[mod1(i+1,3)])
+        haskey(diagonal_of,e) && !(e in diagonals) && push!(diagonals,e)
+    end
+    length(diagonals)==length(quads) || throw(ArgumentError(
+        "$caller: QuadTriNoNewVerts finalized surfaces do not exactly cover the typed volume boundary"))
+    return cells,diagonals
+end
+
+# The general planner's cap: its own triangles (MeshQuadToTriTopSurface),
+# its nodes in the Source's node order (copyMesh copies the Source's
+# vertices in order before the cap is triangulated).
+function _extrude_nonew_general_top(cells,cols=nothing)
     lookup=Dict{NTuple{3,Float64},Int32}();coords=NTuple{3,Float64}[]
+    if cols!==nothing
+        for i in axes(cols,2)
+            _extrude_node!(lookup,coords,cols[end,i])
+        end
+    end
     nodes=Matrix{Int32}(undef,3,length(cells))
     for (column,cell) in enumerate(cells),k in 1:3
         nodes[k,column]=_extrude_node!(lookup,coords,cell[k])

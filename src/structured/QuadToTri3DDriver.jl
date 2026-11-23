@@ -33,9 +33,13 @@ function create_qua_tri(v,flag::Int,recombine::Bool,constrained)
 end
 
 # MeshExtrudedSurface of every lateral, cells per source line.
-function lateral_meshes(r::QTRegion,constrained)
+function lateral_meshes(r::QTRegion,constrained;given=Dict{Int,Any}())
     out=Vector{Vector{Vector{Tuple{Vararg{Int}}}}}()
     for (s,lines) in enumerate(r.lateral_lines)
+        # A lateral another Region already meshed keeps its cells.
+        if haskey(given,s)
+            push!(out,given[s]);continue
+        end
         per_line=Vector{Vector{Tuple{Vararg{Int}}}}()
         for (v0,v1) in lines
             cells=Vector{Tuple{Vararg{Int}}}()
@@ -111,14 +115,22 @@ end
 
 # meshQuadToTriRegion for a lone QuadToTri region: its volume cells, the
 # remeshed laterals, the top triangles and the body-centred vertices.
-function qt_mesh_region(r::QTRegion)
+# `given`: lateral index => the cells of a lateral another QuadToTri Region
+# already meshed; `free`: laterals shared with a QuadToTri Region not meshed
+# yet (meshed as quadrangles first, IsValidQuadToTriLateral's flag 1).
+# `initial`: lateral index => cells a lateral had before this Region (a
+# transfinite wall), read for its adjustable diagonals and then remeshed.
+function qt_mesh_region(r::QTRegion;top=nothing,given=Dict{Int,Any}(),free=Set{Int}(),
+                        initial=Dict{Int,Any}())
     st=QTState()
     c=categorize(r)
-    first_laterals=lateral_meshes(r,nothing)
-    top_cells,top_diagonals=top_surface(r)
-    edge_generator!(st,r,c,first_laterals,top_diagonals)
+    first_laterals=lateral_meshes(r,nothing;given=merge(initial,given))
+    # A top Surface meshed before the Region (a transfinite cap) is read as
+    # it is: MeshQuadToTriTopSurface only meshes an empty top.
+    top_cells,top_diagonals=top===nothing ? top_surface(r) : top
+    edge_generator!(st,r,c,first_laterals,top_diagonals;free,fixed=Set(keys(given)))
     out=QTMesh(r.coord,r.next_id)
     create_elements!(out,st,r,c)
-    laterals=lateral_meshes(r,st.quadToTri_edges)
+    laterals=lateral_meshes(r,st.quadToTri_edges;given)
     return (mesh=out,laterals=laterals,top=top_cells,state=st)
 end

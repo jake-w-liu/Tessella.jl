@@ -235,8 +235,9 @@ function certify(mesh,f,source;oracle=false,native_top=!oracle,check_separation=
         require(length(selected)==2 && all(length(face)==3 for face in selected),"copied cap is not two actual Tri3")
         diagonal=intersect(Set(selected[1]),Set(selected[2]));require(length(diagonal)==2,"top cap diagonal is missing")
         if native_top
-            start=findfirst(==(minimum(cell)),cell);opposite=cell[mod1(start+2,4)]
-            require(diagonal==Set((grid[n+1,minimum(cell)],grid[n+1,opposite])),"top cap does not use original source-node identity")
+            # Gmsh's MeshQuadToTriTopSurface picks the diagonal by vertex address;
+            # the cap is either diagonal of its own Source quadrangle.
+            require(diagonal in (Set((grid[n+1,cell[1]],grid[n+1,cell[3]])),Set((grid[n+1,cell[2]],grid[n+1,cell[4]]))),"top cap does not use original source-node identity")
         end
         setdiff!(remaining,selected)
     end

@@ -475,12 +475,19 @@ end
 # then the edging passes of QuadToTriEdgeGenerator. A lone region's laterals
 # are not shared with another QuadToTri region, so their quadrangles are
 # forbidden, and they are extruded entities, so their diagonals adjustable.
+#
+# A lateral shared with a second QuadToTri Region (QuadToTriGetRegionDiags):
+# while that Region is unmeshed (`free`), its quadrangles are not forbidden
+# and its diagonals are worked out by this Region's lateral remesh; once it
+# is meshed (`fixed`), the lateral's triangle diagonals are fixed edges.
 function edge_generator!(st::QTState,r::QTRegion,c::CategorizedSourceElements,
-        lateral_cells,top_diagonals)
+        lateral_cells,top_diagonals;free=Set{Int}(),fixed=Set{Int}())
     for (s,lines) in enumerate(r.lateral_lines)
         for (li,(v0,v1)) in enumerate(lines)
-            for cell in lateral_cells[s][li]
-                length(cell)==4 && create_forbidden!(st.forbidden_edges,cell)
+            if !(s in free)
+                for cell in lateral_cells[s][li]
+                    length(cell)==4 && create_forbidden!(st.forbidden_edges,cell)
+                end
             end
             # A line whose end lies on the axis gives single triangles only.
             (r.vid(v0,0)==r.vid(v0,1) || r.vid(v1,0)==r.vid(v1,1)) && continue
@@ -493,8 +500,10 @@ function edge_generator!(st::QTState,r::QTRegion,c::CategorizedSourceElements,
                 t=first(tris)
                 if (verts[1] in t) && (verts[4] in t)
                     create_edge!(st.lat_tri_diags,verts[1],verts[4])
+                    s in fixed && create_edge!(st.quadToTri_edges,verts[1],verts[4])
                 elseif (verts[2] in t) && (verts[3] in t)
                     create_edge!(st.lat_tri_diags,verts[2],verts[3])
+                    s in fixed && create_edge!(st.quadToTri_edges,verts[2],verts[3])
                 end
             end
         end
