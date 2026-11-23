@@ -2420,6 +2420,7 @@ end
 # merged per-cell entity vectors remain index-aligned.
 function _merge_entity_meshes(parts,caller::AbstractString;
                               require_positive_tets::Bool=true,
+                              tet_topology_certified::Bool=false,
                               node_entities=nothing,node_identities=nothing,cell_identities=nothing)
     any(part->part[2] isa MixedMesh,parts) &&
         return _merge_mixed_entity_meshes(parts,caller;node_entities,node_identities,cell_identities)
@@ -2550,7 +2551,7 @@ function _merge_entity_meshes(parts,caller::AbstractString;
     volume_parts=count(part->ntets(part[2])>0,parts)
     # Flat tetrahedra stay: Gmsh emits them for a sweep in its source's plane.
     diag=validate(merged;require_positive_tets=require_positive_tets,allow_flat_tets=true,
-                  tri_owners=tri_owners,require_tet_topology=volume_parts<=1)
+                  tri_owners=tri_owners,require_tet_topology=volume_parts<=1 && !tet_topology_certified)
     diag.ok || throw(ErrorException(
         "$caller: merged mesh is invalid — "*join(diag.messages,"; ")))
     if volume_parts>1

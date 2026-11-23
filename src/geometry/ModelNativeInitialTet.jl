@@ -318,10 +318,18 @@ mutable struct _ModelNativeVolumeBirths
     # `boundary_writeback` (possibly synthesized) carries the surface
     # tri->quad substitution.
     recombine3d::Union{Nothing,Recombine3D.Combine3DResult}
+    # The producer certified the face topology of its tetrahedra (a fill
+    # changed only by certified cavity insertions and swaps, or HXT's
+    # adjacency): the assembly does not prove it again.
+    topology_certified::Bool
+    # The producer audited its boundary faces against the consumed Surface
+    # cells (`_model_certify_native_volume_constraints` on the final complex,
+    # or HXT, whose kernel fails unless every triangle is a facet).
+    boundary_certified::Bool
 end
 _ModelNativeVolumeBirths(node_max::UInt64=UInt64(0),element_max::UInt64=UInt64(0))=
     _ModelNativeVolumeBirths(nothing,UInt64[],node_max,0,UInt64[],element_max,
-        nothing,nothing,nothing)
+        nothing,nothing,nothing,false,false)
 
 function _model_native_volume_cell_births!(births,mesh)
     births===nothing && return mesh
@@ -363,7 +371,12 @@ struct _ModelVolumeGeometryProduction
     element_tags::Vector{UInt64}
     element_high_water::UInt64
     boundary_writeback::Union{Nothing,_ModelVolumeBoundaryWriteback}
+    topology_certified::Bool
+    boundary_certified::Bool
 end
+_ModelVolumeGeometryProduction(mesh,labels,node_high_water,temporary,cells,element_high_water,
+    writeback)=_ModelVolumeGeometryProduction(mesh,labels,node_high_water,temporary,cells,
+    element_high_water,writeback,false,false)
 
 function _model_volume_geometry_production(mesh,births,caller)
     labels=zeros(UInt64,nnodes(mesh))
@@ -394,7 +407,8 @@ function _model_volume_geometry_production(mesh,births,caller)
     end
     return _ModelVolumeGeometryProduction(mesh,labels,births.node_high_water,
         births.temporary_elements,cells,births.element_high_water,
-        births.boundary_writeback)
+        births.boundary_writeback,births.topology_certified && mesh isa Mesh,
+        births.boundary_certified && mesh isa Mesh)
 end
 
 function _model_native_initial_delaunay_fill(surface::Mesh,order,options,caller;

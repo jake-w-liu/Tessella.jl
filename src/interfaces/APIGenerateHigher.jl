@@ -3044,7 +3044,8 @@ end
 
 function _higher_volume_input_classification(assembly,m,mesh::Union{Mesh,MixedMesh},input,tag,
                                             source_tags,caller;
-                                            boundary_writeback=nothing)
+                                            boundary_writeback=nothing,
+                                            boundary_certified::Bool=false)
     length(source_tags)==nnodes(mesh) && allunique(source_tags) || throw(ArgumentError(
         "$caller: native Volume[$tag] lacks a unique complete row UID binding"))
     actual=input.mesh;data=actual.entity_data
@@ -3072,11 +3073,15 @@ function _higher_volume_input_classification(assembly,m,mesh::Union{Mesh,MixedMe
     # A boundary-subdivided mesh carries its write-back receipt: the
     # certificate audits the subdivided product cells it will publish, and
     # the recovered Steiner vertices take their written-back owners.
-    geometry=(surface=mesh,native_node_tags=source_tags)
-    constraints=boundary_writeback===nothing ?
-        Model._model_native_volume_input_constraints(m,tag,geometry,input,caller) :
-        boundary_writeback.constraints
-    Model._model_certify_native_volume_constraints(mesh,constraints,tag,caller)
+    # A producer that audited its own final complex against the same
+    # Surface cells (`boundary_certified`) is not audited twice.
+    if !boundary_certified
+        geometry=(surface=mesh,native_node_tags=source_tags)
+        constraints=boundary_writeback===nothing ?
+            Model._model_native_volume_input_constraints(m,tag,geometry,input,caller) :
+            boundary_writeback.constraints
+        Model._model_certify_native_volume_constraints(mesh,constraints,tag,caller)
+    end
     boundary_writeback===nothing || for (row,owner) in boundary_writeback.nodes
         row in eachindex(node_entities) || throw(ArgumentError(
             "$caller: Volume[$tag] write-back vertex $row is outside the mesh"))
@@ -3916,6 +3921,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                                periodic_surface_pairs=nothing,
                                optimize_pyramids::Float64=0.0,
                                retained_surfaces=Set{Tuple{Int,Int32}}(),
+                               certified_volumes=nothing,
                                surface_constructor_inputs=Dict{Tuple{Int,Int32},MixedMesh}(),
                                volume_forward=nothing)
     have=Set(cell.owner for cell in assembly.cells)
@@ -4037,7 +4043,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
         mesh=extruded===nothing ? nothing : get(extruded.parts,tag,nothing)
         source_rows=nothing;source_row_retained=nothing;source_rows_existing_only=false
         source_cells=nothing;source_cell_max=nothing;alternate=nothing;source_emission=nothing;hybrid_production=nothing;source_certified=false
-        wb_receipt=nothing
+        wb_receipt=nothing;self_topology=false;self_boundary=false
         source_node_base=hybrid_batch_receipt===nothing ? assembly.node_max : hybrid_batch_receipt.node_base
         source_node_max=nothing
         if mesh!==nothing && geometry_parts!==nothing && scope!==nothing
@@ -4090,6 +4096,10 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
             end
             wb_receipt=production isa Model._ModelVolumeGeometryProduction ?
                 production.boundary_writeback : nothing
+            if production isa Model._ModelVolumeGeometryProduction
+                self_topology=production.topology_certified
+                self_boundary=production.boundary_certified
+            end
         end
         native_rows=(mesh isa Mesh || mesh isa MixedMesh) &&
             source_rows!==nothing &&
@@ -4114,7 +4124,7 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                 lattice_out=volume_lattice,certified=source_certified)
         elseif native_rows
             _higher_volume_input_classification(assembly,m,mesh,input,tag,source_rows,assembly.caller;
-                boundary_writeback=wb_receipt)
+                boundary_writeback=wb_receipt,boundary_certified=self_boundary)
         else
             _classify_cached_mesh(m,_classification_skeleton(
                 mesh,get(m.meshing.reverse,(3,tag),false)),3,tag,mesh;_extrude_scope=scope,
@@ -4161,6 +4171,8 @@ function _higher_volume_phase!(assembly,m,options,entities,discarded,done;
                                                geometry_cells,caller=assembly.caller)
             push!(geometry_parts,(tag,geometry_mesh,geometry_class,geometry_mapping))
         end
+        certified_volumes===nothing || !self_topology || alternate!==nothing ||
+            push!(certified_volumes,tag)
         push!(done,(3,Int32(tag)))
         # State this Region left behind that a later detached produce still
         # reads: stored Curve discretizations (embedded-curve lazy grading and
@@ -4600,7 +4612,8 @@ _higher_column_isequal(coords,column,point)=
     isequal(coords[2,column],point[2]) && isequal(coords[3,column],point[3])
 
 function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
-                                  geometry_merge=nothing,geometry_cells,geometry_birth=nothing)
+                                  geometry_merge=nothing,geometry_cells,geometry_birth=nothing,
+                                  certified_volumes=nothing)
     isempty(parts) && return nothing,Int32[],Vector{UInt64}[],nothing,nothing
     # Upstream `pos.find` keeps a single vertex store: when a produced
     # boundary row welds onto a vertex an earlier producer emitted, the
@@ -4661,8 +4674,17 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
         push!(cell_identities,[_higher_live_cell_tags(live,assembly.cells,block,caller) for block in traces])
     end
     if geometry_merge===nothing
+        # One Volume whose producer certified its face topology: the merged
+        # tetrahedra are exactly its own, so that pass is not repeated.
+        tet_topology_certified=certified_volumes!==nothing && !isempty(certified_volumes) &&
+            all(part->part[2] isa Mesh,parts) && begin
+                volume_tags=[tag for (tag,mesh,_,_) in parts if ntets(mesh)>0]
+                length(volume_tags)==1 && volume_tags[1] in certified_volumes &&
+                    count(part->part[1]==volume_tags[1] && part[3].entity[1]==3,parts)==1 &&
+                    all(part->ntets(part[2])==0 || part[3].entity[1]==3,parts)
+            end
         carrier,remaps,_,carrier_cells=_merge_entity_meshes(geometry_parts,caller;node_entities,
-            node_identities,cell_identities,
+            node_identities,cell_identities,tet_topology_certified,
             require_positive_tets=!any(part->part[3].entity[1]==3 &&
                 get(plan.model.meshing.reverse,(3,part[1]),false),parts))
     else
@@ -4818,6 +4840,8 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     geometry_alternates=preserve_geometry ? IdDict{Any,Any}() : nothing
     geometry_parts=!preserve_geometry ? nothing : dimension==2 ? surface_parts :
         Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[]
+    # Volumes whose producer certified the face topology of its tetrahedra
+    certified_volumes=Set{Int}()
     discarded=Set{Tuple{Int,Int32}}()
     native_orphan_births=Set{UInt64}()
     # Cross-phase scheduling state: `surface_forward` plans the Surface
@@ -4911,7 +4935,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
                              geometry_parts,surface_parts,geometry_cells,geometry_birth,native_orphan_births,
                              periodic_surface_pairs=periodic_pairs,
                              optimize_pyramids=Float64(get(generation_meshing,:optimize_pyramids,0.0)),
-                             retained_surfaces,
+                             retained_surfaces,certified_volumes,
                              surface_constructor_inputs,volume_forward)
     end
     if preserve_geometry && geometry_layout===:all
@@ -5006,7 +5030,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     carrier,carrier_rows,carrier_cells,emitted_parts,emitted_rows=geometry_parts===nothing ?
         (nothing,Int32[],Vector{UInt64}[],nothing,nothing) :
         _higher_geometry_carrier(plan,assembly,geometry_parts,dimension,caller;
-            geometry_merge,geometry_cells,geometry_birth)
+            geometry_merge,geometry_cells,geometry_birth,certified_volumes)
     m.meshing.mesh_authority=carrier===nothing ?
         Model._model_mesh_authority(plan.mesh,done;caller,private_rank=final_ranks) :
         Model._model_mesh_authority(plan.mesh,done;caller,private_rank=final_ranks,

@@ -650,7 +650,8 @@ function _parallel_volume_remap_production(produced,dn::UInt64,dc::UInt64,
     return Model._ModelVolumeGeometryProduction(produced.mesh,boundary_tags,
         produced.node_high_water+dn,produced.temporary_elements,
         element_tags,produced.element_high_water+dc,
-        _parallel_volume_remap_boundary(produced.boundary_writeback,dc,hc))
+        _parallel_volume_remap_boundary(produced.boundary_writeback,dc,hc),
+        produced.topology_certified,produced.boundary_certified)
 end
 
 # Staleness is measured against dirt accumulated after the batch's snapshot —

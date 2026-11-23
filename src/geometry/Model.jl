@@ -11448,6 +11448,10 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
         # finite positive volumes, no duplicate cells (no face-topology pass).
         diag=validate(mesh;require_tet_topology=false)
         diag.ok || throw(ErrorException("$caller: invalid HXT mesh — "*join(diag.messages,"; ")))
+        if _native_initial_births!==nothing
+            _native_initial_births.topology_certified=true
+            _native_initial_births.boundary_certified=true
+        end
         return mesh
     end
     m.meshing.algorithm_3d in (1,3,9) || throw(ArgumentError(
@@ -11777,6 +11781,7 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
             native_constraints,initial_geometry,_mesh_input,
             _native_initial_births,caller;persist=true)
         _model_certify_native_volume_constraints(mesh,writeback_constraints,t,caller)
+        _native_initial_births===nothing || (_native_initial_births.boundary_certified=true)
     end
     for constraint in periodic_surfaces
         # A cross-Region master has no classified vertices in this Region's
@@ -11882,6 +11887,10 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     diag=topology_certified && mesh isa Mesh ? validate(mesh;require_tet_topology=false) :
         validate(mesh)
     diag.ok || throw(ErrorException("$caller: invalid mesh — "*join(diag.messages,"; ")))
+    # Either way the face topology of these tetrahedra is now proved (carried
+    # from the fill, or by the full check just above); reversing below keeps it.
+    _native_initial_births===nothing ||
+        (_native_initial_births.topology_certified=mesh isa Mesh)
     _volume_cell_count(mesh)>0 || throw(ErrorException(
         "$caller: Volume[$t] produced no volume cells"))
     explicit_geometry===nothing || _model_certify_explicit_volume_semantics(
