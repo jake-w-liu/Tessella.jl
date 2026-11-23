@@ -1885,14 +1885,50 @@ function _classify_republish_mesh!(m::GeoModel)
     for key in collect(keys(data.entities))
         key in live || delete!(data.entities,key)
     end
+    coordinates=nothing
     for (key,record) in _discrete_mesh_records_model(m)
         haskey(data.entities,key) && continue
-        bounds=_record_entity_bbox(record,key[1])
+        coordinates===nothing && (coordinates=_record_node_coordinates(m))
+        bounds=_record_element_bbox(record,key[1],coordinates)
+        # MSH4 lists a curve's end vertex negated (GModelIO_MSH4: "convention
+        # that the end vertex is negative"), a closed curve's point twice.
+        boundaries=Int32[]
+        for (index,(_,t)) in enumerate(record.boundary)
+            push!(boundaries,key[1]==1 && index==2 ? -Int32(abs(t)) : Int32(abs(t)))
+        end
         data.entities[key]=Elements._native_mixed_entity(key[1],key[2],bounds;
             physical_tags=Int32.(get(m.entity_physicals,key,Int[])),
-            boundaries=Int32[abs(t) for (_,t) in record.boundary])
+            boundaries=boundaries)
     end
     return nothing
+end
+
+function _record_node_coordinates(m::GeoModel)
+    coordinates=Dict{UInt64,NTuple{3,Float64}}()
+    for (_,record) in _discrete_mesh_records_model(m)
+        for (index,tag) in enumerate(record.node_tags)
+            coordinates[tag]=(record.node_coords[1,index],record.node_coords[2,index],
+                              record.node_coords[3,index])
+        end
+    end
+    return coordinates
+end
+
+# GEntity::bounds of a discrete entity: the box of its elements' nodes,
+# boundary nodes included (Gmsh writes 0 0 0 1 1 0 for a classified unit
+# square, whose own nodes are all interior); the owned nodes otherwise.
+function _record_element_bbox(record::DiscreteEntity,dim::Int,coordinates)
+    dim==0 && return _record_entity_bbox(record,dim)
+    low=[Inf,Inf,Inf];high=[-Inf,-Inf,-Inf]
+    for nodes in record.element_nodes, node in nodes
+        point=get(coordinates,node,nothing)
+        point===nothing && continue
+        for axis in 1:3
+            low[axis]=min(low[axis],point[axis]);high[axis]=max(high[axis],point[axis])
+        end
+    end
+    isfinite(low[1]) || return _record_entity_bbox(record,dim)
+    return (low[1],low[2],low[3],high[1],high[2],high[3])
 end
 
 # Bounding box of a record's owned nodes; empty records keep a degenerate box.

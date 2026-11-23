@@ -52,8 +52,8 @@ total_cells(m)=sum(size(b.nodes,2) for b in m.blocks)
         Tessella.CLI.main([unpartitioned,"-part","3","-o",repartitioned])
         @test Tessella.validate(E.read_mixed_msh(repartitioned)).ok
 
-        # Topology/ghost production is bounded to discrete session models —
-        # it rejects loudly on BRep imports rather than silently degrading.
+        # Partition topology on a loaded .msh, as `gmsh box.msh -part 2
+        # -part_topo -save` does in Gmsh 4.15.2.
         box_geo=joinpath(directory,"box.geo")
         write(box_geo,"""lc=0.5;
 Point(1)={0,0,0,lc};Point(2)={1,0,0,lc};Point(3)={1,1,0,lc};Point(4)={0,1,0,lc};
@@ -69,8 +69,11 @@ Plane Surface(4)={4};Plane Surface(5)={5};Plane Surface(6)={6};
 Surface Loop(1)={1,2,3,4,5,6};Volume(1)={1};""")
         box_msh=joinpath(directory,"box.msh")
         Tessella.CLI.main([box_geo,"-3","-o",box_msh])
-        @test_throws ArgumentError Tessella.CLI.main(
-            [box_msh,"-part","2","-part_topo","-o",partitioned])
+        @test Tessella.CLI.main(
+            [box_msh,"-part","2","-part_topo","-o",partitioned])==partitioned
+        @test occursin("\$PartitionedEntities
+2
+",read(partitioned,String))
         # Native (non-BRep-import) volume meshes carry complete entity
         # transport, so the partition-topology plan now publishes real
         # $PartitionedEntities children (gmsh 4.15.2 adds no `_part{...}`
@@ -216,17 +219,33 @@ SP(1,0,0){2};
         end
         @test pid_out==line_geo
 
-        # -reclassify/-reparam route to API.mesh.classify_surfaces/create_geometry;
-        # exporting a reclassified BRep-imported model is a bounded API path and
-        # fails loudly rather than silently writing the wrong thing.
+        # -reclassify/-reparam route to API.mesh.classify_surfaces/create_geometry.
+        # Gmsh 4.15.2 (`gmsh surface.msh -reclassify 40 -o classified.msh`)
+        # writes one point, one closed curve (its end vertex negated) and one
+        # surface boxed by its elements, 20 nodes and 39 elements tagged 17-202.
         surface_msh=joinpath(directory,"surface.msh")
         Tessella.CLI.main([square_geo,"-2","-o",surface_msh])
         classified=joinpath(directory,"classified.msh")
-        @test_throws ArgumentError Tessella.CLI.main(
-            [surface_msh,"-reclassify","40","-o",classified])
         reparamed=joinpath(directory,"reparamed.msh")
-        @test_throws ArgumentError Tessella.CLI.main(
-            [surface_msh,"-reparam","40","-o",reparamed])
+        @test Tessella.CLI.main([surface_msh,"-reclassify","40","-o",classified])==classified
+        text=read(classified,String)
+        @test occursin("\$Entities
+1 1 1 0
+5 0 0 0 0
+7 0 0 0 1 1 0 0 2 5 -5
+2 0 0 0 1 1 0 0 1 7
+",text)
+        @test occursin("\$Elements
+3 39 17 202
+",text)
+        product=E.read_mixed_msh(classified)
+        @test size(product.coords,2)==20
+        # -reparam (forReparametrization) keeps its earlier cut: one entity of
+        # each dimension, as Gmsh writes for this square.
+        @test Tessella.CLI.main([surface_msh,"-reparam","40","-o",reparamed])==reparamed
+        @test occursin("\$Entities
+1 1 1 0
+",read(reparamed,String))
 
         # Loud rejections: batch conflicts, unsupported and obsolete flags.
         @test_throws ArgumentError Tessella.CLI.main([square_geo,"-2","-refine"])

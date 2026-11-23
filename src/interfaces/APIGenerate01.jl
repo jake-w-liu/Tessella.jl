@@ -1750,13 +1750,29 @@ function _dim01_entities(m,entities,assembly,kept)
     for position in kept
         push!(get!(()->Int[],owned,assembly.nodes[position].owner),position)
     end
+    # A discrete entity's box is that of its elements' nodes, boundary nodes
+    # included, as GEntity::bounds gives it (a classified square: 0 0 0 1 1 0).
+    kept_set=BitSet(kept)
+    for cell in assembly.cells
+        cell.owner[1]>=1 && haskey(m.discrete,(cell.owner[1],Int(cell.owner[2]))) || continue
+        positions=get!(()->Int[],owned,cell.owner)
+        for node in cell.nodes
+            Int(node) in kept_set && push!(positions,Int(node))
+        end
+    end
     for entity in entities
         dim,tag=entity
+        record_boundary=dim==1 && !haskey(m.curves,tag) ?
+            get(m.discrete,entity,nothing) : nothing
         boundary=if dim==0
             Int32[]
         elseif dim==1 && haskey(m.curves,tag)
             first_point,last_point=m.curves[tag]
             Int32[first_point,-last_point]
+        elseif record_boundary!==nothing && length(record_boundary.boundary)==2 &&
+                all(entry->entry[1]==0,record_boundary.boundary)
+            # MSH4's convention: the end vertex negated (a closed curve: 5 -5).
+            Int32[abs(record_boundary.boundary[1][2]),-abs(record_boundary.boundary[2][2])]
         else
             Int32[t for (_,t) in model_boundary(m,[entity],false,true,false)]
         end
