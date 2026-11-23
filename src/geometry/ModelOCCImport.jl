@@ -1274,6 +1274,139 @@ function _occ_import_results(m,roots,highest_dim_only,caller)
     return reduce(vcat,reverse(tiers))
 end
 
+# One placed instance of an assembly part: its solid, the rigid map from the
+# part's coordinates to the root's (p -> rotation*p + translation, rotation
+# as rows) and its product path name.
+struct _OCCStepOccurrence
+    brep::Any
+    rotation::NTuple{3,NTuple{3,Float64}}
+    translation::NTuple{3,Float64}
+    name::String
+end
+
+# The rigid placement of a child representation in its parent's coordinates
+# from an `ITEM_DEFINED_TRANSFORMATION`'s two frames (item 1 in the child,
+# item 2 in the parent): the child frame is carried onto the parent frame.
+function _occ_step_item_transform(entities,item1,item2)
+    a,A=BRep._step_occurrence_frame(entities,item1)
+    b,B=BRep._step_occurrence_frame(entities,item2)
+    # p -> B'*(A*(p-a)) + b, with the frames' axes as the rows of A and B
+    R=ntuple(i->ntuple(j->B[1][i]*A[1][j]+B[2][i]*A[2][j]+B[3][i]*A[3][j],3),3)
+    Ra=ntuple(i->R[i][1]*a[1]+R[i][2]*a[2]+R[i][3]*a[3],3)
+    return R,ntuple(i->b[i]-Ra[i],3)
+end
+
+function _occ_step_compose(P,p,C,c)
+    R=ntuple(i->ntuple(j->P[i][1]*C[1][j]+P[i][2]*C[2][j]+P[i][3]*C[3][j],3),3)
+    t=ntuple(i->p[i]+P[i][1]*c[1]+P[i][2]*c[2]+P[i][3]*c[3],3)
+    return R,t
+end
+
+# STEP product assemblies (`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` binding a
+# transformed representation relationship to a `NEXT_ASSEMBLY_USAGE_
+# OCCURRENCE`): every root-to-part path places one instance, children in the
+# order of their usages, as OpenCASCADE's STEP reader lays them out. `nothing`
+# when the file has no such placements (plain parts import as they are).
+function _occ_step_assembly_occurrences(entities)
+    placements=BRep.StepEntity[]
+    for e in values(entities)
+        e.kind=="CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" && push!(placements,e)
+    end
+    isempty(placements) && return nothing
+    # parent representation id => [(usage id, child representation id,
+    # rotation, translation, usage name)]
+    children=Dict{Int,Vector{Tuple{Int,Int,NTuple{3,NTuple{3,Float64}},
+                                   NTuple{3,Float64},String}}}()
+    is_child=Set{Int}()
+    parent_names=Dict{Int,String}()
+    for c in placements
+        length(c.args)==2 || return nothing
+        relation=BRep._deref_entity(entities,c.args[1])
+        shape=BRep._deref_entity(entities,c.args[2])
+        (relation===nothing || shape===nothing) && return nothing
+        parts=BRep._step_relationship_parts(relation)
+        (haskey(parts,"REPRESENTATION_RELATIONSHIP") &&
+         haskey(parts,"REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION")) ||
+            return nothing
+        rr=parts["REPRESENTATION_RELATIONSHIP"].args
+        length(rr)==4 || return nothing
+        child=rr[3][2]; parent=rr[4][2]
+        idt=BRep._deref_entity(entities,
+            parts["REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION"].args[1])
+        (idt!==nothing && idt.kind=="ITEM_DEFINED_TRANSFORMATION" &&
+         length(idt.args)==4) || return nothing
+        R,t=_occ_step_item_transform(entities,idt.args[3],idt.args[4])
+        usage=length(shape.args)>=3 ? BRep._deref_entity(entities,shape.args[3]) :
+            nothing
+        uid=usage===nothing ? c.id : usage.id
+        name=""
+        if usage!==nothing && length(usage.args)>=5
+            # the usage's id ("NUT::1"; its name field is often empty)
+            usage.args[1] isa AbstractString && (name=String(usage.args[1]))
+            pname=_occ_step_product_name(entities,usage.args[5])
+            isempty(pname) || (name*="/"*pname)
+            root_name=_occ_step_product_name(entities,usage.args[4])
+            isempty(root_name) || (parent_names[parent]=root_name)
+        end
+        list=get(children,parent,nothing)
+        if list===nothing
+            list=Tuple{Int,Int,NTuple{3,NTuple{3,Float64}},NTuple{3,Float64},
+                       String}[]
+            children[parent]=list
+        end
+        push!(list,(uid,child,R,t,name))
+        push!(is_child,child)
+    end
+    occurrences=_OCCStepOccurrence[]
+    roots=Int[]
+    for p in keys(children)
+        p in is_child || push!(roots,p)
+    end
+    sort!(roots)
+    identity=BRep._STEP_OCCURRENCE_IDENTITY
+    for root in roots
+        # Gmsh names a part instance by its XCAF label path:
+        # Shapes/<root product>/<usage>/<product>/...
+        _occ_step_place!(occurrences,entities,children,root,identity[1],
+                         identity[2],"Shapes/"*get(parent_names,root,""),0)
+    end
+    isempty(occurrences) && return nothing
+    return occurrences
+end
+
+# PRODUCT_DEFINITION -> formation -> PRODUCT name ("" when not resolvable)
+function _occ_step_product_name(entities,reference)
+    pd=BRep._deref_entity(entities,reference)
+    (pd===nothing || length(pd.args)<3) && return ""
+    formation=BRep._deref_entity(entities,pd.args[3])
+    (formation===nothing || length(formation.args)<3) && return ""
+    product=BRep._deref_entity(entities,formation.args[3])
+    (product===nothing || length(product.args)<2) && return ""
+    name=product.args[2]
+    return name isa AbstractString ? String(name) : ""
+end
+
+function _occ_step_place!(occurrences,entities,children,rep,R,t,path,depth)
+    depth>64 && throw(ArgumentError("OCC.importShapes: cyclic STEP assembly"))
+    entity=get(entities,rep,nothing)
+    if entity!==nothing && length(entity.args)>=2 && entity.args[2] isa Vector
+        for item in entity.args[2]
+            solid=BRep._deref_entity(entities,item)
+            solid===nothing && continue
+            solid.kind in BRep._STEP_BREP_SOLID_KINDS || continue
+            push!(occurrences,_OCCStepOccurrence(solid,R,t,path))
+        end
+    end
+    list=get(children,rep,nothing)
+    list===nothing && return nothing
+    for (_,child,Rc,tc,name) in sort(list;by=first)
+        Rn,tn=_occ_step_compose(R,t,Rc,tc)
+        _occ_step_place!(occurrences,entities,children,child,Rn,tn,
+                         path*"/"*name,depth+1)
+    end
+    return nothing
+end
+
 function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
                                   format="",caller="OCC.importShapes")
     format isa AbstractString || throw(ArgumentError(
@@ -1311,8 +1444,31 @@ function _model_occ_import_shapes(m::GeoModel,path;highest_dim_only=true,
     breps=sort!([e for e in values(entities)
                  if e.kind in BRep._STEP_BREP_SOLID_KINDS]; by=e->e.id)
     out=Tuple{Int,Int}[]
-    for brep in breps
-        append!(out,_occ_import_step_solid(m,brep,entities,caller))
+    occurrences=_occ_step_assembly_occurrences(entities)
+    if occurrences===nothing
+        for brep in breps
+            append!(out,_occ_import_step_solid(m,brep,entities,caller))
+        end
+    else
+        # an assembly: every placed instance of a part is a solid of its own,
+        # moved by the transforms along its product path, in the order of
+        # the usages (examples/boolean/as1-tu-203.stp: 5 parts, 18 solids)
+        for occ in occurrences
+            solids=_occ_import_step_solid(m,occ.brep,entities,caller)
+            if occ.rotation!=BRep._STEP_OCCURRENCE_IDENTITY[1] ||
+                    occ.translation!=BRep._STEP_OCCURRENCE_IDENTITY[2]
+                R=occ.rotation
+                linear=(R[1][1],R[1][2],R[1][3],R[2][1],R[2][2],R[2][3],
+                        R[3][1],R[3][2],R[3][3])
+                t=_AffineTransform(linear,occ.translation,
+                    NTuple{16,Float64}[],(linear=linear,loc=occ.translation))
+                _model_occ_transform!(m,solids,t,caller)
+            end
+            for s in solids
+                m.entity_names[s]=occ.name
+            end
+            append!(out,solids)
+        end
     end
     # `SHELL_BASED_SURFACE_MODEL`/`OPEN_SHELL`/loose-face roots bind their
     # member faces as dim-2 entities — upstream `_multiBind` reaches the
