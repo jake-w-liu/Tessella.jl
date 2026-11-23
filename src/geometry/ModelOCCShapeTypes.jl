@@ -29,13 +29,19 @@ mutable struct _ModelNativeOCCKernel
     # move (kernel record untouched — the public value wins), mirroring
     # upstream where both names land on the same vertex object.
     mirrored_points::Dict{Int,NTuple{3,Float64}}
+    # OpenCASCADE's `TopExp_Explorer` order where it differs from the stored
+    # one: a face id => its edge ids, an edge id => its vertex ids. A box
+    # lists a face's edges against its wire and an edge's end vertex first;
+    # a fillet or chamfer rebuilds faces in the order its builder walks
+    # them. Absent ids explore as stored (wire order, start vertex first).
+    explorer::Dict{UInt64,Vector{UInt64}}
 end
 
 _ModelNativeOCCKernel()=_ModelNativeOCCKernel(
     Dict{Tuple{Int,Int},UInt64}(),Dict{UInt64,Tuple{Int,Int}}(),
     Dict{UInt64,_ModelOCCShape}(),ntuple(_->_ModelOCCEntityMap(),6),zeros(Int,6),UInt64(1),
     Set{Tuple{Int,Int}}(),false,Dict{UInt64,Int}(),
-    Dict{Int,NTuple{3,Float64}}())
+    Dict{Int,NTuple{3,Float64}}(),Dict{UInt64,Vector{UInt64}}())
 
 Base.:(==)(a::_ModelNativeOCCKernel,b::_ModelNativeOCCKernel)=
     all(name->getfield(a,name)==getfield(b,name),fieldnames(_ModelNativeOCCKernel))

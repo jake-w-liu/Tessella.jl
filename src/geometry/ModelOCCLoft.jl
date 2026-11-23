@@ -1848,7 +1848,7 @@ end
 # shape still uses keep their tags. Face pcurve and vertex tables are
 # re-keyed; the old tags go to `removed` so the next synchronize replaces
 # the model's records.
-function _occ_retag_result!(kernel,vid,caller)
+function _occ_retag_result!(kernel,vid,caller;order=nothing)
     # the solid itself takes the next free volume tag as well
     vt=kernel.shape_tags[vid][2]
     _model_occ_entity_map_unbind!(kernel.entity_maps[6],vt)
@@ -1857,8 +1857,12 @@ function _occ_retag_result!(kernel,vid,caller)
     nvt=maximum((t for (d,t) in keys(kernel.bindings) if d==3);init=0)+1
     kernel.maxima[6]=nvt-1
     _model_occ_bind_shape!(kernel,3,nvt,vid,kernel.shapes[vid])
-    order=_model_occ_closure(kernel,UInt64[vid])
-    inside=Set(order)
+    closure=_model_occ_closure(kernel,UInt64[vid])
+    inside=Set(closure)
+    # `order` (faces, edges and vertices as `TopExp_Explorer` meets them)
+    # replaces the closure's order where the builder's is known
+    order=order===nothing ? closure :
+        vcat(order,UInt64[x for x in closure if !(x in order)])
     used_outside=Set{UInt64}()
     for ((d,_),id) in kernel.bindings
         id in inside && continue
@@ -1887,7 +1891,7 @@ function _occ_retag_result!(kernel,vid,caller)
             d==0 && (tagmap0[t]=base+i)
         end
     end
-    faces=Dict{UInt64,_ModelOCCShape}(id=>kernel.shapes[id] for id in order
+    faces=Dict{UInt64,_ModelOCCShape}(id=>kernel.shapes[id] for id in closure
         if kernel.shapes[id].dimension in (1,2))
     _model_occ_rekey_pcurves!(kernel,faces,tagmap;tagmap0,caller)
     kernel.changed=true
@@ -2106,6 +2110,9 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
         verts=_occ_halfspace_verts(nplanes,nbs)
         isempty(verts) && throw(ArgumentError(
             "$caller: chamfer leaves an empty body"))
+        snap=_occ_explorer_snapshot(kernel,vid)
+        blended=UInt64[kernel.bindings[(1,abs(_model_occ_requested_tag(c,
+            caller)))] for c in curve_tags]
         # `_fillet` unbinds the volume with its sub-shapes before binding
         # the result (`removeVolume`), so the new faces, curves and points
         # take the lowest free tags as in Gmsh: the old sub-shapes nothing
@@ -2125,7 +2132,8 @@ function _model_occ_chamfer(m::GeoModel,volume_tags,curve_tags,
         sid=kernel.bindings[(-2,shell)]
         kernel.shapes[vid]=_ModelOCCShape(3,(kind=:solid,),UInt64[sid])
         _occ_invalidate_volume_tables!(m,vt)
-        vt=_occ_retag_result!(kernel,vid,caller)
+        xorder=_occ_explorer_rebuild!(kernel,snap,vid,blended)
+        vt=_occ_retag_result!(kernel,vid,caller;order=xorder)
         kernel.changed=true
         push!(out,(3,vt))
     end
@@ -3562,6 +3570,8 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
     kernel=m.occ_kernel
     rs=radii isa AbstractVector ? Float64[Float64(r) for r in radii] :
         fill(Float64(radii),length(curve_tags))
+    # `OCC_Internals::_fillet`: one radius serves every curve
+    length(rs)==1 && (rs=fill(rs[1],length(curve_tags)))
     length(rs)==length(curve_tags) || throw(ArgumentError(
         "$caller: radii and curveTags must have the same length"))
     all(>(0.0),rs) || throw(ArgumentError(
@@ -3791,6 +3801,9 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
                     wires_of,et,caller)
             end
         end
+        snap=_occ_explorer_snapshot(kernel,vid)
+        blended=vcat(collect(keys(fillet_of)),collect(keys(circ_specs)),
+                     collect(keys(sweep_specs)))
         # ── rebuild geometry ─────────────────────────────────────────
         # Kept corners and edges stay the solid's own: the rebuilt faces
         # use them instead of coincident copies (a copy left the shell open
@@ -4011,7 +4024,9 @@ function _model_occ_fillet(m::GeoModel,volume_tags,curve_tags,radii;
             cid===nothing || _model_occ_unbind!(kernel,cid,false)
         end
         _occ_invalidate_volume_tables!(m,vt)
-        vt=_occ_retag_result!(kernel,vid,caller)
+        xorder=isempty(fillet_of) ? nothing :
+            _occ_explorer_rebuild!(kernel,snap,vid,blended)
+        vt=_occ_retag_result!(kernel,vid,caller;order=xorder)
         kernel.changed=true
         push!(out,(3,vt))
     end

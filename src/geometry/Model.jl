@@ -990,6 +990,7 @@ include("ModelBoolean.jl")
 include("ModelOCCBoolean.jl")
 include("ModelOCCNurbsConvert.jl")
 include("ModelOCCLoft.jl")
+include("ModelOCCExplorerOrder.jl")
 include("ModelOCCImport.jl")
 include("ModelOCCIGES.jl")
 

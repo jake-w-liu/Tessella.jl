@@ -5967,6 +5967,7 @@ function _geo_occ_bind_volume!(m::GeoModel,tag::Int,kernel,caller)
     Model._model_occ_bind_shape!(kernel,3,tag,vid,
         Model._ModelOCCShape(3,(kind=:solid,),shell_ids))
     kernel.next_shape=vid+UInt64(1)
+    haskey(m.box_extents,tag) && Model._occ_explorer_box!(kernel,vid)
     return vid
 end
 

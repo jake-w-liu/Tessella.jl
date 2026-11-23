@@ -4,6 +4,8 @@ const _MODEL_ENTITY_TYPES=("Point","Line","Plane","Volume")
 function _model_entity_type_name(m::GeoModel,dimension::Int,tag::Int)
     if dimension==1
         geometry=get(m.curve_geometry,tag,nothing)
+        geometry isa NamedTuple && hasproperty(geometry,:native_type) &&
+            return geometry.native_type
         if geometry!==nothing && get(geometry,:occ,nothing)===:copied_curve
             native=_model_occ_native_curve_type(geometry.curve)
             native===nothing || return native

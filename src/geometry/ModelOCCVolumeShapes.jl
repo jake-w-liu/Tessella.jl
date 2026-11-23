@@ -518,6 +518,17 @@ function _model_occ_add_box!(m::GeoModel,x,y,z,dx,dy,dz;tag=-1)
     for (dimension,tag,id,shape) in pending
         _model_occ_bind_shape!(kernel,dimension,tag,id,shape)
     end
+    # `TopExp_Explorer` order of `BRepPrim_GWedge`'s shapes (what a fillet
+    # or chamfer of the box renumbers from): a face's first wire edge, then
+    # the rest of the wire walked backwards; an edge's end vertex first.
+    for (index,loop) in enumerate(face_loops)
+        kernel.explorer[face_ids[index]]=
+            UInt64[edge_ids[abs(loop[j])] for j in (1,4,3,2)]
+    end
+    for i in 1:12
+        kernel.explorer[edge_ids[i]]=
+            UInt64[vertex_ids[ep[i][2]],vertex_ids[ep[i][1]]]
+    end
     kernel.next_shape=solid_id+UInt64(1)
     return allocated
 end

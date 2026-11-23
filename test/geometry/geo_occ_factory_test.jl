@@ -186,8 +186,8 @@ end
             """)
         @test occursin("Could not fillet shapes", msg)
 
-        # A single-edge chamfer reaches `OCC.chamfer` (the "kept faces do not
-        # close a solid" diagnostic can only come from the OCC endpoint).
+        # A single-edge chamfer reaches `OCC.chamfer`; curve 1 lies on
+        # Surface 1, so Gmsh 4.15.2 chamfers it (7 surfaces, no error).
         msg = _occ_geo_error("""
             SetFactory("OpenCASCADE");
             Box(1) = {0, 0, 0, 1, 1, 1};
@@ -195,7 +195,7 @@ end
             f() = Unique(Boundary{ Surface{e()}; });
             out() = Chamfer{1}{f(0)}{e(0)}{0.1};
             """)
-        @test occursin("Could not chamfer shapes", msg)
+        @test isempty(msg)
     end
 
     @testset "built-in-only gates preserved" begin

@@ -422,6 +422,7 @@ end
         "interfaces/api_entity_identity_test.jl",
         "interfaces/api_mesh_renumber_identity_test.jl",
         "geometry/geo_classify_mesh_queries_test.jl",
+        "geometry/occ_blend_explorer_order_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

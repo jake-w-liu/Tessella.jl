@@ -853,7 +853,12 @@ function _model_minimum_curve_segments(m::GeoModel,curve::Integer,
     kind=get(m.curve_types,curve,:line)
     occ=get(m.curve_geometry,curve,nothing)
     is_occ=occ!==nothing && hasproperty(occ,:occ)
-    if kind===:line || (is_occ && occ.occ===:line)
+    # an OCC edge Gmsh types otherwise than its geometry (a fillet's or
+    # chamfer's `TrimmedCurve`) takes that type's floor
+    native=is_occ && hasproperty(occ,:native_type) ? occ.native_type : nothing
+    if native!==nothing && !(native in ("Line","Circle","Ellipse"))
+        np=options.min_curve_nodes-1
+    elseif kind===:line || (is_occ && occ.occ===:line)
         np=options.min_line_nodes-1
     elseif kind in (:circle,:ellipse) ||
            (is_occ && occ.occ in (:circle,:ellipse))
