@@ -392,20 +392,34 @@ end
     @test err isa ArgumentError
     @test occursin("not representable",err.msg)
 
-    # Boolean operand snapshots follow the Boolean result, not later operand
-    # transforms.
-    r=_execute_transform_source("""
-        SetFactory("OpenCASCADE");
-        Box(1) = {0,0,0, 1,1,1};
-        Box(2) = {0.5,0,0, 1,1,1};
-        BooleanUnion(3) = { Volume{1}; }{ Volume{2}; };
-        Translate {10,0,0} { Volume{3}; }
-        Translate {100,0,0} { Volume{1}; }
-        """)
-    A,B=r.model.boolean_operands[3].meshes
-    @test minimum(A.coords[1,:])≈10.0     # snapshot moved with the result
-    @test maximum(B.coords[1,:])≈11.5
-    @test r.model.box_extents[1][1]≈100.0  # operand transform independent
+    # A Boolean result and its kept operands move independently. The
+    # OpenCASCADE route keeps no operand snapshots; Gmsh 4.15.2 gives
+    # Volume 1 x∈[100,101], Volume 2 x∈[0.5,1.5], Volume 3 x∈[10,11.5] with
+    # masses 1, 1, 1.5 and 24/36/18/3 entities.
+    let API=Tessella.API,path=tempname()*".geo"
+        write(path,"""
+            SetFactory("OpenCASCADE");
+            Box(1) = {0,0,0, 1,1,1};
+            Box(2) = {0.5,0,0, 1,1,1};
+            BooleanUnion(3) = { Volume{1}; }{ Volume{2}; };
+            Translate {10,0,0} { Volume{3}; }
+            Translate {100,0,0} { Volume{1}; }
+            """)
+        API.initialize()
+        try
+            API.option("General.Terminal",0)
+            API.open(path)
+            @test Tuple(length(API.model.get_entities(d)) for d in 0:3)==(24,36,18,3)
+            for (t,x0,x1,m) in ((1,100.0,101.0,1.0),(2,0.5,1.5,1.0),(3,10.0,11.5,1.5))
+                bb=API.model.get_bounding_box(3,t)
+                @test isapprox(bb[1],x0;atol=1e-6) && isapprox(bb[4],x1;atol=1e-6)
+                @test API.model.occ.get_mass(3,t)≈m
+            end
+        finally
+            API.finalize()
+            rm(path;force=true)
+        end
+    end
 end
 
 @testset ".geo transform error paths" begin

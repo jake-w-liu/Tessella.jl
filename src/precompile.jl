@@ -101,6 +101,24 @@ function _precompile_meshing_workload()
                 API.finalize()
             end
         end
+        # A sphere fragmented with a box: plane x sphere sections through the
+        # poles, pole edges and piece bounds. Without it the first such
+        # Boolean of a session runs interpreted for about 26 s under
+        # `--compile=min` (the suite) where it takes 9 ms compiled. Best effort.
+        try
+            API.initialize()
+            API.option("General.Terminal", 0)
+            API.model.occ.add_box(2, 0, 0, 1, 1, 1)
+            API.model.occ.add_sphere(1.7, 0, 0.5, 0.35)
+            API.model.occ.fragment([(3, 1)], [(3, 2)])
+            API.model.occ.synchronize()
+            for (_, v) in API.model.get_entities(3)
+                API.model.get_bounding_box(3, v)
+            end
+        catch
+        finally
+            API.finalize()
+        end
         # Staged generation (`generate(1)`, then 2, then 3) runs other paths
         # than one `generate(3)`: the first staged box of a session spent 19 s
         # compiling them. A torus and a cone (2 s each), and the common calls
