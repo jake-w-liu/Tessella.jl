@@ -1509,6 +1509,21 @@ function _detached_mixed_mesh(coords::Matrix{Float64},blocks::Vector{MixedElemen
         MixedPeriodicLink[],MshAncillarySection[],MshDataSection[],nothing)
 end
 
+# `mesh` with other node and element labels: every other array and record is
+# the source's own, shared rather than copied. For a caller that changes only
+# the labels of a mesh it does not own (a relabelled constructor receipt);
+# copying the rest cost a parameter vector per node.
+function _relabeled_mixed_mesh(mesh::MixedMesh,external_node_tags::Vector{UInt64},
+        external_element_tags::Vector{Vector{UInt64}})
+    data=mesh.entity_data::MixedEntityData
+    relabeled=MixedEntityData(_OWNED_MIXED_ENTITY_DATA,data.entities,data.node_entities,
+        data.node_parametric,external_node_tags,data.block_entities,external_element_tags,
+        data.native_mesh_tags)
+    return MixedMesh(_OWNED_MIXED_MESH,mesh.coords,mesh.blocks,mesh.physical_names,relabeled,
+        mesh.elementary_entities,mesh.periodic_links,mesh.ancillary_sections,mesh.data_sections,
+        mesh.partition_data)
+end
+
 # `deepcopy(mesh)` for a mesh of ordinary blocks without links, sections or
 # partitions, whose arrays are not shared between its fields: every array and
 # record copied once, every table refilled in its own order as `deepcopy`

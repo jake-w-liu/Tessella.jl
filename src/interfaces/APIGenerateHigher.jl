@@ -3814,9 +3814,14 @@ function _higher_surface_constructor_publication(authority,constructors,cells,no
     rebound=Dict{Tuple{Int,Int32},MixedMesh}()
     trusted=Set{Tuple{Int,Int32}}()
     for (owner,source) in constructors
-        constructor=Elements._detached_mixed_copy(source);data=constructor.entity_data
-        data!==nothing || throw(ArgumentError(
+        source.entity_data!==nothing || throw(ArgumentError(
             "$caller: Surface constructor publication lacks its actual UID metadata"))
+        # The labels below are rewritten in place; nothing else of the source
+        # receipt is, so the rest is shared instead of copied per node.
+        constructor=Elements._relabeled_mixed_mesh(source,
+            copy(source.entity_data.external_node_tags),
+            Vector{UInt64}[copy(labels) for labels in source.entity_data.external_element_tags])
+        data=constructor.entity_data
         nodes=UInt64[]
         kept_rows=Int32[]
         for (row,uid) in enumerate(data.external_node_tags)

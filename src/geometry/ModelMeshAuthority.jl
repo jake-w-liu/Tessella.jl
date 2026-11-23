@@ -1487,10 +1487,11 @@ function _model_mesh_first_order_surface_constructor_inputs(previous,current,ele
             producer_order=true,first_order=true,shared=true)
         after!==nothing || throw(ArgumentError(
             "$caller: constructor transition loses actual Surface $owner"))
-        copy_constructor=deepcopy(constructor)
-        for labels in copy_constructor.entity_data.external_element_tags
-            labels.=[element_mapping[uid] for uid in labels]
-        end
+        # Only the cell labels change: the rest of the receipt is shared.
+        copy_constructor=Elements._relabeled_mixed_mesh(constructor,
+            constructor.entity_data.external_node_tags,
+            Vector{UInt64}[UInt64[element_mapping[uid] for uid in labels]
+                for labels in constructor.entity_data.external_element_tags])
         _model_surface_constructor_binding(after,copy_constructor,caller)
         rebound[owner]=copy_constructor
     end

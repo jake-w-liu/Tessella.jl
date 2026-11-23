@@ -61,11 +61,27 @@ end
 # one consumer that rewrites products, clones its input first). Cloning it
 # costs as much as the whole previous mesh, its products and its constructor
 # receipts: 58 ms of every operation on a 400-face model already meshed.
+#
+# The mesh records of the entities (`meshing.attached`, `discrete`) hold one
+# node vector per cell and one parameter vector per node. A plan replaces
+# those vectors, and the records' entries, and never writes into one: each
+# record is copied with its containers, sharing the vectors they hold.
+# Deep-copying them cost two objects per cell twice per generation.
 function _dim01_transaction_copy(source_model)
     memory=IdDict{Any,Any}()
     _dim01_share!(memory,source_model.meshing.mesh_authority)
+    for records in (source_model.meshing.attached,source_model.discrete)
+        for record in values(records)
+            haskey(memory,record) || (memory[record]=_dim01_record_copy(record))
+        end
+    end
     return Model._model_mesh_transaction_copy(source_model,memory)
 end
+
+_dim01_record_copy(record::DiscreteEntity)=DiscreteEntity(copy(record.boundary),
+    copy(record.node_tags),copy(record.node_coords),copy(record.node_params),
+    copy(record.element_types),copy(record.element_tags),copy(record.element_nodes),
+    copy(record.aux_params),copy(record.node_native_params),record.geometry_parametrized)
 
 function _dim01_next_tag!(assembly::_Dim01Assembly,node::Bool)
     previous=node ? assembly.node_max : assembly.cell_max
