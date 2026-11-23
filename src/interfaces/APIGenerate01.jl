@@ -1960,16 +1960,18 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
         push!(get!(()->Int[],positions_by_owner,(owner[1],Int(owner[2]))),position)
     end
     records=Dict{Tuple{Int,Int},DiscreteEntity}()
+    no_parameter=Float64[]
     for entity in entities
         dim,tag=entity
         previous=_dim01_record(m,entity)
         # Every mesh payload below is rebuilt from actual identity rows.
-        # Copy the boundary and retained parameter registries without cloning
-        # the node and cell arrays that this reconciliation replaces.
+        # Copy the boundary without cloning the node and cell arrays that this
+        # reconciliation replaces. The parameter registries are only read
+        # below and replaced by new tables that share their vectors.
         record=previous===nothing ? DiscreteEntity() : DiscreteEntity(
             copy(previous.boundary),UInt64[],zeros(3,0),zeros(0,0),
-            Int32[],UInt64[],Vector{UInt64}[],deepcopy(previous.aux_params),
-            runtime_parameters===nothing ? deepcopy(previous.node_native_params) :
+            Int32[],UInt64[],Vector{UInt64}[],previous.aux_params,
+            runtime_parameters===nothing ? previous.node_native_params :
                 Dict{UInt64,Vector{Float64}}(),previous.geometry_parametrized)
         positions=get(positions_by_owner,entity,Int[])
         record.node_tags=copy(data.external_node_tags[positions])
@@ -1987,9 +1989,15 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
             record.node_params=zeros(0,length(positions))
         end
         if runtime_parameters!==nothing
-            record.node_native_params=Dict(data.external_node_tags[position]=>
-                (runtime_parameters[position]===nothing ? Float64[] : copy(runtime_parameters[position]))
-                for position in positions)
+            # Parameter vectors are replaced, never written in place: the
+            # record shares them (and one empty vector for the nodes without)
+            # instead of copying one per node.
+            native=Dict{UInt64,Vector{Float64}}();sizehint!(native,length(positions))
+            for position in positions
+                value=runtime_parameters[position]
+                native[data.external_node_tags[position]]=value===nothing ? no_parameter : value
+            end
+            record.node_native_params=native
         else
             rebound=Dict{UInt64,Vector{Float64}}()
             owned=Set(record.node_tags)
@@ -1997,7 +2005,7 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
                 haskey(node_tag_map,tag) || continue
                 mapped=node_tag_map[tag]
                 mapped in owned || continue
-                rebound[mapped]=copy(value)
+                rebound[mapped]=value
             end
             record.node_native_params=rebound
         end

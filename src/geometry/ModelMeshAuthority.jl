@@ -238,6 +238,9 @@ function _model_mesh_projected_parameter(owner,parameter)
     parameter===nothing && return nothing
     dimension=owner[1]
     length(parameter)>=dimension || return nothing
+    # Parameter vectors are never written in place: one of the owner's
+    # dimension is shared, not sliced into a new vector per node.
+    length(parameter)==dimension && return parameter
     return parameter[1:dimension]
 end
 
