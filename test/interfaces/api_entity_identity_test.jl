@@ -1,3 +1,5 @@
+# The suite includes every test file into Main; this file keeps its names to itself.
+module APIEntityIdentityTests
 using Test
 using Tessella
 using Tessella.MeshTypes: mesh_crc
@@ -85,4 +87,6 @@ const _IDENTITY_API=Tessella.API
     finally
         _IDENTITY_API.finalize()
     end
+end
+
 end

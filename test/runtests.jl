@@ -418,6 +418,7 @@ end
         "interfaces/api_occ_nurbs_mesh_test.jl",
         "geometry/geo_occ_twist_loft_test.jl",
         "interfaces/api_generate_noop_test.jl",
+        "interfaces/api_entity_identity_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)
