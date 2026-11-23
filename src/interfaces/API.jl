@@ -7396,7 +7396,7 @@ function _renumber_nodes_native_lookup_live(old_tags=(),new_tags=())
         if class!==nothing
             plan=_tagged_renumber_plan(model,cached,class,old_tags,new_tags,:node,caller;
                 allow_identity=true)
-            if get(plan,:identity,false)
+            if plan isa _TaggedRenumberIdentity
                 NODE_TAG_MAX[]=plan.max_node_tag;ELEMENT_TAG_MAX[]=plan.max_element_tag
                 return nothing
             end
@@ -7520,7 +7520,7 @@ function _renumber_elements_native_lookup_live(old_tags=(),new_tags=())
         if class!==nothing
             plan=_tagged_renumber_plan(model,cached,class,old_tags,new_tags,:element,caller;
                 allow_identity=true)
-            if get(plan,:identity,false)
+            if plan isa _TaggedRenumberIdentity
                 NODE_TAG_MAX[]=plan.max_node_tag;ELEMENT_TAG_MAX[]=plan.max_element_tag
                 return nothing
             end

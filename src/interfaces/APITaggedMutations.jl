@@ -183,6 +183,13 @@ function _tagged_mesh_max_tags(model,mesh,public=nothing)
     return node,element
 end
 
+# `_tagged_renumber_plan(...; allow_identity=true)` when every label keeps its
+# value: only the tag counters to set.
+struct _TaggedRenumberIdentity
+    max_node_tag::UInt64
+    max_element_tag::UInt64
+end
+
 # `GModel::renumberMeshVertices` first parks every node on tag count+1 when
 # the mesh may be saved partially — physical groups without Mesh.SaveAll, or
 # Mesh.SaveWithoutOrphans — and the node counter that `getMaxNodeTag` reports
@@ -235,8 +242,8 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller;
         max_node_tag,max_element_tag=_tagged_mesh_max_tags(model,cached,public)
         node && (max_node_tag=_tagged_renumber_parked_max(model,max_node_tag,
             length(order),save_all))
-        return (identity=true,max_node_tag=max(max_node_tag,UInt64(node_max)),
-            max_element_tag=max(max_element_tag,UInt64(element_max)))
+        return _TaggedRenumberIdentity(max(max_node_tag,UInt64(node_max)),
+            max(max_element_tag,UInt64(element_max)))
     end
     staged_model=Model._model_mesh_transaction_copy(model)
     _tagged_record_renumber!(staged_model,mapping,node)

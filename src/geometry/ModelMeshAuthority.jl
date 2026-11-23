@@ -999,29 +999,77 @@ function _model_mesh_with_curve_births(authority::_ModelMeshAuthority,births;
     return _model_mesh_with_producer_rows(authority,produced;caller)
 end
 
-function _model_mesh_primary_key(family,tags)
-    return (family,Tuple(sort!(collect(tags))))
+# A primary cell's identity: its family and its sorted node labels, padded
+# to eight with typemax (a hexahedron has the most primary nodes). Fixed-size
+# keys hash without a per-cell vector, tuple or box: the catalogs below are
+# rebuilt at every committed mesh operation (on a 200k-tet box they were half
+# of optimize()).
+const _ModelMeshPrimaryKey=Tuple{Symbol,NTuple{8,UInt64}}
+
+@inline function _model_mesh_sort8(t::NTuple{8,UInt64})
+    # Odd-even transposition: eight phases sort eight entries.
+    for phase in 1:8
+        odd=isodd(phase)
+        t=ntuple(8) do i
+            j=odd ? (isodd(i) ? i+1 : i-1) : (i==1 || i==8 ? i : (iseven(i) ? i+1 : i-1))
+            i==j ? t[i] : (i<j ? min(t[i],t[j]) : max(t[i],t[j]))
+        end
+    end
+    return t
 end
 
-function _model_mesh_primary_catalog(mesh::MixedMesh;include_supports=false)
+function _model_mesh_primary_key(family,tags)::_ModelMeshPrimaryKey
+    count=length(tags)
+    count<=8 || throw(ArgumentError("primary cell with $count nodes"))
+    first_index=firstindex(tags)
+    return (family,_model_mesh_sort8(ntuple(i->i<=count ?
+        UInt64(tags[first_index+i-1]) : typemax(UInt64),8)))
+end
+
+# Element label -> (family, node rows) of every primary cell (with its
+# support nodes when asked); the rows are views of the blocks.
+function _model_mesh_primary_cells(mesh::MixedMesh;include_supports=false)
     data=mesh.entity_data
-    catalog=Dict{UInt64,Tuple{Symbol,Vector{Int32}}}()
-    identities=Dict{Any,Union{Nothing,UInt64}}()
+    catalog=Dict{UInt64,Tuple{Symbol,SubArray{Int32,1,Matrix{Int32},Tuple{UnitRange{Int},Int},true}}}()
+    sizehint!(catalog,sum(block->block isa ElementBlock ? size(block.nodes,2) : 0,mesh.blocks;init=0))
     for (bi,block) in enumerate(mesh.blocks)
         block isa ElementBlock || continue
         family=msh_family(block.msh)
         width=_msh_primary_nodes(family)
         width==0 && continue
+        rows=1:(include_supports ? size(block.nodes,1) : width)
+        tags=data.external_element_tags[bi]
         for column in axes(block.nodes,2)
-            nodes=include_supports ? block.nodes[:,column] : block.nodes[1:width,column]
-            tag=data.external_element_tags[bi][column]
-            catalog[tag]=(family,nodes)
-            key=_model_mesh_primary_key(family,data.external_node_tags[block.nodes[1:width,column]])
-            identities[key]=haskey(identities,key) ? nothing : tag
+            catalog[tags[column]]=(family,view(block.nodes,rows,column))
         end
     end
-    return catalog,identities
+    return catalog
 end
+
+# Primary identity -> element label, or nothing when two cells share it.
+function _model_mesh_primary_identities(mesh::MixedMesh)
+    data=mesh.entity_data
+    labels=data.external_node_tags
+    identities=Dict{_ModelMeshPrimaryKey,Union{Nothing,UInt64}}()
+    for (bi,block) in enumerate(mesh.blocks)
+        block isa ElementBlock || continue
+        family=msh_family(block.msh)
+        width=_msh_primary_nodes(family)
+        width==0 && continue
+        width<=8 || throw(ArgumentError("primary cell with $width nodes"))
+        tags=data.external_element_tags[bi]
+        nodes=block.nodes
+        for column in axes(nodes,2)
+            key=(family,_model_mesh_sort8(ntuple(i->i<=width ?
+                UInt64(labels[nodes[i,column]]) : typemax(UInt64),8)))
+            identities[key]=haskey(identities,key) ? nothing : tags[column]
+        end
+    end
+    return identities
+end
+
+_model_mesh_primary_catalog(mesh::MixedMesh;include_supports=false)=
+    (_model_mesh_primary_cells(mesh;include_supports),_model_mesh_primary_identities(mesh))
 
 function _model_mesh_rebound_carrier(previous::_ModelMeshAuthority,mesh::MixedMesh;
         node_tag_map=nothing,element_tag_map=nothing)
@@ -1034,9 +1082,11 @@ function _model_mesh_rebound_carrier(previous::_ModelMeshAuthority,mesh::MixedMe
         get(node_tag_map,old_tags[row],nothing),Int32(0)) for row in previous.carrier_rows]
     all(>(0),rows) && allunique(rows) || return nothing,Int32[]
     inverse=zeros(Int32,nnodes(mesh));inverse[rows]=Int32.(1:length(rows))
-    _,old_cells=_model_mesh_primary_catalog(previous.mesh)
+    # Only what is read: the old identities when the carrier has no cell
+    # labels, the new labels' cells always.
+    old_cells=isempty(previous.carrier_cells) ? _model_mesh_primary_identities(previous.mesh) : nothing
     include_supports=carrier isa MixedMesh && any(block->msh_spec(block.msh).order>1,carrier.blocks)
-    new_cells,_=_model_mesh_primary_catalog(mesh;include_supports)
+    new_cells=_model_mesh_primary_cells(mesh;include_supports)
     output=Matrix{Int32}[]
     for (bi,(msh,cells)) in enumerate(_model_mesh_carrier_blocks(carrier))
         family=msh_family(msh)

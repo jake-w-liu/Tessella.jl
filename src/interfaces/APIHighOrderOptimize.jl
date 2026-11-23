@@ -965,10 +965,10 @@ function _optimize_surface_mixed_linear!(cached::MixedMesh,class,model,pairs,
     coords=copy(cached.coords)
     params=Union{Nothing,Vector{Float64}}[
         p===nothing ? nothing : copy(p) for p in class.node_parametric]
-    moved=false
     # The model is fixed while vertices move: each Plane frame is built once
     # (`_model_frame_scope`), not at every lifted trial position.
-    Model._model_frame_scope() do
+    moved=Model._model_frame_scope() do
+    any_moved=false
     for tag in sort!(collect(keys(faces)))
         cells=faces[tag]
         adjacency=Dict{Int,Vector{Int}}()
@@ -998,7 +998,7 @@ function _optimize_surface_mixed_linear!(cached::MixedMesh,class,model,pairs,
                     _surface_laplace_vertex!(coords,uv_for,vertex,incident,
                         cells,edges_of,model,tag)
                 result===nothing && continue
-                moved=true
+                any_moved=true
                 if result isa Vector{Float64}
                     uvmap[vertex]=copy(result)
                     params[vertex]=copy(result)
@@ -1006,6 +1006,7 @@ function _optimize_surface_mixed_linear!(cached::MixedMesh,class,model,pairs,
             end
         end
     end
+    any_moved
     end
     moved || return nothing
     slid=Dict{Int,Vector{Float64}}()

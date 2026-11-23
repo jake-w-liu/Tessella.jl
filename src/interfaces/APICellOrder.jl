@@ -48,8 +48,8 @@ const _NativeOrderSlotKey=NTuple{4,Tuple{UInt64,Int}}
 
 function _native_order_face_key(assembly,corners)
     count=length(corners)
-    return _native_order_sort4(ntuple(i->(i<=count ? assembly.nodes[corners[i]].tag :
-        typemax(UInt64),),4))
+    return _native_order_sort4(ntuple(i->i<=count ? assembly.nodes[corners[i]].tag :
+        typemax(UInt64),4))
 end
 
 function _native_order_face_slot_key(assembly,corners,coordinate,order)::_NativeOrderSlotKey
@@ -328,7 +328,7 @@ function _dim01_higher_order_pass!(assembly,m,entities,order;only_visible=false,
         cell.owner[1]>=2 && get!(first_orders,cell.owner,msh_spec(cell.msh).order)
     end
     edges=Dict{Tuple{UInt64,UInt64},Vector{Int32}}()
-    faces=Dict{NTuple{4,Tuple{UInt64}},_NativeOrderFaceSlots}()
+    faces=Dict{NTuple{4,UInt64},_NativeOrderFaceSlots}()
     coefficients=Dict{Int,Matrix{Float64}}()
     placement=Dict{Tuple{Symbol,Int},Vector{Vector{Pair{Int,Float64}}}}()
     for cell in assembly.cells
