@@ -268,49 +268,15 @@ function _classification_skeleton(mesh::MixedMesh,reversed::Bool)
     return out
 end
 
-function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing,node_identities=nothing,
-                                    cell_identities=nothing)
-    positions=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
-    coordinates=NTuple{3,Float64}[]
-    node_capacity=0
-    for (_,mesh) in parts
-        node_capacity=max(node_capacity,nnodes(mesh))
-    end
-    sizehint!(positions,node_capacity)
-    sizehint!(coordinates,node_capacity)
-    remaps=Vector{Vector{Int32}}(undef,length(parts))
-    counts=Dict{Int,Int}()
-    for (i,(_,mesh)) in enumerate(parts)
-        node_identities===nothing || length(node_identities[i])==nnodes(mesh) ||
-            throw(ArgumentError("$caller: produced vertex identities do not align with geometry rows"))
-        remap=Vector{Int32}(undef,nnodes(mesh))
-        for column in axes(mesh.coords,2)
-            p=(mesh.coords[1,column],mesh.coords[2,column],mesh.coords[3,column])
-            owner=node_entities===nothing || node_entities[i]===nothing ?
-                (-1,Int32(0)) : node_entities[i][column]
-            point=(p[1]+0.0,p[2]+0.0,p[3]+0.0)
-            identity=node_identities===nothing ? nothing : node_identities[i][column]
-            identity===nothing || identity>0 || throw(ArgumentError(
-                "$caller: produced vertex identity must be positive"))
-            key=identity===nothing ? (owner[1],owner[2],point) :
-                (typemin(Int),Int32(identity),point)
-            remap[column]=get!(positions,key) do
-                length(coordinates)<typemax(Int32) || throw(ArgumentError(
-                    "$caller: merged mesh exceeds the Int32 node limit"))
-                push!(coordinates,p)
-                Int32(length(coordinates))
-            end
-        end
-        remaps[i]=remap
-        for (msh,cells,_) in _cache_native_blocks(mesh)
-            counts[msh]=Base.checked_add(get(counts,msh,0),size(cells,2))
-        end
-    end
+# The cells of `_merge_mixed_entity_meshes`, merged block by block: a
+# function of the binding type, so that a cell's identity is written to a
+# vector of known type instead of being boxed.
+function _merge_mixed_cells(parts,remaps,counts,cell_identities,::Type{T},caller) where T
+    binding_type=T
     nodes=Dict{Int,Matrix{Int32}}(msh=>Matrix{Int32}(undef,Elements.msh_num_nodes(msh),n)
                                 for (msh,n) in counts)
     physical=Dict(msh=>Vector{Int32}(undef,n) for (msh,n) in counts)
     cursors=Dict(msh=>0 for msh in keys(counts))
-    binding_type=Model._model_mesh_cell_binding_type(cell_identities)
     bindings=cell_identities===nothing ? nothing :
         Dict(msh=>Vector{binding_type}(undef,n) for (msh,n) in counts)
     segment_slots=cell_identities===nothing ? nothing : Dict{NTuple{2,Int32},Int}()
@@ -354,6 +320,50 @@ function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing,node_iden
             end
         end
     end
+    return nodes,physical,cursors,bindings,keeps
+end
+
+function _merge_mixed_entity_meshes(parts,caller;node_entities=nothing,node_identities=nothing,
+                                    cell_identities=nothing)
+    positions=Dict{Tuple{Int,Int32,NTuple{3,Float64}},Int32}()
+    coordinates=NTuple{3,Float64}[]
+    node_capacity=0
+    for (_,mesh) in parts
+        node_capacity=max(node_capacity,nnodes(mesh))
+    end
+    sizehint!(positions,node_capacity)
+    sizehint!(coordinates,node_capacity)
+    remaps=Vector{Vector{Int32}}(undef,length(parts))
+    counts=Dict{Int,Int}()
+    for (i,(_,mesh)) in enumerate(parts)
+        node_identities===nothing || length(node_identities[i])==nnodes(mesh) ||
+            throw(ArgumentError("$caller: produced vertex identities do not align with geometry rows"))
+        remap=Vector{Int32}(undef,nnodes(mesh))
+        for column in axes(mesh.coords,2)
+            p=(mesh.coords[1,column],mesh.coords[2,column],mesh.coords[3,column])
+            owner=node_entities===nothing || node_entities[i]===nothing ?
+                (-1,Int32(0)) : node_entities[i][column]
+            point=(p[1]+0.0,p[2]+0.0,p[3]+0.0)
+            identity=node_identities===nothing ? nothing : node_identities[i][column]
+            identity===nothing || identity>0 || throw(ArgumentError(
+                "$caller: produced vertex identity must be positive"))
+            key=identity===nothing ? (owner[1],owner[2],point) :
+                (typemin(Int),Int32(identity),point)
+            remap[column]=get!(positions,key) do
+                length(coordinates)<typemax(Int32) || throw(ArgumentError(
+                    "$caller: merged mesh exceeds the Int32 node limit"))
+                push!(coordinates,p)
+                Int32(length(coordinates))
+            end
+        end
+        remaps[i]=remap
+        for (msh,cells,_) in _cache_native_blocks(mesh)
+            counts[msh]=Base.checked_add(get(counts,msh,0),size(cells,2))
+        end
+    end
+    binding_type=Model._model_mesh_cell_binding_type(cell_identities)
+    nodes,physical,cursors,bindings,keeps=_merge_mixed_cells(parts,remaps,counts,
+        cell_identities,binding_type,caller)
     coords=Matrix{Float64}(undef,3,length(coordinates))
     for (i,p) in enumerate(coordinates),axis in 1:3
         coords[axis,i]=p[axis]

@@ -127,7 +127,7 @@ function _native_optimize_region!(assembly,m,region,cells;netgen=false,relocate=
         nodes=Int32[rows[product.mesh.tets[slot,column]] for slot in 1:4]
         survivor=get(original,tag,nothing)
         if survivor===nothing
-            push!(replacement,_Dim01Cell(4,(3,Int32(region)),nodes,tag,tag,
+            push!(replacement,_dim01_new_cell(assembly,4,(3,Int32(region)),nodes,tag,tag,
                                         product.mesh.tet_tag[column]))
         else
             # Existing curved interpolation vertices belong to the surviving

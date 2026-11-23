@@ -303,7 +303,7 @@ function _model_mesh_log_run(log::_ModelMeshLog,msh::Int,owner::Int32)
 end
 
 function _model_mesh_log_cell!(log::_ModelMeshLog,run::_ModelMeshLogRun,
-                               nodes::Vector{Int32},physical::Int32,tag::UInt64)
+                               nodes::AbstractVector{Int32},physical::Int32,tag::UInt64)
     log.valid || return false
     log.valid=false
     width=run.width;bi=run.block
@@ -346,7 +346,7 @@ end
 
 # Append one cell on its own.
 function _model_mesh_log_cell!(log::_ModelMeshLog,msh::Int,owner::Int32,
-                               nodes::Vector{Int32},physical::Int32,tag::UInt64)
+                               nodes::AbstractVector{Int32},physical::Int32,tag::UInt64)
     run=_model_mesh_log_run(log,msh,owner)
     run===nothing && return false
     return _model_mesh_log_cell!(log,run,nodes,physical,tag)

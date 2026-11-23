@@ -430,23 +430,45 @@ function _higher_transfinite_quad_rows(m,tag,mesh,point_rows,caller)
         throw(ArgumentError("$caller: native transfinite face frame is not a tensor symmetry"))
     counts=ntuple(axis->sum(abs,differences[axis]),2)
     directions=ntuple(axis->ntuple(k->sign(differences[axis][k]),2),2)
-    row_at(i,j)=Int32(1+sum((start[axis]+i*directions[1][axis]+j*directions[2][axis])*
-        (axis==1 ? 1 : npu) for axis in 1:2))
+    row_at(i,j)=Int32(1+(start[1]+i*directions[1][1]+j*directions[2][1])+
+        (start[2]+i*directions[1][2]+j*directions[2][2])*npu)
     rows=Int32[row_at(i,j) for i in 0:counts[1] for j in 0:counts[2]]
     allunique(rows) && length(rows)==nnodes(mesh) ||
         throw(ArgumentError("$caller: native transfinite face rows are not bijective"))
-    source=Dict(Tuple(sort!(collect(cells[:,column])))=>column for column in axes(cells,2))
+    # Cells keyed by their sorted corners, as tuples: no vector per cell.
+    sorted(a::Int32,b::Int32,c::Int32,d::Int32)=begin
+        a,b=minmax(a,b);c,d=minmax(c,d);a,c=minmax(a,c);b,d=minmax(b,d);b,c=minmax(b,c)
+        (a,b,c,d)
+    end
+    source=Dict{NTuple{4,Int32},Int}()
+    sizehint!(source,size(cells,2))
+    for column in axes(cells,2)
+        source[sorted(Int32(cells[1,column]),Int32(cells[2,column]),
+                      Int32(cells[3,column]),Int32(cells[4,column]))]=column
+    end
     nodes=Matrix{Int32}(undef,4,size(cells,2));columns=Int[]
+    sizehint!(columns,size(cells,2))
     for i in 0:counts[1]-1,j in 0:counts[2]-1
-        cell=Int32[row_at(i,j),row_at(i+1,j),row_at(i+1,j+1),row_at(i,j+1)]
-        column=get(source,Tuple(sort(copy(cell))),0)
+        cell=(row_at(i,j),row_at(i+1,j),row_at(i+1,j+1),row_at(i,j+1))
+        column=get(source,sorted(cell...),0)
         column>0 || throw(ArgumentError("$caller: native transfinite face loses its carrier parent"))
         push!(columns,column)
-        first=findfirst(==(cell[1]),cells[:,column])
+        first=0
+        for k in 1:4
+            cells[k,column]==cell[1] && (first=k;break)
+        end
         forward=all(k->cell[k]==cells[mod1(first+k-1,4),column],1:4)
         backward=all(k->cell[k]==cells[mod1(first-k+1,4),column],1:4)
         forward || backward || throw(ArgumentError("$caller: native transfinite face has inconsistent winding"))
-        nodes[:,length(columns)]=forward ? cell : cell[[1,4,3,2]]
+        target=length(columns)
+        if forward
+            for k in 1:4
+                nodes[k,target]=cell[k]
+            end
+        else
+            nodes[1,target]=cell[1];nodes[2,target]=cell[4]
+            nodes[3,target]=cell[3];nodes[4,target]=cell[2]
+        end
     end
     length(columns)==size(cells,2) && allunique(columns) ||
         throw(ArgumentError("$caller: native transfinite face cells are not bijective"))
@@ -478,8 +500,9 @@ function _higher_transfinite_hex_rows(m,tag,mesh,point_rows,caller)
         throw(ArgumentError("$caller: native transfinite corner frame is not a tensor symmetry"))
     counts=ntuple(axis->sum(abs,differences[axis]),3)
     directions=ntuple(axis->ntuple(k->sign(differences[axis][k]),3),3)
-    row_at(i,j,k)=Int32(1+sum((start[axis]+i*directions[1][axis]+j*directions[2][axis]+
-        k*directions[3][axis])*(axis==1 ? 1 : axis==2 ? npu : layer) for axis in 1:3))
+    row_at(i,j,k)=Int32(1+(start[1]+i*directions[1][1]+j*directions[2][1]+k*directions[3][1])+
+        (start[2]+i*directions[1][2]+j*directions[2][2]+k*directions[3][2])*npu+
+        (start[3]+i*directions[1][3]+j*directions[2][3]+k*directions[3][3])*layer)
     rows=Int32[row_at(i,j,k) for i in 0:counts[1] for j in 0:counts[2] for k in 0:counts[3]]
     allunique(rows) && length(rows)==nnodes(mesh) ||
         throw(ArgumentError("$caller: native transfinite tensor rows are not bijective"))
@@ -552,6 +575,77 @@ function _higher_lattice_boundary_faces(rows::Vector{Int32},counts::NTuple{3,Int
         push!(faces,sorted(at(i,j,k),at(i+1,j,k),at(i+1,j+1,k),at(i,j+1,k)))
     end
     return faces
+end
+
+# The sorted rows of face `column` of `cells` (three or four rows), a
+# triangle padded in front with zero.
+function _higher_padded_face(cells::AbstractMatrix{Int32},column::Integer)
+    if size(cells,1)==3
+        a,b,c=cells[1,column],cells[2,column],cells[3,column]
+        a,b=minmax(a,b);b,c=minmax(b,c);a,b=minmax(a,b)
+        return (Int32(0),a,b,c)
+    end
+    size(cells,1)==4 || throw(ArgumentError("a Surface cell has three or four primary rows"))
+    a,b,c,d=cells[1,column],cells[2,column],cells[3,column],cells[4,column]
+    a,b=minmax(a,b);c,d=minmax(c,d);a,c=minmax(a,c);b,d=minmax(b,d);b,c=minmax(b,c)
+    return (a,b,c,d)
+end
+
+# The face a padded face stands for: its sorted rows.
+_higher_unpadded_face(face::NTuple{4,Int32})=
+    iszero(face[1]) ? (face[2],face[3],face[4]) : face
+
+# Whether padded `expected` and `actual` (a set of sorted row tuples) hold the
+# same faces. `expected` has no face twice.
+function _higher_padded_faces_equal(expected::Set{NTuple{4,Int32}},actual)
+    length(expected)==length(actual) || return false
+    for face in expected
+        _higher_unpadded_face(face) in actual || return false
+    end
+    return true
+end
+
+_higher_lattice_side_count(counts::NTuple{3,Int})=
+    2*(counts[1]*counts[2]+counts[2]*counts[3]+counts[1]*counts[3])
+
+# Whether the sorted rows `face` are the corners of a quadrangle on a side of
+# the lattice: four lattice points on one side plane, spanning one unit along
+# each of the other two axes (four distinct rows there are its four corners).
+function _higher_lattice_side(place::Vector{Int32},counts::NTuple{3,Int},face::NTuple{4,Int32})
+    face[1]>0 && face[1]<face[2]<face[3]<face[4] || return false
+    spanj=counts[2]+1;spank=counts[3]+1
+    low=(typemax(Int),typemax(Int),typemax(Int));high=(-1,-1,-1)
+    for row in face
+        1<=row<=length(place) && place[row]>0 || return false
+        position=Int(place[row])-1
+        at=(position÷(spanj*spank),(position÷spank)%spanj,position%spank)
+        low=min.(low,at);high=max.(high,at)
+    end
+    flat=0;unit=0
+    for axis in 1:3
+        if low[axis]==high[axis]
+            (low[axis]==0 || low[axis]==counts[axis]) && (flat+=1)
+        elseif high[axis]-low[axis]==1
+            unit+=1
+        end
+    end
+    return flat==1 && unit==2
+end
+
+# The edges of a lattice block into an empty support table, owner `owner`:
+# each lattice edge once.
+function _higher_lattice_edges!(edges::Dict{NTuple{2,Int32},Tuple{Int,Int32}},
+                                rows::Vector{Int32},counts::NTuple{3,Int},owner::Tuple{Int,Int32})
+    spanj=counts[2]+1;spank=counts[3]+1
+    sizehint!(edges,counts[1]*spanj*spank+(counts[1]+1)*counts[2]*spank+
+        (counts[1]+1)*spanj*counts[3])
+    for i in 0:counts[1],j in 0:counts[2],k in 0:counts[3]
+        a=rows[(i*spanj+j)*spank+k+1]
+        i<counts[1] && (edges[minmax(a,rows[((i+1)*spanj+j)*spank+k+1])]=owner)
+        j<counts[2] && (edges[minmax(a,rows[(i*spanj+j+1)*spank+k+1])]=owner)
+        k<counts[3] && (edges[minmax(a,rows[(i*spanj+j)*spank+k+2])]=owner)
+    end
+    return edges
 end
 
 # Whether two rows are joined by an edge of the lattice: neighbours along
@@ -678,6 +772,7 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
         mapping=Vector{Int32}(undef,nnodes(mesh))
         # One parametrizer per owner: the entity's geometry is resolved once.
         parametrizers=Dict{Tuple{Int,Int32},Any}()
+        matches=Int32[]
         for position in (native===nothing ?
             source_row_order===nothing ? axes(mesh.coords,2) : source_row_order : native.rows)
             owner=class.node_entities[position]
@@ -723,9 +818,11 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
             if parameter===nothing && owner[1] in (1,2)
                 parametrize=get!(()->Model._model_point_parametrizer(m,owner[1],Int(owner[2])),
                     parametrizers,owner)
-                parameter=parametrize(point)
+                # The parametrizers are held untyped: the assertion keeps
+                # the calls below statically dispatched.
+                parameter=parametrize(point)::Vector{Float64}
             end
-            matches=Int32[]
+            empty!(matches)
             if owner[1]<dimension || owner in emitted
                 tolerance=64eps(Float64)*max(1.0,maximum(abs,point))
                 if !haskey(points,owner)
@@ -779,8 +876,8 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
         push!(emitted,(dimension,Int32(tag)))
         return mapping
     end
-    traces=geometry_cells===nothing ? nothing : [Union{Nothing,_Dim01Cell}[
-        nothing for _ in axes(cells,2)] for (_,cells,_) in _cache_native_blocks(mesh)]
+    traces=geometry_cells===nothing ? nothing : [_Dim01Cell[
+        _DIM01_NO_CELL for _ in axes(cells,2)] for (_,cells,_) in _cache_native_blocks(mesh)]
     source_binding===nothing || source_cell_tags===nothing || throw(ArgumentError(
         "$(assembly.caller): generated cells have conflicting birth providers"))
     cell_births=source_binding!==nothing ? source_binding.element_tags :
@@ -810,12 +907,12 @@ function _higher_append_part!(assembly,m,mesh,class,dimension,tag,discarded;
         physical=_cache_native_blocks(mesh)[bi][3]
         for column in axes(cells,2)
             source_column=native!==nothing && bi==native.block ? native.columns[column] : column
-            # One vector per cell: the mapped connectivity, which the cell keeps.
+            # The mapped connectivity, read in place: the store copies it.
             connectivity=native!==nothing && bi==native.block ? Base.view(native.nodes,:,column) :
                 Base.view(cells,:,column)
             legacy_physical=data===nothing ? _dim01_physical!(physical_memo,m,(dim,Int32(owners[source_column]))) :
                             physical[source_column]
-            _dim01_add_cell!(assembly,msh,(dim,owners[source_column]),mapping[connectivity],
+            _dim01_add_cell!(assembly,msh,(dim,owners[source_column]),Base.view(mapping,connectivity),
                 !isempty(cell_births) ? cell_births[birth_offset+source_column] :
                 allocate_cells ? _dim01_next_tag!(assembly,false) : UInt64(0);
                 source_tag=nothing,physical=legacy_physical,owned=true)
@@ -1801,9 +1898,9 @@ function _higher_discrete_surface_transport_one!(assembly,m,tag,record;caller,
         mesh=Mesh(coords;tris=tri_columns,
                   tri_tag=fill(physical,length(triangles)))
         geometry_cells===nothing || (geometry_cells[mesh]=
-            Vector{Union{Nothing,_Dim01Cell}}[Union{Nothing,_Dim01Cell}[],
-            Union{Nothing,_Dim01Cell}[emitted_cells...],
-            Union{Nothing,_Dim01Cell}[]])
+            Vector{_Dim01Cell}[_Dim01Cell[],
+            _Dim01Cell[emitted_cells...],
+            _Dim01Cell[]])
         class=_higher_geometry_part_class(mesh,2,tag,
             [assembly.nodes[position].owner for position in positions])
         return (tag,mesh,class,positions),true
@@ -1973,8 +2070,8 @@ function _higher_discrete_surface_transport_one!(assembly,m,tag,record;caller,
     end
     mesh=Mesh(coords;tris=tri_columns,tri_tag=fill(physical,length(triangles)))
     geometry_cells===nothing || (geometry_cells[mesh]=
-        Vector{Union{Nothing,_Dim01Cell}}[Union{Nothing,_Dim01Cell}[],
-        Union{Nothing,_Dim01Cell}[emitted_cells...],Union{Nothing,_Dim01Cell}[]])
+        Vector{_Dim01Cell}[_Dim01Cell[],
+        _Dim01Cell[emitted_cells...],_Dim01Cell[]])
     class=_higher_geometry_part_class(mesh,2,tag,
         [assembly.nodes[position].owner for position in positions])
     return (tag,mesh,class,positions),true
@@ -2828,18 +2925,41 @@ function _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
     face_conflicts=Set{NTuple{3,Int32}}()
     quad_conflicts=Set{NTuple{4,Int32}}()
     owners=Dict{Int,Vector{Int32}}()
+    # A transfinite block of hexahedra is a lattice: its boundary faces and
+    # its edges follow from where each row sits in it, without tabulating the
+    # faces and edges of every cell. The lattice is derived once here and
+    # handed to the append that follows. When it cannot be derived this
+    # classification proceeds as for any other cells, and the append reports
+    # why, as before.
+    lattice=try
+        _higher_transfinite_hex_rows(m,tag,mesh,Dict(Int(owner[2])=>Int32(row)
+            for (row,owner) in enumerate(node_owners) if owner[1]==0),caller)
+    catch err
+        err isa ArgumentError || rethrow()
+        nothing
+    end
+    lattice_out===nothing || (lattice_out[]=lattice)
     for (msh,cells,_) in _cache_native_blocks(mesh)
         isempty(cells) && continue
         msh_dimension(msh)==3 || throw(ArgumentError(
             "$caller: transfinite Volume[$tag] mixes cell dimensions"))
         cell_owners=fill(Int32(tag),size(cells,2))
         append!(get!(()->Int32[],owners,msh),cell_owners)
-        _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,
-                            msh,cells,cell_owners)
+        if lattice!==nothing && isempty(edges)
+            # The lattice's cells are its lattice cells (shown above), all
+            # owned by this Volume: their edges are the lattice edges, each
+            # entered once, as the cell-by-cell table would hold them.
+            _higher_lattice_edges!(edges,lattice.rows,lattice.counts,primary)
+        else
+            _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,
+                                msh,cells,cell_owners)
+        end
     end
     expected_edges=Set{NTuple{2,Int32}}()
-    expected_faces=Set{Tuple}()
-    embedded_faces=Set{Tuple}()
+    # Faces as sorted corner rows, a triangle padded in front with zero: one
+    # tuple type for both, so no face is boxed.
+    expected_faces=Set{NTuple{4,Int32}}()
+    embedded_faces=Set{NTuple{4,Int32}}()
     lower_lines=Set{Tuple{Tuple{Int,Int32},NTuple{2,Int32}}}()
     boundary_surfaces=Set(abs.(Model._model_volume_boundary_surfaces(m,tag,caller)))
     for owner in sort!(Tuple{Int,Int32}[owner for owner in closure if 0<owner[1]<3])
@@ -2878,7 +2998,7 @@ function _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
                 block.msh in (2,3) || throw(ArgumentError(
                     "$caller: transfinite Volume[$tag] requires actual linear Surface cells"))
                 for column in axes(mapped,2)
-                    face=Tuple(sort!(collect(@view mapped[:,column])))
+                    face=_higher_padded_face(mapped,column)
                     destination=Int(owner[2]) in boundary_surfaces ? expected_faces : embedded_faces
                     face in destination && throw(ArgumentError(
                         "$caller: transfinite lower Surface cells overlap"))
@@ -2890,23 +3010,15 @@ function _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
         end
     end
     _api_check_support_conflicts(edge_conflicts,face_conflicts,quad_conflicts)
-    # A transfinite block of hexahedra is a lattice: its boundary faces and
-    # its edges follow from where each row sits in it, without tabulating the
-    # faces and edges of every cell. The lattice is derived once here and
-    # handed to the append that follows. When it cannot be derived this
-    # classification proceeds as for any other cells, and the append reports
-    # why, as before.
-    lattice=try
-        _higher_transfinite_hex_rows(m,tag,mesh,Dict(Int(owner[2])=>Int32(row)
-            for (row,owner) in enumerate(node_owners) if owner[1]==0),caller)
-    catch err
-        err isa ArgumentError || rethrow()
-        nothing
-    end
-    lattice_out===nothing || (lattice_out[]=lattice)
-    actual_faces=lattice===nothing ? first(Model._volume_cell_boundary_faces(mesh)) :
+    # The shell is the lattice's sides exactly when every expected face is a
+    # side quadrangle and there are as many as sides; the side faces are
+    # listed only when that fails or embedded faces must be checked.
+    shell=lattice!==nothing && length(expected_faces)==_higher_lattice_side_count(lattice.counts) &&
+        all(face->_higher_lattice_side(lattice.place,lattice.counts,face),expected_faces)
+    actual_faces=shell && isempty(embedded_faces) ? nothing :
+        lattice===nothing ? first(Model._volume_cell_boundary_faces(mesh)) :
         _higher_lattice_boundary_faces(lattice.rows,lattice.counts)
-    if expected_faces!=actual_faces
+    if !shell && !_higher_padded_faces_equal(expected_faces,actual_faces)
         grid_receipt isa Model._ModelTransfiniteGridReceipt &&
             Set(Int(face.owner) for face in grid_receipt.faces)==boundary_surfaces ||
             throw(ArgumentError("$caller: transfinite shell lacks its owned grid receipt"))
@@ -2920,8 +3032,8 @@ function _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
             end
         end
     end
-    isempty(intersect(embedded_faces,actual_faces)) || throw(ArgumentError(
-        "$caller: transfinite embedded Surface aliases its outer shell"))
+    isempty(embedded_faces) || !any(face->_higher_unpadded_face(face) in actual_faces,embedded_faces) ||
+        throw(ArgumentError("$caller: transfinite embedded Surface aliases its outer shell"))
     # Every face of every cell is listed only to look embedded Surface cells
     # up in it; without embedded cells there is nothing to look up.
     all_faces=Set{Tuple}()
@@ -2930,7 +3042,7 @@ function _higher_transfinite_volume_classification(assembly,m,mesh,input,tag,
             push!(all_faces,Tuple(sort!(Int32[cells[slot,column] for slot in slots])))
         end
     end
-    issubset(embedded_faces,all_faces) &&
+    all(face->_higher_unpadded_face(face) in all_faces,embedded_faces) &&
         (lattice===nothing ? issubset(expected_edges,Model._volume_edge_set(mesh)) :
             all(edge->_higher_lattice_edge(lattice.place,lattice.counts,edge[1],edge[2]),
                 expected_edges)) || throw(ArgumentError(
@@ -3217,18 +3329,18 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
     if mesh isa Mesh && all(entry->entry[1]==2,cells_wb)
         tris=Matrix{Int32}(undef,3,0)
         tri_tag=Int32[]
-        tri_trace=Union{Nothing,_Dim01Cell}[]
+        tri_trace=_Dim01Cell[]
         for (msh,conn,_) in cells_wb
             key=Tuple(sort!(copy(conn)))
             previous=get(old_index,key,nothing)
             tris=hcat(tris,reshape(part_conn(conn),3,1))
             if previous===nothing
                 push!(tri_tag,get(child_physical,key,_dim01_physical(m,(2,tag))))
-                push!(tri_trace,get(added_cells,((2,Int32(tag)),key),nothing))
+                push!(tri_trace,get(added_cells,((2,Int32(tag)),key),_DIM01_NO_CELL))
             else
                 bi,column=previous
                 push!(tri_tag,blocks[bi][3][column])
-                push!(tri_trace,old_traces===nothing ? nothing :
+                push!(tri_trace,old_traces===nothing ? _DIM01_NO_CELL :
                       old_traces[bi][column])
             end
         end
@@ -3237,8 +3349,8 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
         new_class=_higher_geometry_part_class(new_mesh,2,tag,node_entities)
         if geometry_cells!==nothing
             delete!(geometry_cells,mesh)
-            geometry_cells[new_mesh]=[Union{Nothing,_Dim01Cell}[],tri_trace,
-                                      Union{Nothing,_Dim01Cell}[]]
+            geometry_cells[new_mesh]=[_Dim01Cell[],tri_trace,
+                                      _Dim01Cell[]]
         end
         return (tag,new_mesh,new_class,new_mapping)
     end
@@ -3246,7 +3358,7 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
         # A written-back quadrangle promotes the Triangle product to a
         # mixed part: cells emit per-msh blocks in receipt order, upstream's
         # `gf->triangles`/`gf->quadrangles` split.
-        new_blocks=ElementBlock[];new_traces=Vector{Vector{Union{Nothing,_Dim01Cell}}}()
+        new_blocks=ElementBlock[];new_traces=Vector{Vector{_Dim01Cell}}()
         group_of=Dict{Int,Int}()
         for (msh,conn,_) in cells_wb
             key=Tuple(sort!(copy(conn)))
@@ -3254,7 +3366,7 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
             gi=get(group_of,msh,0)
             if gi==0
                 push!(new_blocks,ElementBlock(msh,Matrix{Int32}(undef,length(conn),0),Int32[]))
-                push!(new_traces,Union{Nothing,_Dim01Cell}[])
+                push!(new_traces,_Dim01Cell[])
                 gi=length(new_blocks);group_of[msh]=gi
             end
             block=new_blocks[gi]
@@ -3265,8 +3377,8 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
                 hcat(block.nodes,part_conn(conn)),
                 push!(copy(block.tags),tagout))
             push!(new_traces[gi],previous===nothing ?
-                get(added_cells,((2,Int32(tag)),key),nothing) :
-                (old_traces===nothing ? nothing : old_traces[previous[1]][previous[2]]))
+                get(added_cells,((2,Int32(tag)),key),_DIM01_NO_CELL) :
+                (old_traces===nothing ? _DIM01_NO_CELL : old_traces[previous[1]][previous[2]]))
         end
         new_mesh=MixedMesh(coords,new_blocks)
         new_class=_higher_geometry_part_class(new_mesh,2,tag,node_entities)
@@ -3279,7 +3391,7 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
     # MixedMesh part: keep each block's emitted columns; children append as
     # per-msh blocks in receipt order.
     new_blocks=ElementBlock[]
-    new_traces=Vector{Vector{Union{Nothing,_Dim01Cell}}}()
+    new_traces=Vector{Vector{_Dim01Cell}}()
     for (bi,(msh,cells,tags)) in enumerate(blocks)
         msh_dimension(msh)==2 || continue
         keep=Int32[]
@@ -3292,12 +3404,12 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
         end
         isempty(keep) && continue
         push!(new_blocks,ElementBlock(msh,cells[:,keep],tags[keep]))
-        push!(new_traces,Union{Nothing,_Dim01Cell}[
-            old_traces===nothing ? nothing : old_traces[bi][column]
+        push!(new_traces,_Dim01Cell[
+            old_traces===nothing ? _DIM01_NO_CELL : old_traces[bi][column]
             for column in keep])
     end
     child_groups=Dict{Int,Tuple{Vector{Vector{Int32}},Vector{Int32},
-                                Vector{Union{Nothing,_Dim01Cell}}}}()
+                                Vector{_Dim01Cell}}}()
     child_order=Int[]
     for (msh,conn,_) in cells_wb
         key=Tuple(sort!(copy(conn)))
@@ -3306,12 +3418,12 @@ function _higher_volume_wb_rebuild_part(assembly,m,wb,mapping,source_tags,
             "$caller: written-back Surface[$tag] cannot emit non-Triangle/Quadrangle children"))
         group=get(child_groups,msh,nothing)
         if group===nothing
-            group=(Vector{Int32}[],Int32[],Union{Nothing,_Dim01Cell}[])
+            group=(Vector{Int32}[],Int32[],_Dim01Cell[])
             child_groups[msh]=group;push!(child_order,msh)
         end
         push!(group[1],part_conn(conn))
         push!(group[2],get(child_physical,key,_dim01_physical(m,(2,tag))))
-        push!(group[3],get(added_cells,((2,Int32(tag)),key),nothing))
+        push!(group[3],get(added_cells,((2,Int32(tag)),key),_DIM01_NO_CELL))
     end
     for msh in child_order
         group=child_groups[msh]
@@ -3584,8 +3696,8 @@ function _higher_ordinary_volume_cells!(assembly,m,production,class,mapping,geom
     for event in events
         tags[event]=_dim01_next_tag!(assembly,false)
     end
-    traces=geometry_cells===nothing ? nothing : [Union{Nothing,_Dim01Cell}[
-        nothing for _ in axes(cells,2)] for (_,cells,_) in blocks]
+    traces=geometry_cells===nothing ? nothing : [_Dim01Cell[
+        _DIM01_NO_CELL for _ in axes(cells,2)] for (_,cells,_) in blocks]
     for (bi,(msh,dim,_,cells,owners)) in enumerate(catalog)
         dim==3 || continue
         physical=blocks[bi][3]
@@ -3593,7 +3705,7 @@ function _higher_ordinary_volume_cells!(assembly,m,production,class,mapping,geom
             owner=(dim,owners[column])
             value=mesh isa MixedMesh && mesh.entity_data!==nothing ? physical[column] :
                 _dim01_physical(m,(dim,Int(owners[column])))
-            _dim01_add_cell!(assembly,msh,owner,mapping[cells[:,column]],tags[(msh,column)];
+            _dim01_add_cell!(assembly,msh,owner,Base.view(mapping,Base.view(cells,:,column)),tags[(msh,column)];
                 source_tag=nothing,physical=value)
             traces===nothing || (traces[bi][column]=last(assembly.cells))
         end
@@ -4563,8 +4675,8 @@ function _higher_lower_geometry_parts(assembly,m;sort_points=false,geometry_cell
             [assembly.nodes[row].owner for row in rows])
         push!(parts,(tag,mesh,class,rows))
         geometry_cells===nothing || (geometry_cells[mesh]=[
-            Union{Nothing,_Dim01Cell}[cells...],Union{Nothing,_Dim01Cell}[],
-            Union{Nothing,_Dim01Cell}[]])
+            _Dim01Cell[cells...],_Dim01Cell[],
+            _Dim01Cell[]])
     end
     return parts
 end
@@ -4596,7 +4708,7 @@ end
 function _higher_live_cell_tags(live,cells::Vector{_Dim01Cell},block,caller)
     tags=Vector{Union{Nothing,UInt64}}(undef,length(block))
     for (index,cell) in enumerate(block)
-        if cell===nothing
+        if _dim01_no_cell(cell)
             tags[index]=nothing
             continue
         end
@@ -4677,7 +4789,7 @@ function _higher_geometry_carrier(plan,assembly,parts,dimension,caller;
     for (_,mesh,_,_) in parts
         traces=get(geometry_cells,mesh,nothing)
         traces===nothing && all(isempty(cells) for (_,cells,_) in _cache_native_blocks(mesh)) &&
-            (traces=[Union{Nothing,_Dim01Cell}[] for _ in _cache_native_blocks(mesh)])
+            (traces=[_Dim01Cell[] for _ in _cache_native_blocks(mesh)])
         traces===nothing && throw(ArgumentError("$caller: produced geometry lacks its cell events"))
         push!(cell_identities,[_higher_live_cell_tags(live,assembly.cells,block,caller) for block in traces])
     end
@@ -4842,7 +4954,7 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     end
     surface_parts=Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[]
     geometry_cells=preserve_geometry ?
-        IdDict{Any,Vector{Vector{Union{Nothing,_Dim01Cell}}}}() : nothing
+        IdDict{Any,Vector{Vector{_Dim01Cell}}}() : nothing
     geometry_birth=preserve_geometry ? _dim01_geometry_birth(old) : nothing
     curve_births=Dict{Tuple{Int,Int32},Vector{UInt64}}()
     geometry_alternates=preserve_geometry ? IdDict{Any,Any}() : nothing
@@ -4977,13 +5089,13 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
             end
             surfaces[Int(owner[2])]=(Int(owner[2]),geometry,class,mapping)
             geometry_cells[geometry]=geometry isa MixedMesh ?
-                Vector{Union{Nothing,_Dim01Cell}}[
-                    Union{Nothing,_Dim01Cell}[retained_cells[tag] for tag in tags]
+                Vector{_Dim01Cell}[
+                    _Dim01Cell[retained_cells[tag] for tag in tags]
                     for tags in input.element_tags] :
-                Vector{Union{Nothing,_Dim01Cell}}[Union{Nothing,_Dim01Cell}[],
-                    Union{Nothing,_Dim01Cell}[retained_cells[tag] for tags in
+                Vector{_Dim01Cell}[_Dim01Cell[],
+                    _Dim01Cell[retained_cells[tag] for tags in
                         input.element_tags for tag in tags],
-                    Union{Nothing,_Dim01Cell}[]]
+                    _Dim01Cell[]]
         end
         volumes=dimension==3 ? geometry_parts :
             Tuple{Int,Union{Mesh,MixedMesh},_MeshClassification,Vector{Int32}}[]
@@ -5023,9 +5135,8 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
             periodic_uid_operation=:defer),
         periodic_pairs,m,caller)
     _periodic_uid_history_generate!(plan,periodic_pairs,caller)
-    public_ranks=Dict(plan.node_tag_map[tag]=>rank for (tag,rank) in ranks
-                     if haskey(plan.node_tag_map,tag))
-    final_ranks=UInt64[public_ranks[tag] for tag in plan.mesh.entity_data.external_node_tags]
+    final_ranks=_higher_final_ranks(ranks,plan.node_tag_map,
+        plan.mesh.entity_data.external_node_tags)
     if geometry_parts!==nothing && geometry_layout===:all
         geometry_parts=_higher_geometry_keep_points(geometry_parts,assembly,plan.node_tag_map,caller)
     end
@@ -5071,6 +5182,20 @@ function _generate_higher_plan(source_model,cached,cached_class,dimension::Int,
     end
     return merge(plan,(geometry_parts=emitted_parts,geometry_part_rows=emitted_rows,
         native_recombine_events))
+end
+
+# The private rank of each published node, in publication order: the rank
+# of the assembly node each public tag was given to. A function barrier, as
+# the plan's fields reach the caller untyped.
+function _higher_final_ranks(ranks::_HigherRanks,node_tag_map::Dict{UInt64,UInt64},
+                             external_node_tags::Vector{UInt64})
+    public_ranks=Dict{UInt64,UInt64}()
+    sizehint!(public_ranks,length(node_tag_map))
+    for (tag,rank) in ranks.table
+        mapped=get(node_tag_map,tag,nothing)
+        mapped===nothing || (public_ranks[mapped]=rank)
+    end
+    return UInt64[public_ranks[tag] for tag in external_node_tags]
 end
 
 function _higher_classification_from_data(mesh,caller)

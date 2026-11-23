@@ -293,8 +293,8 @@ function _native_quad_split_mixed_plan(model,cached,class,keys,limit,maximum_ele
         end
         splits[cell.tag]=_native_quad_split_trace(
             assembly,cell,first_nodes,second_nodes,first,second)
-        push!(output,_Dim01Cell(2,cell.owner,first_nodes,first,nothing,cell.physical))
-        push!(output,_Dim01Cell(2,cell.owner,second_nodes,second,nothing,cell.physical))
+        push!(output,_dim01_new_cell(assembly,2,cell.owner,first_nodes,first,nothing,cell.physical))
+        push!(output,_dim01_new_cell(assembly,2,cell.owner,second_nodes,second,nothing,cell.physical))
         changed=true
     end
     changed || return nothing

@@ -190,7 +190,7 @@ end
 function support_controls!()
     m=square()
     a=assembly([node(1,(.2,.3,0.),0,1),node(2,(.8,.4,0.),1,1,nothing),node(3,(0.,1.,0.),0,4)])
-    cell=A._Dim01Cell(2,(2,Int32(1)),Int32[1,2,3],UInt64(17),UInt64(17),Int32(3))
+    cell=A._Dim01Cell(A._Dim01CellStore(),2,(2,Int32(1)),Int32[1,2,3],UInt64(17),UInt64(17),Int32(3))
     frames=Dict{Int,Any}();point=(.5,.35,0.)
     before=(snapshot(m),snapshot(a))
     result=A._dim01_native_plane_support!(frames,m,a,cell,Int32[1,2,3],4,cell.owner,point)
@@ -212,7 +212,7 @@ function support_controls!()
         p=M._model_curve_point(m,tag,.5,"control",1)
         push!(nodes,node(4+tag,(p[1]-.0078125,p[2]+.0234375,p[3]),1,tag,[.5]))
     end
-    a=assembly(nodes);cell=A._Dim01Cell(16,(2,Int32(1)),collect(Int32,1:8),UInt64(18),UInt64(18),Int32(4))
+    a=assembly(nodes);cell=A._Dim01Cell(A._Dim01CellStore(),16,(2,Int32(1)),collect(Int32,1:8),UInt64(18),UInt64(18),Int32(4))
     for unavailable in (false,true)
         if unavailable
             n=a.nodes[5];a.nodes[5]=A._Dim01Node(n.tag,n.point,n.owner,nothing)

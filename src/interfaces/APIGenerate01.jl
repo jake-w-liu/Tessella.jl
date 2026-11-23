@@ -7,13 +7,119 @@ struct _Dim01Node
     parameter::Union{Nothing,Vector{Float64}}
 end
 
-mutable struct _Dim01Cell
-    msh::Int
-    owner::Tuple{Int,Int32}
+# The cells of an assembly, as columns: row `r` is a cell of type `msh[r]`,
+# entity `owner[r]`, label `tag[r]`, source label `source[r]` (when
+# `sourced[r]`), physical tag `physical[r]` and the node positions
+# `nodes[start[r]:start[r]+width[r]-1]`. Rows are only appended: a cell given
+# new nodes gets a new slice at the end, so a slice read earlier keeps what it
+# held, as the replaced vector of a cell object did.
+mutable struct _Dim01CellStore
+    msh::Vector{Int}
+    owner::Vector{Tuple{Int,Int32}}
+    tag::Vector{UInt64}
+    source::Vector{UInt64}
+    sourced::Vector{Bool}
+    physical::Vector{Int32}
+    start::Vector{Int}
+    width::Vector{Int32}
     nodes::Vector{Int32}
-    tag::UInt64
-    source_tag::Union{Nothing,UInt64}
-    physical::Int32
+end
+_Dim01CellStore()=_Dim01CellStore(Int[],Tuple{Int,Int32}[],UInt64[],UInt64[],Bool[],Int32[],
+    Int[],Int32[],Int32[])
+
+# One cell: a row of a store. It reads and writes like the mutable cell object
+# it replaces (`cell.tag=...`, `cell.nodes`), but is no heap object: a vector of
+# cells holds the store and the row inline. Two cells are `===` exactly when
+# they are the same row of the same store, which is the identity a cell object
+# had. `cell.nodes` is a view of the store's node column.
+struct _Dim01Cell
+    store::_Dim01CellStore
+    row::Int
+end
+
+# No cell: the entry of a trace (a produced geometry cell's assembly cell)
+# that has no cell behind it.
+const _DIM01_NO_CELL=_Dim01Cell(_Dim01CellStore(),0)
+_dim01_no_cell(cell::_Dim01Cell)=getfield(cell,:row)==0
+
+function _Dim01Cell(store::_Dim01CellStore,msh,owner,nodes,tag,source_tag,physical)
+    push!(store.msh,Int(msh));push!(store.owner,(Int(owner[1]),Int32(owner[2])))
+    push!(store.tag,UInt64(tag))
+    push!(store.sourced,source_tag!==nothing)
+    push!(store.source,source_tag===nothing ? UInt64(0) : UInt64(source_tag))
+    push!(store.physical,Int32(physical))
+    push!(store.start,length(store.nodes)+1);push!(store.width,Int32(length(nodes)))
+    append!(store.nodes,nodes)
+    return _Dim01Cell(store,length(store.msh))
+end
+
+Base.@constprop :aggressive function Base.getproperty(cell::_Dim01Cell,name::Symbol)
+    store=getfield(cell,:store);row=getfield(cell,:row)
+    name===:msh && return store.msh[row]
+    name===:owner && return store.owner[row]
+    name===:tag && return store.tag[row]
+    name===:physical && return store.physical[row]
+    name===:nodes && return _dim01_cell_nodes(store,row)
+    name===:source_tag && return store.sourced[row] ? store.source[row] : nothing
+    return getfield(cell,name)
+end
+
+_dim01_cell_nodes(store::_Dim01CellStore,row::Int)=
+    Base.view(store.nodes,store.start[row]:store.start[row]+Int(store.width[row])-1)
+
+Base.@constprop :aggressive function Base.setproperty!(cell::_Dim01Cell,name::Symbol,value)
+    store=getfield(cell,:store);row=getfield(cell,:row)
+    if name===:msh
+        store.msh[row]=Int(value)
+    elseif name===:owner
+        store.owner[row]=(Int(value[1]),Int32(value[2]))
+    elseif name===:tag
+        store.tag[row]=UInt64(value)
+    elseif name===:physical
+        store.physical[row]=Int32(value)
+    elseif name===:source_tag
+        store.sourced[row]=value!==nothing
+        store.source[row]=value===nothing ? UInt64(0) : UInt64(value)
+    elseif name===:nodes
+        _dim01_cell_set_nodes!(store,row,value)
+    else
+        throw(ArgumentError("a generation cell has no settable property $name"))
+    end
+    return value
+end
+
+function _dim01_cell_set_nodes!(store::_Dim01CellStore,row::Int,nodes)
+    width=length(nodes)
+    # A view of this store's own column is read before the column grows.
+    values=nodes isa SubArray && parent(nodes)===store.nodes ? Vector{Int32}(nodes) : nodes
+    start=length(store.nodes)+1
+    resize!(store.nodes,start+width-1)
+    for (slot,node) in enumerate(values)
+        store.nodes[start+slot-1]=Int32(node)
+    end
+    store.start[row]=start;store.width[row]=Int32(width)
+    return nothing
+end
+
+# `resize!(cell.nodes,width)` for a cell: keep its first `width` nodes.
+function _dim01_cell_truncate!(cell::_Dim01Cell,width::Integer)
+    store=getfield(cell,:store);row=getfield(cell,:row)
+    0<=width<=store.width[row] || throw(ArgumentError("a generation cell can only shrink in place"))
+    store.width[row]=Int32(width)
+    return cell
+end
+
+# `push!(cell.nodes,node)` for a cell.
+function _dim01_cell_push!(cell::_Dim01Cell,node::Integer)
+    store=getfield(cell,:store);row=getfield(cell,:row)
+    start=store.start[row];width=Int(store.width[row])
+    if start+width-1==length(store.nodes)
+        push!(store.nodes,Int32(node))
+        store.width[row]=Int32(width+1)
+    else
+        _dim01_cell_set_nodes!(store,row,vcat(_dim01_cell_nodes(store,row),Int32(node)))
+    end
+    return cell
 end
 
 mutable struct _Dim01Assembly
@@ -31,6 +137,9 @@ mutable struct _Dim01Assembly
     # alone, so a consumer that mirrors the rows (the incremental Surface-phase
     # authority) can tell an append from an edit without rescanning them.
     edits::Int
+    # Where this assembly's new cells are written. `cells` may also hold rows
+    # of another store (cells handed over from a staged assembly).
+    store::_Dim01CellStore
 end
 
 # Detached planning records its own constructor events; it does not mutate session clocks.
@@ -39,7 +148,11 @@ _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,calle
 _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller,
         node_counter_wrapped,cell_counter_wrapped)=
     _Dim01Assembly(nodes,cells,positions,node_max,cell_max,max_nodes,max_cells,caller,
-        node_counter_wrapped,cell_counter_wrapped,0)
+        node_counter_wrapped,cell_counter_wrapped,0,_Dim01CellStore())
+
+# A new cell of `assembly` (not yet in `assembly.cells`).
+_dim01_new_cell(assembly::_Dim01Assembly,msh,owner,nodes,tag,source_tag,physical)=
+    _Dim01Cell(assembly.store,msh,owner,nodes,tag,source_tag,physical)
 
 # Mark every mutable object reachable from `value` through immutable wrappers
 # as its own copy, so that `deepcopy` shares it instead of cloning it.
@@ -135,9 +248,7 @@ function _dim01_add_cell!(assembly::_Dim01Assembly,msh,owner,nodes,tag;
         (spec.family===:lin && 3<=spec.order<=10) || throw(ArgumentError(
         "$(assembly.caller): lower-dimensional generation supports orders one and two; " *
         "source MSH $msh has order $(spec.order)"))
-    push!(assembly.cells,_Dim01Cell(Int(msh),owner,
-        owned && nodes isa Vector{Int32} ? nodes : Vector{Int32}(nodes),
-        UInt64(tag),source_tag===nothing ? nothing : UInt64(source_tag),physical))
+    push!(assembly.cells,_dim01_new_cell(assembly,msh,owner,nodes,tag,source_tag,physical))
     assembly.cell_counter_wrapped || (assembly.cell_max=max(assembly.cell_max,UInt64(tag)))
     return nothing
 end
@@ -325,8 +436,7 @@ function _dim01_sink_same(columns::_Dim01CellColumns,assembly,index,owner,msh,no
     return true
 end
 
-# `nodes` is a vector made for this cell: a cell object keeps it, columns
-# copy it, so a caller filling columns may reuse it for the next cell.
+# Both sinks copy `nodes`: a caller may reuse it for the next cell.
 function _dim01_sink_add!(::Nothing,assembly,msh,owner,nodes::Vector{Int32},tag;
                           physical=Int32(0),preserve_source_order::Bool=false)
     _dim01_add_cell!(assembly,msh,owner,nodes,tag;physical,preserve_source_order,owned=true)
@@ -351,10 +461,9 @@ function _dim01_sink_add!(columns::_Dim01CellColumns,assembly,msh,owner,nodes::V
     return length(columns)
 end
 
-# The node buffer of the next cell: a new vector for a cell object, the same
-# one emptied for columns.
-_dim01_sink_buffer(::Nothing,buffer,width)=sizehint!(Int32[],width)
-_dim01_sink_buffer(::_Dim01CellColumns,buffer,width)=empty!(buffer)
+# The node buffer of the next cell: both sinks copy the nodes they are given,
+# so one buffer serves every cell.
+_dim01_sink_buffer(sink,buffer,width)=empty!(buffer)
 
 # `raw=false` leaves the set of raw cells empty: only a cache without public
 # labels is matched against it, and a tuple per cell of a large record costs
@@ -544,7 +653,7 @@ function _dim01_first_order!(assembly,m;skip_discrete=true,retired_nodes=nothing
         for node in @view cell.nodes[primary+1:end]
             node==0 || (high_order[node]=true)
         end
-        resize!(cell.nodes,primary)
+        _dim01_cell_truncate!(cell,primary)
         cell.msh=target
         # Gmsh's SetOrder1 reconstructs even an already linear native cell.
         cell.tag=_dim01_next_tag!(assembly,false)
@@ -1623,7 +1732,7 @@ function _dim01_quadratic!(assembly,m,entities;only_visible=false,linear=false,g
                 end
                 support_nodes[key]=node
             end
-            push!(cell.nodes,node)
+            _dim01_cell_push!(cell,node)
         end
         cell.msh=target
         cell.tag=_dim01_next_tag!(assembly,false)

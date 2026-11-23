@@ -691,19 +691,19 @@ end
 # from a vector by label; otherwise from a table of the objects. Both must
 # name the same cells live.
 @testset "live traced cells are found by label or by object" begin
-    cell(tag)=A._Dim01Cell(4,(3,Int32(1)),Int32[1,2,3,4],UInt64(tag),nothing,Int32(0))
+    cell(tag)=A._Dim01Cell(A._Dim01CellStore(),4,(3,Int32(1)),Int32[1,2,3,4],UInt64(tag),nothing,Int32(0))
     cells=[cell(tag) for tag in (3,1,2,5)]
     stale=cell(2)
     by_label=A._higher_live_cells(cells)
     @test by_label isa Vector{Int32}
-    block=Union{Nothing,A._Dim01Cell}[cells[2],nothing,cells[4]]
+    block=A._Dim01Cell[cells[2],A._DIM01_NO_CELL,cells[4]]
     @test A._higher_live_cell_tags(by_label,cells,block,"test")==[UInt64(1),nothing,UInt64(5)]
-    @test_throws ArgumentError A._higher_live_cell_tags(by_label,cells,Union{Nothing,A._Dim01Cell}[stale],"test")
+    @test_throws ArgumentError A._higher_live_cell_tags(by_label,cells,A._Dim01Cell[stale],"test")
     repeated=[cell(1),cell(1),cell(2)]
     by_object=A._higher_live_cells(repeated)
     @test by_object isa IdDict
-    @test A._higher_live_cell_tags(by_object,repeated,Union{Nothing,A._Dim01Cell}[repeated[2]],"test")==[UInt64(1)]
-    @test_throws ArgumentError A._higher_live_cell_tags(by_object,repeated,Union{Nothing,A._Dim01Cell}[stale],"test")
+    @test A._higher_live_cell_tags(by_object,repeated,A._Dim01Cell[repeated[2]],"test")==[UInt64(1)]
+    @test_throws ArgumentError A._higher_live_cell_tags(by_object,repeated,A._Dim01Cell[stale],"test")
     @test A._higher_live_cells([cell(0)]) isa IdDict
     @test A._higher_live_cells([cell(10_000_000)]) isa IdDict
 end
