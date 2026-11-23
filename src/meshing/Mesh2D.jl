@@ -30,6 +30,7 @@ module Mesh2D
 import ..Predicates
 using ..Predicates: orient2, orient2_sos, incircle_sos, diametral_sign
 using ..MeshTypes: Mesh, triangle_area
+using ..GmshLibm: _gm87_sin, _gm87_cos
 
 export Triangulation, triangulate, delaunay2d, dedup_points
 export check_consistency, is_delaunay, to_mesh, ntriangles_live, insert_point!
