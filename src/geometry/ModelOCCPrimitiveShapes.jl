@@ -962,22 +962,23 @@ function _model_occ_add_sphere_sector!(m,kernel,allocated,center,r,
     vids=Dict{Symbol,UInt64}(); cids=Dict{Symbol,UInt64}()
     etags=Dict{Symbol,Int}(); trange=Dict{Int,NTuple{2,Float64}}()
     pending=Tuple{Int,Int,UInt64,_ModelOCCShape}[]
-    # Vertices — non-pole rim endpoints (start before end), poles, then
-    # cap-axis points.
-    nv=0
+    # Vertices in the order Gmsh 4.15.2 numbers `BRepPrim_Sphere`'s: the top
+    # bound (its end rim point first), the bottom one, then the cap-axis
+    # points, top first.
+    nv=Ref(0)
     function emit_vertex!(key,p)
-        nv+=1; vids[key]=vid(nv)
-        push!(pending,(0,vb+nv,vids[key],
+        nv[]+=1; vids[key]=vid(nv[])
+        push!(pending,(0,vb+nv[],vids[key],
             _ModelOCCShape(0,(point=p,mesh_size=0.0),UInt64[])))
     end
-    pole_bot || emit_vertex!(:u0b,ws(a1))
-    (azim && !pole_bot) && emit_vertex!(:uab,we(a1))
-    pole_top || emit_vertex!(:u0t,ws(a2))
-    (azim && !pole_top) && emit_vertex!(:uat,we(a2))
-    pole_bot && emit_vertex!(:ps,_occ_translated(center,n,-r))
     pole_top && emit_vertex!(:pn,_occ_translated(center,n,r))
-    (azim && !pole_bot) && emit_vertex!(:cb,_occ_translated(center,n,z1))
+    (azim && !pole_top) && emit_vertex!(:uat,we(a2))
+    pole_top || emit_vertex!(:u0t,ws(a2))
+    pole_bot && emit_vertex!(:ps,_occ_translated(center,n,-r))
+    (azim && !pole_bot) && emit_vertex!(:uab,we(a1))
+    pole_bot || emit_vertex!(:u0b,ws(a1))
     (azim && !pole_top) && emit_vertex!(:ct,_occ_translated(center,n,z2))
+    (azim && !pole_bot) && emit_vertex!(:cb,_occ_translated(center,n,z1))
     vrim0(bot)=bot ? (pole_bot ? vids[:ps] : vids[:u0b]) :
                      (pole_top ? vids[:pn] : vids[:u0t])
     vrima(bot)=azim ?
@@ -988,12 +989,14 @@ function _model_occ_add_sphere_sector!(m,kernel,allocated,center,r,
     zax(bot)=bot ? (pole_bot ? -r : z1) : (pole_top ? r : z2)
     # Edge keys and tag assignment — tags precede records so degenerate
     # edges can reference the finished sphere face.
-    ekeys=Symbol[pole_bot ? :degb : :latb, azim ? :mer0 : :seam,
-                 pole_top ? :degt : :latt]
-    azim && push!(ekeys,:mera)
+    # (Gmsh's order: top bound, the meridian at the sweep's end, bottom bound,
+    # the meridian at its start, the top cap's radii, the bottom cap's, axis)
+    ekeys=Symbol[pole_top ? :degt : :latt, azim ? :mera : :seam,
+                 pole_bot ? :degb : :latb]
+    azim && push!(ekeys,:mer0)
     if azim
-        !pole_bot && append!(ekeys,(:rb0,:rba))
         !pole_top && append!(ekeys,(:rt0,:rta))
+        !pole_bot && append!(ekeys,(:rba,:rb0))
         push!(ekeys,:axis)
     end
     for (i,key) in enumerate(ekeys)
@@ -1063,17 +1066,23 @@ function _model_occ_add_sphere_sector!(m,kernel,allocated,center,r,
     end
     # Wires — vertex-chained (edge,forward) multisets matching the public
     # layouts — then faces over them, in sphere/caps/sides order.
-    nf=0
+    nf=Ref(0)
     shell_uses=Tuple{UInt64,Bool}[]
     function emit_face!(wire_uses,face_geometry,shell_rev)
-        nf+=1
-        push!(pending,(-1,wb+nf,wid(nf),
+        nf[]+=1; k=nf[]
+        push!(pending,(-1,wb+k,wid(k),
             _ModelOCCShape(-1,(uses=wire_uses,),
                            UInt64[u[1] for u in wire_uses])))
-        push!(pending,(2,sb+nf,fid(nf),
+        push!(pending,(2,sb+k,fid(k),
             _ModelOCCShape(2,(kind=face_geometry.occ,
-                geometry=face_geometry),UInt64[wid(nf)])))
-        push!(shell_uses,(fid(nf),shell_rev))
+                geometry=face_geometry),UInt64[wid(k)])))
+        push!(shell_uses,(fid(k),shell_rev))
+    end
+    # a wire from the given edge on (Gmsh's getBoundary starts there)
+    function from_edge(uses,key)
+        i=findfirst(u->u[1]==cids[key],uses)
+        i===nothing && return uses
+        return vcat(uses[i:end],uses[1:i-1])
     end
     fwd(k)=(cids[k],false); rev(k)=(cids[k],true)
     if azim
@@ -1095,9 +1104,10 @@ function _model_occ_add_sphere_sector!(m,kernel,allocated,center,r,
             rev(pole_top ? :degt : :latt),rev(:seam),
             fwd(pole_bot ? :degb : :latb),fwd(:seam)]
     end
-    emit_face!(sph_uses,sph_geometry,false)
-    # Cap sector/disks at non-pole bounds.
-    for bot in (true,false)
+    emit_face!(from_edge(sph_uses,pole_top ? :degt : :latt),sph_geometry,
+               false)
+    # Cap sector/disks at non-pole bounds, the top one first.
+    for bot in (false,true)
         (bot ? pole_bot : pole_top) && continue
         rr=bot ? rr1 : rr2; zi=bot ? z1 : z2
         cc=_occ_translated(center,n,zi)
@@ -1111,7 +1121,8 @@ function _model_occ_add_sphere_sector!(m,kernel,allocated,center,r,
                              rev=nothing),
                 etags[rk0]=>(fwd=(lin2d=((0.0,0.0),(1.0,0.0)),),
                              rev=nothing))
-            emit_face!(Tuple{UInt64,Bool}[fwd(latk),rev(rka),fwd(rk0)],
+            emit_face!(from_edge(Tuple{UInt64,Bool}[fwd(latk),rev(rka),
+                                   fwd(rk0)],bot ? rk0 : latk),
                 (occ=:plane,center=cc,axis=n,X=X,Y=Y,reversed=bot,
                  pcurves=cap_pc,uvb=_model_occ_prim_uvb(cap_pc,trange)),
                 bot)
@@ -1157,6 +1168,8 @@ function _model_occ_add_sphere_sector!(m,kernel,allocated,center,r,
                     Tuple{UInt64,Bool}[fwd(:mer0),rev(:rt0),rev(:axis),
                         fwd(:rb0)]
             end
+            # the start side begins with the edge before its meridian
+            u_end || (uses=vcat(uses[end:end],uses[1:end-1]))
             emit_face!(uses,
                 (occ=:plane,center=center,axis=_occ_crossed(Xu,n),X=Xu,
                  Y=n,reversed=u_end,pcurves=side_pc,
