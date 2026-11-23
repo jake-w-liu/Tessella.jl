@@ -558,16 +558,25 @@ function _mixed_linear_cache(mesh,class)
         node_entities=class.node_entities[used],owners=owners,primary_map=mapping)
 end
 
+# `model_parametrization` of one entity with its geometry resolved once per
+# operation (`_model_point_parametrizer`, the same values): asked per node, a
+# Plane rebuilds its frame from every curve of the model each time (60% of
+# refine() on t5).
+_mixed_point_parametrizer!(cache,model,dimension,tag)=
+    get!(()->Model._model_point_parametrizer(model,dimension,tag),cache,(dimension,tag))
+
 function _mixed_quadratic_node_parameters(model,mesh,class,coords,owners,caller;linear=false)
     stored=class.node_parametric
     length(stored)==nnodes(mesh) || throw(ArgumentError(
         "$caller: source node parameters do not align with coordinates"))
     parameters=deepcopy(stored)
+    parametrizers=Dict{Tuple{Int,Int},Any}()
     for row in nnodes(mesh)+1:size(coords,2)
         dimension,tag=owners[row]
         parameter=if !linear && model!==nothing && dimension in (1,2) &&
                 _relocation_native_entity(model,dimension,Int(tag))
-            Model.model_parametrization(model,dimension,Int(tag),collect(@view coords[:,row]))
+            _mixed_point_parametrizer!(parametrizers,model,dimension,Int(tag))(
+                (coords[1,row],coords[2,row],coords[3,row]))
         else
             nothing
         end
@@ -667,6 +676,7 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
     edge_nodes=Dict{UInt64,Int32}()
     parameters=deepcopy(class.node_parametric)
     curve_geometry=Dict{Int,Any}()
+    parametrizers=Dict{Tuple{Int,Int},Any}()
     point_positions=Dict{Tuple{Int,Int32},Int32}()
     for (position,owner) in enumerate(class.node_entities)
         owner[1]==0 && get!(point_positions,owner,Int32(position))
@@ -838,7 +848,8 @@ function _mixed_quadratic_cache(input_mesh,input_class,caller;
                                 _mixed_quadratic_plane_quad_center(model,points,node_entities,
                                     parameters,nodes,column,owner) : nothing
                             if center===nothing
-                                parameter=Model.model_parametrization(model,2,Int(owner[2]),collect(p))
+                                parameter=_mixed_point_parametrizer!(parametrizers,
+                                    model,2,Int(owner[2]))(p)
                             else
                                 p,parameter=center
                             end

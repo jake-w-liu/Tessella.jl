@@ -1106,10 +1106,15 @@ function _gmsh_native_surface_evaluation_frame(m::GeoModel,tag::Int,caller)
         push!(samples,_gmsh_native_curve_sample(m,curve,low+0.333*(high-low),caller))
         push!(samples,_gmsh_native_curve_sample(m,curve,low+0.666*(high-low),caller))
     end
-    options=_model_default_mesh1d_options(m,caller)
     receipt=get(m.meshing.native_geo_kernel.plane_frames,tag,nothing)
-    frame=receipt===nothing ? _gmsh_native_plane_fit(m,tag,samples,options.geometry_tolerance,options.ctx_lc) :
+    # The options (the model's bounding box: every curve sampled) only feed
+    # a refit; a Plane with its constructor's frame needs none of them.
+    frame=if receipt===nothing
+        options=_model_default_mesh1d_options(m,caller)
+        _gmsh_native_plane_fit(m,tag,samples,options.geometry_tolerance,options.ctx_lc)
+    else
         _GmshNativePlaneFrame(receipt.origin,receipt.first,receipt.second,receipt.normal)
+    end
     point_tags=unique!(_loop_points(m,first(m.surfaces[tag])))
     append!(point_tags,[point for point in _model_points_of(m,[(2,tag)],caller)
         if !(point in point_tags)])
