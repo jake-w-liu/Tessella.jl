@@ -3087,7 +3087,7 @@ function _generate_native_lookup_live(dim::Integer)
                 return (Base.inferencebarrier(_get_mesh)())::Union{Mesh,MixedMesh}
             end
         end
-        (Base.inferencebarrier(_copy_mesh)(plan.model.meshing.mesh_authority.carrier))::Union{Mesh,MixedMesh}
+        (Base.inferencebarrier(_higher_returned_mesh)(plan.model.meshing.mesh_authority))::Union{Mesh,MixedMesh}
     end
 end
 

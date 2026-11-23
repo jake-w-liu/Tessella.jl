@@ -34,15 +34,11 @@ const _IDENTITY_API=Tessella.API
         @test _IDENTITY_API.LAST_MESH[]===nothing
         @test _IDENTITY_API.model.get_entity_name(3,1)=="domain"
         regenerated=_IDENTITY_API.mesh.generate(3)
-        # Determinism defect, open since the round that started at 2ed5bc8f
-        # (the assertion passed there): the Mesh object returned by the first
-        # generate(3) of a session orders its nodes differently from the one
-        # every later generate(3) returns for the same model. Same node set
-        # and tetrahedron count, 34 of 335 coordinate columns in other
-        # positions; later calls agree with each other, and the public
-        # arrays below are identical throughout. Identical input should
-        # return an identical object.
-        @test_broken mesh_crc(regenerated)==generated_crc
+        # The returned Mesh lists its nodes in the order of the actual rows
+        # they bind. It once kept the producers' emission order, which the
+        # first generate(3) of a session and every later one (rebound from
+        # the previous carrier) did not share.
+        @test mesh_crc(regenerated)==generated_crc
         regenerated_crc=mesh_crc(regenerated)
         @test statistics(regenerated)==generated_statistics
         @test public()==generated_public

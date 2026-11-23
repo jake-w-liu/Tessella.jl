@@ -6092,3 +6092,21 @@ function _higher_noop_published_labels(mesh::MixedMesh,save_physical::Bool)
     end
     return true
 end
+
+
+# What generate returns: a copy of the geometry carrier. A simplex carrier
+# keeps its nodes in the order the producers emitted them, which differs
+# between the first generation of a model (no previous authority) and a later
+# one (rebound from the previous carrier). The copy lists them in the order
+# of the actual rows they bind, so the same model returns the same mesh.
+function _higher_returned_mesh(authority)
+    carrier=authority.carrier
+    carrier isa Mesh || return _copy_mesh(carrier)
+    rows=authority.carrier_rows
+    length(rows)==nnodes(carrier) && !issorted(rows) || return _copy_mesh(carrier)
+    order=sortperm(rows);place=invperm(order)
+    renumber(cells)=map(node->Int32(place[node]),cells)
+    return Mesh(carrier.coords[:,order];segs=renumber(carrier.segs),tris=renumber(carrier.tris),
+        tets=renumber(carrier.tets),seg_tag=copy(carrier.seg_tag),tri_tag=copy(carrier.tri_tag),
+        tet_tag=copy(carrier.tet_tag))
+end
