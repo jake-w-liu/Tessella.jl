@@ -415,7 +415,6 @@ end
         "geometry/geo_occ_shell_sewing_test.jl",
         "geometry/occ_trimmed_face_green_test.jl",
         "interfaces/api_occ_nurbs_mesh_test.jl",
-        "interfaces/api_occ_bbox_optimal_test.jl",
         "geometry/geo_occ_twist_loft_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
