@@ -140,6 +140,52 @@ end
 o3d_static_filter(b::Bbox) = 5.1107127829973299e-15 * (b.max[1] - b.min[1]) *
     (b.max[2] - b.min[2]) * (b.max[3] - b.min[3])
 
+# exactinit's insphere filter, with its partial sort of the extents
+function isp_static_filter(b::Bbox)
+    maxx = b.max[1] - b.min[1]; maxy = b.max[2] - b.min[2]; maxz = b.max[3] - b.min[3]
+    maxx > maxz && ((maxx, maxz) = (maxz, maxx))
+    if maxy > maxz
+        (maxy, maxz) = (maxz, maxy)
+    elseif maxy < maxx
+        (maxy, maxx) = (maxx, maxy)
+    end
+    return 1.2466136531027298e-13 * maxx * maxy * maxz * (maxz * maxz)
+end
+
+# orient3d and insphere behind exactinit's static filters: the floating-point
+# determinant decides when it is beyond the filter, the exact predicate
+# otherwise (the sign is exact either way)
+@inline function orient3_static(a, b, c, d, filter::Float64)
+    adx = a[1] - d[1]; ady = a[2] - d[2]; adz = a[3] - d[3]
+    bdx = b[1] - d[1]; bdy = b[2] - d[2]; bdz = b[3] - d[3]
+    cdx = c[1] - d[1]; cdy = c[2] - d[2]; cdz = c[3] - d[3]
+    det = adz * (bdx * cdy - cdx * bdy) + bdz * (cdx * ady - adx * cdy) + cdz * (adx * bdy - bdx * ady)
+    det > filter && return 1
+    -det > filter && return -1
+    return orient3(a, b, c, d)
+end
+
+@inline function insphere_static(a, b, c, d, e, filter::Float64)
+    aex = a[1] - e[1]; bex = b[1] - e[1]; cex = c[1] - e[1]; dex = d[1] - e[1]
+    aey = a[2] - e[2]; bey = b[2] - e[2]; cey = c[2] - e[2]; dey = d[2] - e[2]
+    aez = a[3] - e[3]; bez = b[3] - e[3]; cez = c[3] - e[3]; dez = d[3] - e[3]
+    ab = aex * bey - bex * aey; bc = bex * cey - cex * bey
+    cd = cex * dey - dex * cey; da = dex * aey - aex * dey
+    ac = aex * cey - cex * aey; bd = bex * dey - dex * bey
+    abc = aez * bc - bez * ac + cez * ab
+    bcd = bez * cd - cez * bd + dez * bc
+    cda = cez * da + dez * ac + aez * cd
+    dab = dez * ab + aez * bd + bez * da
+    alift = aex * aex + aey * aey + aez * aez
+    blift = bex * bex + bey * bey + bez * bez
+    clift = cex * cex + cey * cey + cez * cez
+    dlift = dex * dex + dey * dey + dez * dez
+    det = (dlift * abc - clift * dab) + (blift * cda - alift * bcd)
+    det > filter && return 1
+    -det > filter && return -1
+    return insphere(a, b, c, d, e)
+end
+
 # ── Moore / Hilbert indices (hxt_vertices.c) ───────────────────────────────────
 @inline function zorder(x::UInt32, y::UInt32, z::UInt32)
     M = _HXT_MORTON7
@@ -270,8 +316,22 @@ end
 mutable struct Local
     ball::Vector{BallFacet}
     deleted::Vector{UInt64}
+    # open-addressing table pairing the new cells' facets by edge, valid for
+    # one fill (`epoch`)
+    edge_key::Vector{UInt64}
+    edge_facet::Vector{UInt64}
+    edge_epoch::Vector{UInt32}
+    epoch::UInt32
+    # computeAdjacenciesFast: cavity-local vertex numbers and the 32x32 edge map
+    vertex_id::Vector{UInt8}
+    local_nodes::Vector{NTuple{3,UInt8}}
+    edge_map::Vector{UInt64}
+    # exactinit's static filters for this bounding box
+    o3d::Float64
+    isp::Float64
 end
-Local() = Local(BallFacet[], UInt64[])
+Local(b::Bbox) = Local(BallFacet[], UInt64[], zeros(UInt64, 256), zeros(UInt64, 256), zeros(UInt32, 256), 0,
+    UInt8[], NTuple{3,UInt8}[], zeros(UInt64, 32 * 32), o3d_static_filter(b), isp_static_filter(b))
 
 # ── initial tetrahedron and its four ghosts (hxtTetrahedraInit) ────────────────
 function tetrahedra_init!(m::Mesh, info::AbstractVector{NodeInfo}, n::Integer, filter::Float64)
@@ -384,26 +444,26 @@ function symbolic_perturbation(indices::NTuple{5,UInt32}, pts::NTuple{5,NTuple{3
 end
 
 # `base` is 4·(cell), the index of its first node
-function tet_insphere(m::Mesh, base::UInt64, vta::UInt32)
+function tet_insphere(m::Mesh, L::Local, base::UInt64, vta::UInt32)
     n0 = tnode(m, base); n1 = tnode(m, base + 1); n2 = tnode(m, base + 2); n3 = tnode(m, base + 3)
     a = point(m, n0); b = point(m, n1); c = point(m, n2); e = point(m, vta)
     if n3 == GHOST
-        det = orient3(a, b, c, e)
+        det = orient3_static(a, b, c, e, L.o3d)
         det != 0 && return det
         opposite = tnode(m, tneigh(m, base + 3))
         o = point(m, opposite)
-        sign = insphere(a, b, c, o, e)
+        sign = insphere_static(a, b, c, o, e, L.isp)
         sign == 0 && (sign = symbolic_perturbation((n0, n1, n2, opposite, vta), (a, b, c, o, e)))
         return -sign
     end
     d = point(m, n3)
-    sign = insphere(a, b, c, d, e)
+    sign = insphere_static(a, b, c, d, e, L.isp)
     sign == 0 && (sign = symbolic_perturbation((n0, n1, n2, n3, vta), (a, b, c, d, e)))
     return sign
 end
 
 # ── walk (walking2Cavity, one partition) ───────────────────────────────────────
-function walk!(m::Mesh, cur::Base.RefValue{UInt64}, vta::UInt32)
+function walk!(m::Mesh, L::Local, cur::Base.RefValue{UInt64}, vta::UInt32)
     next = cur[]
     if tnode(m, 4next + 3) == GHOST
         next = tneigh(m, 4next + 3) ÷ 4
@@ -422,7 +482,7 @@ function walk!(m::Mesh, cur::Base.RefValue{UInt64}, vta::UInt32)
             a = point(m, tnode(m, base + node0_of_facet(f)))
             b = point(m, tnode(m, base + node1_of_facet(f)))
             c = point(m, tnode(m, base + node2_of_facet(f)))
-            if orient3(p, a, b, c) < 0
+            if orient3_static(p, a, b, c, L.o3d) < 0
                 outside = true
                 nb = tneigh(m, base + f)
                 if tnode(m, nb) == GHOST
@@ -437,8 +497,8 @@ function walk!(m::Mesh, cur::Base.RefValue{UInt64}, vta::UInt32)
             outside && return ST_CONFLICT
             a = point(m, tnode(m, base)); b = point(m, tnode(m, base + 1))
             c = point(m, tnode(m, base + 2)); d = point(m, tnode(m, base + 3))
-            if (orient3(a, b, c, p) >= 0) + (orient3(a, b, p, d) >= 0) +
-               (orient3(a, p, c, d) >= 0) + (orient3(p, b, c, d) >= 0) > 2
+            if (orient3_static(a, b, c, p, L.o3d) >= 0) + (orient3_static(a, b, p, d, L.o3d) >= 0) +
+               (orient3_static(a, p, c, d, L.o3d) >= 0) + (orient3_static(p, b, c, d, L.o3d) >= 0) > 2
                 cur[] = next
                 return ST_DOUBLE_PT
             end
@@ -486,7 +546,7 @@ function dig!(m::Mesh, L::Local, first::UInt64, vta::UInt32, perfect::Bool)
             nb = nbi ÷ 4
             constrained = facet_constrained && facet_constraint(m, cur, f) != 0
             (!deleted(m, nb) || constrained) || continue
-            if constrained || tet_insphere(m, 4nb, vta) >= 0
+            if constrained || tet_insphere(m, L, 4nb, vta) >= 0
                 bnd_push!(L, dig_flag(m, cur, f), face[1], face[2], face[3], nbi)
             else
                 push!(L.deleted, nb)
@@ -602,7 +662,7 @@ function reshape_cavity!(m::Mesh, L::Local, vta::UInt32, previous::Int, undelete
         for i in 1:length(L.ball)
             f = L.ball[i]
             f.node[3] == GHOST && continue
-            if orient3(p, point(m, f.node[1]), point(m, f.node[2]), point(m, f.node[3])) >= 0
+            if orient3_static(p, point(m, f.node[1]), point(m, f.node[2]), point(m, f.node[3]), L.o3d) >= 0
                 blind = i - 1; break
             end
         end
@@ -655,7 +715,7 @@ function reshape_cavity!(m::Mesh, L::Local, vta::UInt32, previous::Int, undelete
             if f.node[3] == GHOST
                 cur += 1; continue
             end
-            if orient3(p, point(m, f.node[1]), point(m, f.node[2]), point(m, f.node[3])) < 0
+            if orient3_static(p, point(m, f.node[1]), point(m, f.node[2]), point(m, f.node[3]), L.o3d) < 0
                 cur += 1; continue
             end
         else
@@ -756,25 +816,96 @@ function fill_cavity!(m::Mesh, L::Local, cur::Base.RefValue{UInt64}, vta::UInt32
     end
     # Adjacency inside the star: the facet (vta, x, y) of one new cell is
     # shared with exactly one other; pair them by their edge (x, y).
-    pairs = Dict{Tuple{UInt32,UInt32},UInt64}()
-    for i in 1:blength
+    # (Each edge appears exactly twice, so the pairing is unique however it
+    # is found; HXT uses a small map or a hash table, as here.)
+    if blength <= 58
+        fill_adjacencies_fast!(m, L, start, blength)
+    else
+        fill_adjacencies_slow!(m, L, start, blength)
+    end
+    cur[] = L.deleted[start+1]
+    resize!(L.deleted, start)
+    return nothing
+end
+
+# computeAdjacenciesFast: at most 58 facets have at most 31 distinct vertices
+# (the ghost is 0), so the directed edges index a 32x32 map
+function fill_adjacencies_fast!(m::Mesh, L::Local, start::Int, blength::Int)
+    id = L.vertex_id
+    length(id) < m.nv && resize!(id, max(m.nv, 2length(id)))
+    nodes = L.local_nodes
+    resize!(nodes, blength)
+    @inbounds begin
+        for i in 1:blength
+            f = L.ball[i].node
+            id[Int(f[1])+1] = 0xff; id[Int(f[2])+1] = 0xff
+            f[3] == GHOST || (id[Int(f[3])+1] = 0xff)
+        end
+        npts = 0x01
+        for i in 1:blength
+            f = L.ball[i].node
+            a = id[Int(f[1])+1]; a == 0xff && (a = npts; id[Int(f[1])+1] = npts; npts += 0x01)
+            b = id[Int(f[2])+1]; b == 0xff && (b = npts; id[Int(f[2])+1] = npts; npts += 0x01)
+            c = 0x00
+            if f[3] != GHOST
+                c = id[Int(f[3])+1]; c == 0xff && (c = npts; id[Int(f[3])+1] = npts; npts += 0x01)
+            end
+            nodes[i] = (a, b, c)
+        end
+        map = L.edge_map
+        for i in 1:blength
+            base = 4L.deleted[start+i]
+            a, b, c = nodes[i]
+            map[32Int(a)+Int(b)+1] = base + 3
+            map[32Int(b)+Int(c)+1] = base + 1
+            map[32Int(c)+Int(a)+1] = base + 2
+        end
+        for i in 1:blength
+            base = 4L.deleted[start+i]
+            a, b, c = nodes[i]
+            settneigh!(m, base + 1, map[32Int(c)+Int(b)+1])
+            settneigh!(m, base + 2, map[32Int(a)+Int(c)+1])
+            settneigh!(m, base + 3, map[32Int(b)+Int(a)+1])
+        end
+    end
+    return nothing
+end
+
+function fill_adjacencies_slow!(m::Mesh, L::Local, start::Int, blength::Int)
+    capacity = length(L.edge_key)
+    if capacity < 8blength
+        capacity = nextpow(2, 8blength)
+        L.edge_key = zeros(UInt64, capacity); L.edge_facet = zeros(UInt64, capacity)
+        L.edge_epoch = zeros(UInt32, capacity); L.epoch = 0
+    elseif L.epoch == typemax(UInt32)
+        fill!(L.edge_epoch, 0); L.epoch = 0
+    end
+    L.epoch += UInt32(1)
+    epoch = L.epoch; mask = capacity - 1
+    open = 0
+    @inbounds for i in 1:blength
         t = L.deleted[start+i]; base = 4t
         n = (tnode(m, base + 1), tnode(m, base + 2), tnode(m, base + 3))
         # facet j+1 is opposite node j+1; its two non-vta nodes:
         for (slot, e) in ((1, (n[2], n[3])), (2, (n[1], n[3])), (3, (n[1], n[2])))
-            key = e[1] < e[2] ? e : (e[2], e[1])
-            other = pop!(pairs, key, NO_ADJACENT)
-            if other == NO_ADJACENT
-                pairs[key] = base + slot
-            else
+            key = e[1] < e[2] ? (UInt64(e[1]) << 32) | e[2] : (UInt64(e[2]) << 32) | e[1]
+            h = Int(hash64(key) & mask)
+            while L.edge_epoch[h+1] == epoch && L.edge_key[h+1] != key
+                h = (h + 1) & mask
+            end
+            if L.edge_epoch[h+1] == epoch && L.edge_facet[h+1] != NO_ADJACENT
+                other = L.edge_facet[h+1]
                 settneigh!(m, base + slot, other)
                 settneigh!(m, other, base + slot)
+                L.edge_facet[h+1] = NO_ADJACENT
+                open -= 1
+            else
+                L.edge_epoch[h+1] = epoch; L.edge_key[h+1] = key; L.edge_facet[h+1] = base + slot
+                open += 1
             end
         end
     end
-    isempty(pairs) || error("HXT: cavity star is not closed")
-    cur[] = L.deleted[start+1]
-    resize!(L.deleted, start)
+    open == 0 || error("HXT: cavity star is not closed")
     return nothing
 end
 
@@ -789,7 +920,7 @@ end
 
 function insertion!(m::Mesh, L::Local, opt::DelaunayOptions, cur::Base.RefValue{UInt64}, vta::UInt32)
     previous = length(L.deleted)
-    status = walk!(m, cur, vta)
+    status = walk!(m, L, cur, vta)
     status == ST_TRUE || return status
     color = m.color === nothing ? COLOR_OUT : m.color[Int(cur[])+1]
     m.color !== nothing && !opt.allow_outer_insertion && color == COLOR_OUT && return ST_FALSE
@@ -926,7 +1057,7 @@ function delaunay3d!(m::Mesh, opt::DelaunayOptions, info::Vector{NodeInfo}, n::I
         opt.num_vertices_in_mesh = 4
         passes[1] = 4
     end
-    L = Local()
+    L = Local(opt.bbox)
     total_inserted = 0; total_skipped = 0
     for ipass in 0:npasses-1
         while passes[ipass+2] - passes[ipass+1] != 0
@@ -1062,26 +1193,45 @@ end
 # hxtGetTri2TetMap: for each triangle the facet 4t+f that carries it (the side
 # HXT registers), NO_ADJACENT when the triangle is missing.
 function tri2tet_map(m::Mesh)
-    facets = Dict{NTuple{3,UInt32},UInt64}()
-    for i in 0:m.ntet-1
+    # Each facet is registered from exactly one side (hash_less is a strict
+    # order on distinct cells), so the map does not depend on the visit order.
+    # The triangles are bucketed by their smallest vertex and each such facet
+    # is looked up in its bucket.
+    ntri = length(m.tri_node) ÷ 3
+    first = zeros(Int, m.nv + 1)
+    @inbounds for t in 0:ntri-1
+        a, _, _ = sorted3(m.tri_node[3t+1], m.tri_node[3t+2], m.tri_node[3t+3])
+        first[Int(a)+1] += 1
+    end
+    total = 0
+    @inbounds for v in 1:m.nv
+        c = first[v]; first[v] = total; total += c
+    end
+    first[m.nv+1] = total
+    bucket = Vector{Int32}(undef, ntri)
+    fill_at = copy(first)
+    @inbounds for t in 0:ntri-1
+        a, _, _ = sorted3(m.tri_node[3t+1], m.tri_node[3t+2], m.tri_node[3t+3])
+        fill_at[Int(a)+1] += 1
+        bucket[fill_at[Int(a)+1]] = Int32(t)
+    end
+    map = fill(NO_ADJACENT, ntri)
+    @inbounds for i in 0:m.ntet-1
         tnode(m, 4i + 3) == GHOST && continue
         for j in 0:3
             nb = tneigh(m, 4i + j)
             if nb == NO_ADJACENT || hash_less(UInt64(i), nb ÷ 4) || tnode(m, nb) == GHOST
-                key = sorted3(tnode(m, 4i + ((j + 1) & 3)), tnode(m, 4i + ((j + 2) & 3)),
-                              tnode(m, 4i + ((j + 3) & 3)))
-                facets[key] = UInt64(4i + j)
+                a, b, c = sorted3(tnode(m, 4i + ((j + 1) & 3)), tnode(m, 4i + ((j + 2) & 3)),
+                                  tnode(m, 4i + ((j + 3) & 3)))
+                for k in first[Int(a)+1]+1:first[Int(a)+2]
+                    t = Int(bucket[k])
+                    x, y, z = sorted3(m.tri_node[3t+1], m.tri_node[3t+2], m.tri_node[3t+3])
+                    (y == b && z == c) && (map[t+1] = UInt64(4i + j))
+                end
             end
         end
     end
-    ntri = length(m.tri_node) ÷ 3
-    map = Vector{UInt64}(undef, ntri)
-    missing = 0
-    for t in 0:ntri-1
-        key = sorted3(m.tri_node[3t+1], m.tri_node[3t+2], m.tri_node[3t+3])
-        map[t+1] = get(facets, key, NO_ADJACENT)
-        map[t+1] == NO_ADJACENT && (missing += 1)
-    end
+    missing = count(==(NO_ADJACENT), map)
     return map, missing
 end
 
@@ -1341,11 +1491,12 @@ drop those too close to the cell's corners and insert the others, until no
 point is added (42 rounds at most).
 """
 function refine!(m::Mesh, opt::DelaunayOptions, size_callback)
-    ns = opt.nodal_sizes
+    ns = opt.nodal_sizes::NodalSizes
+    newv = NTuple{4,Float64}[]
+    pt2tet = UInt64[]
     for iter in 0:41
         opt.insertion_first = m.nv
-        newv = NTuple{4,Float64}[]
-        pt2tet = UInt64[]
+        empty!(newv); empty!(pt2tet)
         for t in 0:m.ntet-1
             processed(m, t) && continue
             setprocessed!(m, t)

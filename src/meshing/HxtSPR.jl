@@ -37,6 +37,15 @@ mutable struct SPR
     search::Int
     adjacencies::Vector{UInt64}
     worst::Float64
+    # scratch of one search
+    cand::Vector{UInt8}
+    score::Vector{UInt8}
+    points::Vector{UInt32}
+    connected::Vector{Int}
+    tv::Vector{UInt8}
+    edge_map::BitMatrix
+    original::Vector{NTuple{4,UInt8}}
+    saved::Vector{UInt64}
 end
 
 function SPR()
@@ -44,7 +53,8 @@ function SPR()
         falses(SPR_MAX_PTS), 0, NTuple{2,UInt8}[], NTuple{4,UInt8}[], NTuple{4,UInt8}[],
         NTuple{4,UInt8}[], 0.0, [SPRStep(zeros(UInt8, SPR_MAX_PTS - 3), (0, 0, 0, 0), -1, 0.0) for _ in 1:SPR_MAX_TETS+1],
         0, fill(NO_FACE, SPR_MAX_PTS^3), fill(NaN, SPR_MAX_PTS * (SPR_MAX_PTS - 1) * (SPR_MAX_PTS - 2) * (SPR_MAX_PTS - 3) ÷ 24),
-        500, 0, UInt64[], 0.0)
+        500, 0, UInt64[], 0.0, UInt8[], UInt8[], UInt32[], Int[], zeros(UInt8, 4),
+        falses(SPR_MAX_PTS, SPR_MAX_PTS), NTuple{4,UInt8}[], UInt64[])
 end
 
 @inline faceidx(v0, v1, v2) = Int(v0) * SPR_MAX_PTS^2 + Int(v1) * SPR_MAX_PTS + Int(v2) + 1
@@ -102,13 +112,14 @@ end
 @inline tri_edge(t012v0, t012v1, t01v01, t12v01, t20v01) =
     t012v0 * t012v1 < 0 && t012v0 * t01v01 <= 0 && t012v0 * t12v01 <= 0 && t012v0 * t20v01 <= 0
 
-function bbox4(S::SPR, n)
-    lo = [S.coord[n[1]+1]...]; hi = copy(lo)
-    for k in 2:4, i in 1:3
-        c = S.coord[n[k]+1][i]
-        c < lo[i] && (lo[i] = c)
-        c > hi[i] && (hi[i] = c)
-    end
+@inline function bbox4(S::SPR, n)
+    a = S.coord[n[1]+1]; b = S.coord[n[2]+1]; c = S.coord[n[3]+1]; d = S.coord[n[4]+1]
+    lo = ntuple(i -> begin
+        x = a[i]; b[i] < x && (x = b[i]); c[i] < x && (x = c[i]); d[i] < x && (x = d[i]); x
+    end, 3)
+    hi = ntuple(i -> begin
+        x = a[i]; b[i] > x && (x = b[i]); c[i] > x && (x = c[i]); d[i] > x && (x = d[i]); x
+    end, 3)
     return lo, hi
 end
 
@@ -121,8 +132,8 @@ function tet_tri_intersection(S::SPR, tb, tet, tri)
     o(a, b, c, d) = sorient(S, a, b, c, d)
     idx(x) = x == tet[1] ? 0 : x == tet[2] ? 1 : x == tet[3] ? 2 : x == tet[4] ? 3 : -1
     t0 = idx(tri[1]); t1 = idx(tri[2]); t2 = idx(tri[3])
-    tt = [-1, -1, -1, -1]
-    t0 != -1 && (tt[t0+1] = 0); t1 != -1 && (tt[t1+1] = 1); t2 != -1 && (tt[t2+1] = 2)
+    # tetN_to_tri: which triangle vertex is tet vertex N (-1 if none)
+    tt(k) = k == t2 ? 2 : k == t1 ? 1 : k == t0 ? 0 : -1
     # C assigns tetN_to_tri in order tri0, tri1, tri2; a later match overwrites
     (t0 != -1 && t1 != -1 && t2 != -1) && return false
     side(f0, f1, f2) = (f0 > 0 || (f0 == 0 && t0 != -1)) && (f1 > 0 || (f1 == 0 && t1 != -1)) && (f2 > 0 || (f2 == 0 && t2 != -1))
@@ -152,7 +163,7 @@ function tet_tri_intersection(S::SPR, tb, tet, tri)
     E2 = e(tri[3], tri[1])
     (tri_edge(f0v2, f0v0, -E2[4], -E2[6], E2[5]) || tri_edge(f1v2, f1v0, -E2[3], E2[6], E2[2]) ||
      tri_edge(f2v2, f2v0, -E2[1], -E2[5], E2[3]) || tri_edge(f3v2, f3v0, -E2[2], E2[4], E2[1])) && return true
-    a0, a1, a2, a3 = tt
+    a0 = tt(0); a1 = tt(1); a2 = tt(2); a3 = tt(3)
     ((a0 == -1 && a1 == -1 && tri_edge(v0f == 0 ? v1f : -v0f, -v1f, E0[1], E1[1], E2[1])) ||
      (a0 == -1 && a2 == -1 && tri_edge(v0f == 0 ? v2f : -v0f, -v2f, E0[2], E1[2], E2[2])) ||
      (a0 == -1 && a3 == -1 && tri_edge(v0f == 0 ? v3f : -v0f, -v3f, E0[3], E1[3], E2[3])) ||
@@ -237,7 +248,8 @@ end
 
 function compute_candidates!(S::SPR, step::SPRStep, qualmax)
     t = step.tet
-    cand = UInt8[]; score = UInt8[]
+    cand = S.cand; score = S.score
+    empty!(cand); empty!(score)
     for n3 in 0:S.npts-1
         (n3 == t[1] || n3 == t[2] || n3 == t[3] || S.valence[n3+1] == 0) && continue
         q, _ = get_quality_map(S, t[1], t[2], t[3], n3)
@@ -253,15 +265,12 @@ function compute_candidates!(S::SPR, step::SPRStep, qualmax)
         end
         push!(cand, UInt8(n3)); push!(score, UInt8(s))
     end
-    count = zeros(Int, 16)
-    for s in score; count[s+1] += 1; end
-    sum = 0
-    for i in 1:16
-        c = count[i]; count[i] = sum; sum += c
-    end
-    for i in eachindex(cand)
-        step.candidate[count[score[i]+1]+1] = cand[i]
-        count[score[i]+1] += 1
+    # HXT's counting sort by score, stable: score by score, in candidate order
+    k = 0
+    for value in 0x00:0x0f, i in eachindex(cand)
+        score[i] == value || continue
+        k += 1
+        step.candidate[k] = cand[i]
     end
     step.num_candidates = length(cand)
     step.tet = (t[1], t[2], t[3], UInt8(S.npts))
@@ -397,7 +406,7 @@ function spr_init!(S::SPR, o::Opti, bad::UInt64)
     fill!(S.faces, NO_FACE); fill!(S.qualities, NaN)
     S.npts = 4
     empty!(S.ciedges); empty!(S.citris); empty!(S.bnd)
-    S.tets = [(0x00, 0x01, 0x02, 0x03)]
+    empty!(S.tets); push!(S.tets, (0x00, 0x01, 0x02, 0x03))
     S.quality = o.quality[Int(bad)+1]
     S.search = 0
     S.max_search = o.max_search_nodes
@@ -408,7 +417,7 @@ function spr_init!(S::SPR, o::Opti, bad::UInt64)
         S.coord[i+1] = point(m, node); S.user[i+1] = node; S.valence[i+1] = 0; S.interior[i+1] = false
     end
     known_quality!(S, 0, 1, 2, 3, o.quality[Int(bad)+1])
-    S.adjacencies = UInt64[]
+    empty!(S.adjacencies)
     for i in 0:3
         add_face!(S, node0_of_facet(i), node1_of_facet(i), node2_of_facet(i))
         push!(S.adjacencies, tneigh(m, 4bad + i))
@@ -418,7 +427,8 @@ end
 function find_best_point(S::SPR, o::Opti)
     m = o.m
     adj = S.adjacencies
-    points = UInt32[]; connected = Int[]
+    points = S.points; connected = S.connected
+    empty!(points); empty!(connected)
     for i in 1:length(S.bnd)
         a = adj[i]
         (a == NO_ADJACENT || facet_constraint(m, a ÷ 4, a % 4) != 0) && continue
@@ -498,7 +508,8 @@ function attach_best_point!(S::SPR, o::Opti)
         setdeleted!(m, mt)
         push!(o.deleted, mt)
         tri = S.bnd[i+1]
-        tv = [0x00, 0x00, 0x00, 0x00]
+        tv = S.tv
+        fill!(tv, 0x00)
         tv[facet+1] = UInt8(oppv)
         for j in 0:2
             if S.user[tri[j+1]+1] == tnode(m, 4mt + node0_of_facet(facet))
@@ -551,7 +562,8 @@ function attach_best_point!(S::SPR, o::Opti)
 end
 
 function constrained_edge_map(m::Mesh, S::SPR)
-    map = falses(SPR_MAX_PTS, SPR_MAX_PTS)
+    map = S.edge_map
+    fill!(map, false)
     for (a, b) in S.ciedges
         map[a+1, b+1] = true; map[b+1, a+1] = true
     end
@@ -657,11 +669,9 @@ function set_check_date!(o::Opti, bad::UInt64)
     o.last_check = o.last_creation + 1
 end
 
-const _SPR_BUFFER = Ref{Union{Nothing,SPR}}(nothing)
 
 function spr_opti!(o::Opti, bad::UInt64)
-    S = something(_SPR_BUFFER[], SPR())
-    _SPR_BUFFER[] = S
+    S = o.spr === nothing ? (o.spr = SPR()) : o.spr::SPR
     previous = length(o.deleted)
     lastcheck = o.check[Int(bad)+1]
     dates_ok = false
@@ -682,8 +692,9 @@ function spr_opti!(o::Opti, bad::UInt64)
         if dates_ok
             detect_interior!(S)
             init_step!(S)
-            original = copy(S.bnd)
-            adjacencies = S.adjacencies[1:length(S.bnd)]
+            original = S.original; adjacencies = S.saved
+            resize!(original, length(S.bnd)); copyto!(original, S.bnd)
+            resize!(adjacencies, length(S.bnd)); copyto!(adjacencies, 1, S.adjacencies, 1, length(S.bnd))
             status = spr_advanced!(S)
             if status == ST_INTERNAL
                 if S.worst < S.quality

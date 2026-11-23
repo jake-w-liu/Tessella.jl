@@ -60,6 +60,17 @@ mutable struct Opti
     last_check::UInt64
     last_creation::UInt64
     max_search_nodes::Int
+    # scratch reused by every edge removal, smoothing and SPR attempt
+    er_tets::Vector{UInt64}
+    er_up::Vector{UInt64}
+    er_down::Vector{UInt64}
+    er_flag::Vector{UInt16}
+    er_annulus::Vector{UInt32}
+    qup::Vector{Float64}
+    qdown::Vector{Float64}
+    golden::Vector{Float64}
+    golden_f::Vector{Float64}
+    spr::Any
 end
 
 const ST_INTERNAL = Int32(-1024)
@@ -106,7 +117,8 @@ function edge_removal!(o::Opti, bad::UInt64, edge::Int)
     edge_constraint(m, bad, edge_of_facets(in, out)) != 0 && return ST_CONSTRAINT
     v_up = tnode(m, 4bad + down_facet(in, out))
     v_down = tnode(m, 4bad + up_facet(in, out))
-    tets = UInt64[]; neigh_up = UInt64[]; neigh_down = UInt64[]; flag = UInt16[]; annulus = UInt32[]
+    tets = o.er_tets; neigh_up = o.er_up; neigh_down = o.er_down; flag = o.er_flag; annulus = o.er_annulus
+    empty!(tets); empty!(neigh_up); empty!(neigh_down); empty!(flag); empty!(annulus)
     cur = bad
     while true
         oldv = tnode(m, 4cur + out)
@@ -141,7 +153,7 @@ function edge_removal!(o::Opti, bad::UInt64, edge::Int)
     end
     pat = _ER_PATTERNS[n]
     ntri = n - 2
-    qup = zeros(length(pat.triangles)); qdown = zeros(length(pat.triangles))
+    qup = o.qup; qdown = o.qdown
     mask = UInt64(0)
     for i in eachindex(pat.triangles)
         tr = pat.triangles[i]
@@ -334,8 +346,8 @@ function golden_section!(o::Opti, previous::Int, start, stop, vertex)
     m = o.m
     tol = 0.00001
     invphi = 0.6180339887498949
-    v = [1.0, 0.0, invphi, 1 - invphi]
-    fv = zeros(4)
+    v = o.golden; fv = o.golden_f
+    v[1] = 1.0; v[2] = 0.0; v[3] = invphi; v[4] = 1 - invphi
     for i in 1:4
         interpolate!(m, vertex, start, stop, v[i])
         fv[i] = worst_quality(o, previous)
@@ -373,10 +385,18 @@ end
 
 include("HxtSPR.jl")
 
+@inline function sort4(a, b, c, d)
+    a > b && ((a, b) = (b, a)); c > d && ((c, d) = (d, c))
+    a > c && ((a, c) = (c, a)); b > d && ((b, d) = (d, b))
+    b > c && ((b, c) = (c, b))
+    return (a, b, c, d)
+end
+
 # ── the optimization driver (hxtOptimizeTetrahedra, one thread) ────────────────
 function optimize!(m::Mesh, b::Bbox, threshold::Float64, constrained::Integer)
     o = Opti(m, zeros(m.ntet), zeros(UInt16, m.ntet), zeros(UInt16, m.ntet), 0x0000, threshold,
-        UInt64[], UInt32(constrained), 0, 0, 500)
+        UInt64[], UInt32(constrained), 0, 0, 500, UInt64[], UInt64[], UInt64[], UInt16[], UInt32[],
+        zeros(35), zeros(35), zeros(4), zeros(4), nothing)
     for t in 0:m.ntet-1
         processed(m, t) && continue
         o.quality[t+1] = tet_quality(m, tnode(m, 4t), tnode(m, 4t + 1), tnode(m, 4t + 2), tnode(m, 4t + 3))
@@ -417,7 +437,7 @@ function optimize!(m::Mesh, b::Bbox, threshold::Float64, constrained::Integer)
         lcg_f64(seed)
         for i in eachindex(bad)
             t = bad[i][2]
-            h = sort!([pad(m, tnode(m, 4t + j)) for j in 0:3])
+            h = sort4(pad(m, tnode(m, 4t)), pad(m, tnode(m, 4t + 1)), pad(m, tnode(m, 4t + 2)), pad(m, tnode(m, 4t + 3)))
             mindist = typemax(UInt64); middle = UInt64(0)
             for j in 0:3
                 d = h[(j+1)%4+1] - h[j+1]
