@@ -129,6 +129,10 @@ end
 _dim01_record(m,entity)=get(m.discrete,entity,get(m.meshing.attached,entity,nothing))
 
 function _dim01_family_rank(msh)
+    # The first-order types answer without the catalogue lookup: this is a
+    # sort key, read O(n log n) times per finish.
+    msh==15 && return 0
+    1<=msh<=7 && return Int(msh)
     family=msh_spec(msh).family
     return family===:pnt ? 0 : family===:lin ? 1 : family===:tri ? 2 :
            family===:qua ? 3 : family===:tet ? 4 : family===:hex ? 5 :
