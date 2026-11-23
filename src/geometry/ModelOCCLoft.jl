@@ -524,8 +524,34 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
     ruled=make_ruled || qv==1
     nseams=ruled ? (nsec-1)*ncols : ncols
     nfaces=ruled ? (nsec-1)*ne : ne
-    seam_ids=UInt64[_model_occ_sweep_id!(sw,kernel) for _ in 1:nseams]
-    seam_tags=Int[_model_occ_sweep_tag!(sw,kernel,1) for _ in 1:nseams]
+    # A smooth loft through three sections or more bounds its faces with new
+    # edges at the first and last sections (B-splines in Gmsh 4.15.2, the
+    # section edges themselves stay free); `_multiBind` meets each face's
+    # edges as first section, seam at its end, last section, seam at its
+    # start.
+    fresh=!ruled && nsec>=3
+    sec_ids=Dict{Tuple{Int,Int},UInt64}(); sec_tags=Dict{Tuple{Int,Int},Int}()
+    if fresh
+        seam_ids=zeros(UInt64,nseams); seam_tags=zeros(Int,nseams)
+        function draw_seam!(c)
+            seam_ids[c]==0 || return
+            seam_ids[c]=_model_occ_sweep_id!(sw,kernel)
+            seam_tags[c]=_model_occ_sweep_tag!(sw,kernel,1)
+        end
+        function draw_sec!(j,k)
+            sec_ids[(j,k)]=_model_occ_sweep_id!(sw,kernel)
+            sec_tags[(j,k)]=_model_occ_sweep_tag!(sw,kernel,1)
+        end
+        for k in 1:ne
+            draw_sec!(1,k)
+            draw_seam!(k==ne ? (closed[1] ? 1 : ne+1) : k+1)
+            draw_sec!(nsec,k)
+            draw_seam!(k)
+        end
+    else
+        seam_ids=UInt64[_model_occ_sweep_id!(sw,kernel) for _ in 1:nseams]
+        seam_tags=Int[_model_occ_sweep_tag!(sw,kernel,1) for _ in 1:nseams]
+    end
     wire_ids=UInt64[_model_occ_sweep_id!(sw,kernel) for _ in 1:nfaces+2]
     wire_tags=Int[_model_occ_sweep_tag!(sw,kernel,-1) for _ in 1:nfaces+2]
     face_ids=UInt64[_model_occ_sweep_id!(sw,kernel) for _ in 1:nfaces+2]
@@ -592,6 +618,22 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
                                UInt64[va,vb]))
         end
     end
+    # The new end-section edges: the section's curve and vertices (exact —
+    # OpenCASCADE's are approximations within 1e-7 of it), typed BSpline.
+    if fresh
+        for j in (1,nsec)
+            for k in 1:ne
+                eid,_=uses_per_wire[j][k]
+                sh=kernel.shapes[eid]
+                _model_occ_sweep_bind!(sw,1,sec_tags[(j,k)],sec_ids[(j,k)],
+                    _ModelOCCShape(1,merge(sh.geometry,(geometry=merge(
+                        sh.geometry.geometry,(native_type="BSpline",)),)),
+                        copy(sh.children)))
+            end
+            uses_per_wire[j]=Tuple{UInt64,Bool}[(sec_ids[(j,k)],r)
+                for (k,(_,r)) in enumerate(uses_per_wire[j])]
+        end
+    end
 
     # Lateral faces.
     shape_of=id->_model_occ_sweep_shape_of(sw,kernel,id)
@@ -656,8 +698,8 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
             # pcurves: bottom edge t→(ũ(t),v_lo), top t→(ũ(t),v_hi),
             # seams t→(u_side, v(t)).
             pc=Dict{Int,NamedTuple}()
-            etag_lo=_model_occ_shape_tag(kernel,eid_lo,caller)
-            etag_hi=_model_occ_shape_tag(kernel,eid_hi,caller)
+            etag_lo=tag_of(eid_lo)
+            etag_hi=tag_of(eid_hi)
             pc[etag_lo]=(fwd=_loft_umap_pcurve(umaps[j][k],ulo),rev=nothing)
             pc[etag_hi]=(fwd=_loft_umap_pcurve(umaps[jhi][k],ulo2),rev=nothing)
             for (sidx,u_side,reversed_use) in
@@ -771,7 +813,7 @@ function _model_occ_thru_sections!(m::GeoModel,tag,wire_tags;
                 tgeo=(occ=:tensor_bspline,
                       patch=_ModelNURBSSurface(:bspline,patch),
                       pcurves=geo.pcurves,vertex_uv=vuv,reversed=cap_rev,
-                      trimmed=true,plane_rec=geo)
+                      trimmed=true,plane_rec=geo,native_type="Plane")
                 _model_occ_sweep_bind!(sw,2,face_tags[fi],face_ids[fi],
                     _ModelOCCShape(2,(kind=:tensor_bspline,geometry=tgeo),
                                    UInt64[wire_ids[fi]]))

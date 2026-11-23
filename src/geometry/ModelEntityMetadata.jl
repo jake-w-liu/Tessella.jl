@@ -10,6 +10,16 @@ function _model_entity_type_name(m::GeoModel,dimension::Int,tag::Int)
             native=_model_occ_native_curve_type(geometry.curve)
             native===nothing || return native
         end
+        # a `.geo` spline of the OpenCASCADE factory bound into the kernel is
+        # an OCC B-spline or Bezier curve (`OCCEdge::geomType`), not a Nurb
+        if _curve_type(m,tag) in (:spline,:bspline,:bezier,:nurbs)
+            id=get(m.occ_kernel.bindings,(1,tag),nothing)
+            if id!==nothing
+                k=get(m.occ_kernel.shapes[id].geometry,:kind,nothing)
+                k===:tensor_bspline && return "BSpline"
+                k===:tensor_bezier && return "Bezier"
+            end
+        end
         return _curve_type_name(_curve_type(m,tag))
     end
     if dimension==2

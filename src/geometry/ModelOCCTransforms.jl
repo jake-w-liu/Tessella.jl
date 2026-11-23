@@ -25,6 +25,36 @@ function _model_occ_closure(kernel:: _ModelNativeOCCKernel, roots)
     return order
 end
 
+# The shapes under `root` in the order Gmsh's recursive `_bind` meets them
+# (`TopExp_Explorer` at each level: a face's edges, an edge's vertices, in
+# the kernel's explorer order where it records one); new sub-shapes take
+# their tags in this order. => id => walk position.
+function _model_occ_walk_rank(kernel::_ModelNativeOCCKernel,root)
+    rank=Dict{UInt64,Int}()
+    stack=UInt64[root]
+    while !isempty(stack)
+        id=pop!(stack)
+        haskey(rank,id) && continue
+        rank[id]=length(rank)+1
+        sh=kernel.shapes[id]
+        children=sh.children
+        if sh.dimension in (1,2) && haskey(kernel.explorer,id)
+            # a face's wires take their own rank, its edges come in explorer
+            # order rather than through the wires
+            if sh.dimension==2
+                for w in sh.children
+                    haskey(rank,w) || (rank[w]=length(rank)+1)
+                end
+            end
+            children=kernel.explorer[id]
+        end
+        for i in length(children):-1:1
+            push!(stack,children[i])
+        end
+    end
+    return rank
+end
+
 # Squared slant of a cone record — its pcurve `v` coordinate is slant length.
 @inline _occ_cone_slant(height,dr)=sqrt(height*height+dr*dr)
 
@@ -565,45 +595,61 @@ function _model_occ_transform!(m::GeoModel,dim_tags,t::_AffineTransform,
         newshapes[remap[id]]=_ModelOCCShape(shape.dimension,geometry,
             UInt64[remap[c] for c in shape.children])
     end
-    # Two phases: unbind every input first so `kernel.maxima` reflects the
-    # surviving entities, then rebind. Upstream's `_bind(out, tag, true)`
-    # emits each re-created sub-shape at `getMaxTag+1` in original
-    # enumeration order — assign those tags before the walk.
-    for (d,tg,id) in entries
-        _model_occ_unbind!(kernel,id,true)
-    end
-    # `getMaxTag` counts every live GModel entity — including lazily-bound
-    # `.geo` records a shared-boundary transform leaves alone — so rebind
-    # tags can never overwrite an unrelated public tag.
-    for d in 0:3
-        store=d==0 ? m.points : d==1 ? m.curves : d==2 ? m.surfaces : m.volumes
-        for t in keys(store)
-            (d,t) in kernel.removed && continue
-            kernel.maxima[d+3]=max(kernel.maxima[d+3],t)
-        end
-    end
-    for t in keys(m.loops)
-        (-1,t) in kernel.removed || (kernel.maxima[2]=max(kernel.maxima[2],t))
-    end
-    for t in keys(m.surface_loops)
-        (-2,t) in kernel.removed || (kernel.maxima[1]=max(kernel.maxima[1],t))
+    # Upstream's `_transform` unbinds and rebinds one input at a time:
+    # `_unbind(old, tag, true)` releases the input and the sub-shapes nothing
+    # else uses (the maxima drop to the surviving entities), then `_bind(new,
+    # tag, true)` emits each re-created sub-shape not bound yet at
+    # `getMaxTag+1` in original enumeration order. A later input sees the
+    # tags the earlier ones took (Gmsh 4.15.2: translating two boxes renumbers
+    # the second box's points 25-32, a copied square's points 9-12).
+    for id in union
+        x=get(kernel.explorer,id,nothing)
+        x===nothing || (kernel.explorer[remap[id]]=UInt64[remap[c] for c in x])
     end
     newtags=Dict{UInt64,Int}()
-    order=Tuple{Int,Int,UInt64}[]
-    for id in union
-        haskey(oldtags,id) || continue
-        push!(order,(kernel.shapes[id].dimension,oldtags[id],remap[id]))
-    end
-    sort!(order)
-    for (d,old,nid) in order
-        d>=-2 || continue
-        t=_model_occ_next_tag(kernel,d,-1,caller)
-        kernel.maxima[d+3]=t
-        newtags[nid]=t
-    end
     ctx=(inverse=inverse,oldtags=oldtags,newtags=newtags,
          tagmap=Dict{Int,Int}(),tagmap0=Dict{Int,Int}(),caller=caller)
+    closures=Dict{UInt64,Vector{UInt64}}(
+        id=>_model_occ_closure(kernel,UInt64[id]) for (_,_,id) in entries)
+    walks=Dict{UInt64,Dict{UInt64,Int}}(
+        id=>_model_occ_walk_rank(kernel,id) for (_,_,id) in entries)
     for (d,tg,id) in entries
+        _model_occ_unbind!(kernel,id,true)
+        # `getMaxTag` counts every live GModel entity — including lazily-bound
+        # `.geo` records a shared-boundary transform leaves alone — so rebind
+        # tags can never overwrite an unrelated public tag.
+        for dd in 0:3
+            store=dd==0 ? m.points : dd==1 ? m.curves : dd==2 ? m.surfaces :
+                m.volumes
+            for t in keys(store)
+                (dd,t) in kernel.removed && continue
+                kernel.maxima[dd+3]=max(kernel.maxima[dd+3],t)
+            end
+        end
+        for t in keys(m.loops)
+            (-1,t) in kernel.removed || (kernel.maxima[2]=max(kernel.maxima[2],t))
+        end
+        for t in keys(m.surface_loops)
+            (-2,t) in kernel.removed || (kernel.maxima[1]=max(kernel.maxima[1],t))
+        end
+        order=Tuple{Int,Int,UInt64}[]
+        rank=walks[id]
+        for cid in closures[id]
+            # the input itself keeps its tag (`_bind(new, tag)`); a point's
+            # still-used old vertex needs one (below)
+            cid==id && d!=0 && continue
+            haskey(oldtags,cid) || continue
+            nid=remap[cid]
+            (haskey(newtags,nid) || haskey(kernel.shape_tags,nid)) && continue
+            push!(order,(kernel.shapes[cid].dimension,rank[cid],nid))
+        end
+        sort!(order)
+        for (od,old,nid) in order
+            od>=-2 || continue
+            t=_model_occ_next_tag(kernel,od,-1,caller)
+            kernel.maxima[od+3]=t
+            newtags[nid]=t
+        end
         if d==0 && haskey(kernel.shape_tags,id)
             # The ownership-protected unbind left a vertex that a bound edge
             # still uses. Upstream's `_bind` then hands its tag to the moved
@@ -663,6 +709,10 @@ function _model_occ_copy!(m::GeoModel,dim_tags,caller::AbstractString)
         newshapes[remap[id]]=_ModelOCCShape(shape.dimension,geometry,
             UInt64[remap[c] for c in shape.children])
     end
+    for id in union
+        x=get(kernel.explorer,id,nothing)
+        x===nothing || (kernel.explorer[remap[id]]=UInt64[remap[c] for c in x])
+    end
     ctx=(inverse=inverse,oldtags=oldtags,newtags=Dict{UInt64,Int}(),
          tagmap=Dict{Int,Int}(),tagmap0=Dict{Int,Int}(),caller=caller)
     out=Tuple{Int,Int}[]
@@ -679,12 +729,13 @@ function _model_occ_copy!(m::GeoModel,dim_tags,caller::AbstractString)
         # order of their originals' tags.
         counters=copy(kernel.maxima)
         order=Tuple{Int,Int,UInt64}[]
+        rank=_model_occ_walk_rank(kernel,id)
         for cid in _model_occ_closure(kernel,UInt64[id])
             cid==id && continue
             haskey(oldtags,cid) || continue
             haskey(kernel.shape_tags,remap[cid]) && continue
             haskey(ctx.newtags,remap[cid]) && continue
-            push!(order,(kernel.shapes[cid].dimension,oldtags[cid],remap[cid]))
+            push!(order,(kernel.shapes[cid].dimension,rank[cid],remap[cid]))
         end
         sort!(order)
         for (cd,_,cnid) in order

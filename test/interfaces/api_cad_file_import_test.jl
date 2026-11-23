@@ -63,7 +63,11 @@ end
             isempty(roots) && (roots=A.model.get_entities(2))
             A.model.occ.translate(roots,2.,3.,4.)
             A.model.occ.synchronize()
-            @test A.model.get_value(1,curve,[parameter])≈value+[2.,3.,4.]
+            # Gmsh 4.15.2 rebinds the faces of the IGES box one at a time:
+            # their curves come back as 25-48, the first one first
+            moved=first(A.model.get_entities(1))[2]
+            @test moved==(endswith(name,".igs") ? 25 : curve)
+            @test A.model.get_value(1,moved,[parameter])≈value+[2.,3.,4.]
             @test collect(A.model.get_bounding_box(-1,-1))≈bounds+[2.,3.,4.,2.,3.,4.] atol=1e-6
         finally
             A.finalize()

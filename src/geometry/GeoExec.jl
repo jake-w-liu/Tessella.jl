@@ -3254,6 +3254,11 @@ function _geo_occ_orient_loop(m::GeoModel,ids::Vector{Int})
     end
     s==e || return (Int[],false)
     first(ids)<0 && (chain=reverse!(-chain))
+    # `BRepTools_WireExplorer` walks the closed wire from its first edge,
+    # the first curve listed (Gmsh 4.15.2's loft of twist.geo's loop
+    # {1:4} meets its faces along curves 1, -4, 3, -2)
+    k=findfirst(c->abs(c)==t0,chain)
+    chain=vcat(chain[k:end],chain[1:k-1])
     return (chain,true)
 end
 

@@ -1121,8 +1121,11 @@ function _model_occ_revol_spline!(sw,kernel,src_id,p,n,a,Ma,loca,spec,caller)
         2,profile.degree,U,copy(profile.knots),controls,W))
     seam_tag=_model_occ_sweep_tag_of(sw,kernel,src_id,caller)
     pcurves=Dict{Int,NamedTuple}()
+    # Gmsh's getType names it "Surface of Revolution" (examples/boolean/
+    # hyperboloid.geo), as for the conic profiles below
     geometry=(occ=:tensor_bspline,patch=patch,pcurves=pcurves,
-              vertex_uv=Dict{Int,NTuple{2,Float64}}(),reversed=false)
+              vertex_uv=Dict{Int,NTuple{2,Float64}}(),reversed=false,
+              native_type="Surface of Revolution")
     # Tags in OpenCASCADE's order: the edge swept by the start vertex, the
     # one swept by the end vertex (a rim, or the collapsed parallel of a
     # vertex on the axis), then the rotated copy of the profile.
@@ -1810,9 +1813,15 @@ function _model_occ_revol_check_face(kernel,face_id,p,n,caller)
             "the revolution axis (spindle torus)"))
         return :disk
     end
-    all(k->k in (:line,:circle,:ellipse),kinds) || throw(ArgumentError(
-        "$caller: revolution of a face bounded by non-line curves " *
-        "is not yet supported"))
+    # a spline edge sweeps its tensor surface of revolution (the line
+    # classifier checks it stays off the axis between its ends)
+    for (k,(eid,_)) in zip(kinds,uses)
+        k in (:line,:circle,:ellipse) && continue
+        _model_occ_revol_spline_profile(kernel.shapes[eid].geometry.geometry) ||
+            throw(ArgumentError("$caller: revolution of a face bounded by " *
+                                "$k curves is not yet supported"))
+        _model_occ_revol_check_line(kernel,eid,p,n,caller)
+    end
     # The face plane must be an axial plane: its axis is perpendicular
     # to n and every vertex's radial direction lies in the plane.
     abs(_dot3(g.geometry.axis,n))<=1.0e-10 || throw(ArgumentError(
