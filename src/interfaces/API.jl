@@ -2117,6 +2117,40 @@ function _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,qua
     return nothing
 end
 
+# The edges of tetrahedra that all have one owner, into an empty support
+# table: every edge once (bucketed by its smaller vertex, a stamp per bucket),
+# rather than six hashed probes per cell. The table's content is the one
+# `_api_support_cells!` builds; its slot order differs, and support tables
+# are only probed by key or merged key by key into other support tables.
+function _api_support_uniform_tets!(edges::Dict{NTuple{2,Int32},Tuple{Int,Int32}},
+                                    tets::AbstractMatrix{<:Integer},owner::Tuple{Int,Int32},nodes::Int)
+    isempty(edges) || throw(ArgumentError("API mesh classification: the tetrahedron supports go first"))
+    first=zeros(Int,nodes+1)
+    @inbounds for column in axes(tets,2),(i,j) in Elements._TET_EDGES
+        a,b=minmax(tets[i+1,column],tets[j+1,column])
+        first[Int(a)]+=1
+    end
+    total=0
+    @inbounds for v in 1:nodes
+        c=first[v];first[v]=total;total+=c
+    end
+    first[nodes+1]=total
+    other=Vector{Int32}(undef,total);at=copy(first)
+    @inbounds for column in axes(tets,2),(i,j) in Elements._TET_EDGES
+        a,b=minmax(tets[i+1,column],tets[j+1,column])
+        at[Int(a)]+=1;other[at[Int(a)]]=Int32(b)
+    end
+    stamp=zeros(Int32,nodes)
+    sizehint!(edges,total÷4)
+    @inbounds for a in 1:nodes,k in first[a]+1:first[a+1]
+        b=other[k]
+        stamp[b]==a && continue
+        stamp[b]=Int32(a)
+        edges[(Int32(a),b)]=owner
+    end
+    return edges
+end
+
 function _api_check_support_conflicts(edges,faces,quads)
     (isempty(edges) && isempty(faces) && isempty(quads)) || throw(ArgumentError(
         "API mesh classification: an actual primary support has ambiguous " *

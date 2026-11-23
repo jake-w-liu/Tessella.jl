@@ -3095,7 +3095,7 @@ function _higher_volume_input_classification(assembly,m,mesh::Union{Mesh,MixedMe
     owners=Dict{Int,Vector{Int32}}(1=>Int32[],2=>Int32[])
     if mesh isa Mesh
         tetrahedra=fill(Int32(tag),ntets(mesh))
-        _api_support_cells!(edges,edge_conflicts,faces,face_conflicts,quads,quad_conflicts,4,mesh.tets,tetrahedra)
+        _api_support_uniform_tets!(edges,mesh.tets,(3,Int32(tag)),nnodes(mesh))
         owners[4]=tetrahedra
     else
         # Recombined hex-dominant part: every dim-3 block contributes its
