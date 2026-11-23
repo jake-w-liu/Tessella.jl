@@ -76,6 +76,25 @@ function _model_transfinite_boundary_events(kernel)
     return [(block.nodes,block.tags) for block in kernel.blocks if block.msh==1]
 end
 
+# Whether a boundary node of transfinite Surface `t` has a geometry birth
+# position other than its actual coordinates: the only input in which the
+# geometry layout of the face differs from its actual layout.
+function _model_transfinite_geometry_moved(m,t,input,geometry_points,caller)
+    for signed in m.loops[only(m.surfaces[t])]
+        curve=abs(signed)
+        curve in m.meshing.degenerated && continue
+        source=_model_mesh_curve_births(input,m,curve,caller)
+        source===nothing && continue
+        data=source.mesh.entity_data;coords=source.mesh.coords
+        for row in source.rows
+            point=get(geometry_points,data.external_node_tags[row],nothing)
+            point===nothing && continue
+            point===(coords[1,row],coords[2,row],coords[3,row]) || return true
+        end
+    end
+    return false
+end
+
 function _model_transfinite_surface_production(m,t,kernel,mesh,input,high_water,
                                               param_sizes,caller;
                                               side_keys,size_field=nothing,
@@ -151,8 +170,14 @@ function _model_transfinite_surface_production(m,t,kernel,mesh,input,high_water,
         UInt64[],UInt64(0),copy(birth_rows))
     _geometry_points===nothing && return product
     isempty(_geometry_points) && return product
-    geometry=_transfinite_surface_mesh(m,t,param_sizes,caller;size_field,
-        _mesh_input=input,_geometry_points,_return_surface_production=false)
+    # The geometry layout differs from the actual one only through the birth
+    # positions of boundary nodes (`_transfinite_surface_sides`). When every
+    # boundary node is born where it now is, meshing the face a second time
+    # gives the same grid: copy it instead.
+    geometry=_model_transfinite_geometry_moved(m,t,input,_geometry_points,caller) ?
+        _transfinite_surface_mesh(m,t,param_sizes,caller;size_field,
+            _mesh_input=input,_geometry_points,_return_surface_production=false) :
+        deepcopy(mesh)
     nnodes(geometry)==nnodes(mesh) && _surface_dim2_blocks(geometry)==_surface_dim2_blocks(mesh) ||
         throw(ArgumentError("$caller: transfinite geometry does not share actual emitter events"))
     return _ModelSurfaceGeometryProduction(product,geometry)
