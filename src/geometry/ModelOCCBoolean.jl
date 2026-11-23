@@ -2830,6 +2830,13 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
         end
     end
     base==cursor || ((pub,ktag3,ktag2)=stage_mixed(base))
+    # volume operands' volumes, for the sanity check of the result
+    omass=Float64[d==3 ? (try
+            first(_model_occ_solid_measure(kernel,kernel.bindings[(d,t)];
+                                           want_centroid=false))
+        catch
+            NaN
+        end) : 0.0 for (d,t) in in_dt]
     # kernel mutation: unbind removed operands recursively, then bind the
     # staged shapes — upstream's remove-then-bind order. With
     # remove=false modified operands stay bound beside their images.
@@ -2916,6 +2923,23 @@ function _model_occ_boolean_mixed(m::GeoModel,op::Symbol,odt,tdt,requested,
             end
         end
         push!(out_map,lst)
+    end
+    # a volume operand is the sum of its pieces (a sheet only divides it)
+    for (i,(d,t)) in enumerate(in_dt)
+        (d==3 && isfinite(omass[i]) && !isempty(out_map[i])) || continue
+        s=0.0
+        for dt in out_map[i]
+            s+=try
+                first(_model_occ_solid_measure(kernel,kernel.bindings[dt];
+                                               want_centroid=false))
+            catch
+                NaN
+            end
+        end
+        (isfinite(s) && abs(s-omass[i])>1e-5*max(1.0,abs(omass[i]))) &&
+            throw(ErrorException("$caller: the pieces of Volume[$t] "*
+                "measure $(s) where it measured $(omass[i]); the "*
+                "operation is not supported for this input"))
     end
     return out,out_map
 end
