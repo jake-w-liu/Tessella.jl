@@ -38,6 +38,21 @@ const A = Tessella.API
     finally
         A.finalize()
     end
+    # a wedge's faces shared with its box keep the box's plane frames
+    # (primitives.geo's second wedge: Gmsh's ymax face has its origin at
+    # (x, y+dy, z), u along z, v along x, parameter box [0,0.5]x[0,0.8])
+    A.initialize()
+    try
+        occ.add_wedge(14, 0, 0, 0.5, 0.5, 0.5; ltx=0.8); occ.synchronize()
+        @test m.get_value(2, 4, [0.0, 0.0]) ≈ [14, 0.5, 0] atol=1e-12
+        @test m.get_value(2, 4, [1.0, 0.0]) ≈ [14, 0.5, 1] atol=1e-12
+        @test m.get_value(2, 4, [0.0, 1.0]) ≈ [15, 0.5, 0] atol=1e-12
+        lo, hi = m.get_parametrization_bounds(2, 4)
+        @test isapprox(lo, [0, 0]; atol=1e-12)
+        @test isapprox(hi, [0.5, 0.8]; atol=1e-12)
+    finally
+        A.finalize()
+    end
 end
 
 end

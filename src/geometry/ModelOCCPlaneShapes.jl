@@ -297,6 +297,25 @@ function _model_occ_plane_face_geometry(shape_of,tag_of,uses_per_wire,caller)
             pcurves=pcurves,uvb=([umin,vmin],[umax,vmax]))
 end
 
+# The same plane face record in another frame of its plane (origin `center`,
+# axes `X`, `Y`): pcurves and parameter box follow; the normal is kept.
+function _occ_plane_reframe(geo,shape_of,tag_of,uses_per_wire,center,X,Y)
+    pcurves=Dict{Int,NamedTuple}()
+    umin=vmin=Inf; umax=vmax=-Inf
+    for uses in uses_per_wire, (id,_) in uses
+        g=shape_of(id).geometry.geometry
+        pc=_model_occ_plane_pcurve(g,center,X,Y)
+        g.occ in (:circle,:ellipse) && _dot3(g.n,geo.axis)<0 &&
+            (pc=(neg2d=(pc,),))
+        pcurves[tag_of(id)]=(fwd=pc,rev=nothing)
+        lo,hi=_occ_pcurve_fillbndbox(pc,g.t0,g.t1)
+        umin=min(umin,lo[1]); vmin=min(vmin,lo[2])
+        umax=max(umax,hi[1]); vmax=max(vmax,hi[2])
+    end
+    return merge(geo,(center=center,X=X,Y=Y,pcurves=pcurves,
+                      uvb=([umin,vmin],[umax,vmax])))
+end
+
 function _model_occ_add_plane_surface!(m::GeoModel,wire_tags;tag=-1)
     caller="OCC.add_plane_surface"
     kernel=m.occ_kernel

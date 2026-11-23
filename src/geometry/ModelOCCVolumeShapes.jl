@@ -615,11 +615,11 @@ function _model_occ_add_wedge_layout!(kernel,allocated,world,ex,ey,ez,lt,
         j===nothing && (push!(edges,ends);j=length(edges))
         emap[i]=j
     end
-    loops=Vector{Int}[];revs=Bool[]
+    loops=Vector{Int}[];revs=Bool[];forig=Int[]
     for (f,loop) in enumerate(box_loops)
         mapped=Int[sign(k)*emap[abs(k)] for k in loop if emap[abs(k)]!=0]
         length(mapped)>=3 || continue
-        push!(loops,mapped);push!(revs,isodd(f))
+        push!(loops,mapped);push!(revs,isodd(f));push!(forig,f)
     end
     nedges=length(edges);nfaces=length(loops)
     for (index,count) in ((3,nverts),(4,nedges),(2,nfaces),(5,nfaces),(1,1))
@@ -661,6 +661,21 @@ function _model_occ_add_wedge_layout!(kernel,allocated,world,ex,ey,ez,lt,
         # the wire's winding normal is the face's natural normal; the
         # minimum faces are the ones the shell uses reversed
         geometry=_model_occ_plane_face_geometry(shape_of,tag_of,[uses],caller)
+        # The faces the wedge shares with its box keep the box's frames
+        # (Gmsh 4.15.2: the ymax face of primitives.geo's second wedge has
+        # its origin at the (0, dy, 0) corner, u along z, v along x); the
+        # slanted face keeps the fitted one.
+        f=forig[index]; axis=(f+1)÷2
+        if f!=2 || lt==ex
+            o=world(0.0,0.0,0.0)
+            loc_local=ntuple(i->i==axis && iseven(f) ? (ex,ey,ez)[i] : 0.0,3)
+            Xl=axis==3 ? (1.0,0.0,0.0) : (0.0,0.0,1.0)
+            Yl=axis==1 ? (0.0,-1.0,0.0) : axis==2 ? (1.0,0.0,0.0) :
+                (0.0,1.0,0.0)
+            geometry=_occ_plane_reframe(geometry,shape_of,tag_of,[uses],
+                world(loc_local...),_arc_sub(world(Xl...),o),
+                _arc_sub(world(Yl...),o))
+        end
         push!(pending,(2,kernel.maxima[5]+index,face_ids[index],
             _ModelOCCShape(2,(kind=:plane,geometry=geometry),
                            UInt64[wire_ids[index]])))
