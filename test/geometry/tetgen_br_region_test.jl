@@ -42,13 +42,26 @@ occ_box() = () -> begin
     API.model.occ.synchronize()
 end
 
+# The references are Gmsh's on x86-64. The surface mesh, the inserted points
+# and the optimizer's quality comparisons come out of long floating-point
+# chains that differ in the last bits on other architectures (AArch64 fuses
+# multiply-adds), so there the counts are held to a band only.
+function check_mesh(result, nodes, tets, checksum)
+    if Sys.ARCH === :x86_64
+        @test result == (nodes=nodes, tets=tets, checksum=checksum)
+    else
+        @test abs(result.nodes - nodes) <= max(3, nodes ÷ 50)
+        @test abs(result.tets - tets) <= max(10, tets ÷ 25)
+    end
+end
+
 @testset "TetGen/BR region pass and refinement in Gmsh's order" begin
     # Initial mesh: flips of dihedral angles above 179 degrees after the
     # exterior of the enclosing box is carved.
-    @test mesh_checksum(occ_box(); initial=true) == (nodes=272, tets=769, checksum=993886645)
+    check_mesh(mesh_checksum(occ_box(); initial=true), 272, 769, 993886645)
     # Refinement (breadth-first cavities, Gmsh's shell and cell order) and the
     # optimizer on that initial mesh.
-    @test mesh_checksum(occ_box()) == (nodes=339, tets=1125, checksum=287225513)
+    check_mesh(mesh_checksum(occ_box()), 339, 1125, 287225513)
 end
 
 end
