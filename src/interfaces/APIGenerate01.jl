@@ -1752,12 +1752,14 @@ function _dim01_entities(m,entities,assembly,kept)
     end
     # A discrete entity's box is that of its elements' nodes, boundary nodes
     # included, as GEntity::bounds gives it (a classified square: 0 0 0 1 1 0).
-    kept_set=BitSet(kept)
-    for cell in assembly.cells
-        cell.owner[1]>=1 && haskey(m.discrete,(cell.owner[1],Int(cell.owner[2]))) || continue
-        positions=get!(()->Int[],owned,cell.owner)
-        for node in cell.nodes
-            Int(node) in kept_set && push!(positions,Int(node))
+    if assembly isa _Dim01Assembly && !isempty(m.discrete)
+        kept_set=BitSet(kept)
+        for cell in assembly.cells
+            cell.owner[1]>=1 && haskey(m.discrete,(cell.owner[1],Int(cell.owner[2]))) || continue
+            positions=get!(()->Int[],owned,cell.owner)
+            for node in cell.nodes
+                Int(node) in kept_set && push!(positions,Int(node))
+            end
         end
     end
     for entity in entities
