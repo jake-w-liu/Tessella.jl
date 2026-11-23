@@ -319,6 +319,15 @@ function _model_occ_synchronize!(m::GeoModel)
         haskey(m.volumes,tag) || haskey(m.discrete,(3,tag)) || begin
             shape=kernel.shapes[id]
             m.volumes[tag]=Int[shell_loops[sid] for sid in shape.children]
+            # internal faces of a Boolean result solid (TopAbs_INTERNAL)
+            # are embedded surfaces of the volume, as Gmsh's synchronize
+            # embeds them
+            for face in get(shape.geometry,:internal,())
+                entry=get(kernel.shape_tags,face,nothing)
+                (entry===nothing || !haskey(m.surfaces,entry[2])) && continue
+                inner=get!(Vector{NTuple{2,Int}},m.embeds,(3,tag))
+                (2,entry[2]) in inner || push!(inner,(2,entry[2]))
+            end
             # A primitive solid carries its compact analytic encoding, like
             # the geo-pipeline `add_*!` producers: the boundary stays
             # materialized for queries while volume meshing flows through the

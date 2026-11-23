@@ -503,6 +503,10 @@ function _model_occ_boolean_solid!(pub::_ModelOCCBooleanPub,v::Int,
     rec===nothing && (rec=get(pub.sm.cones,v,nothing))
     rec!==nothing && prim===nothing && (prim=(occ=:cone,record=rec))
     geometry=prim===nothing ? (kind=:solid,) : (kind=:solid,primitive=prim)
+    # internal faces: no children of the solid; `synchronize` embeds them
+    internal=UInt64[_model_occ_boolean_face!(pub,s,caller)
+        for (d,s) in get(pub.sm.embeds,(3,v),()) if d==2]
+    isempty(internal) || (geometry=merge(geometry,(internal=internal,)))
     id=_model_occ_boolean_id!(pub)
     pub.staged[id]=_ModelOCCShape(3,geometry,children)
     push!(pub.planned,(3,ktag,id))
@@ -1831,7 +1835,15 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
         end
         if length(ec)>=2 && length(ec)==length(spec.uses) &&
                 all(==(ec[1]),ec)
-            interior[fi]=true;continue
+            interior[fi]=true
+            # the solid holding an internal face is rebuilt around it
+            # (Gmsh 4.15.2: a box with a rectangle inside gets fresh faces
+            # and embeds the rectangle)
+            for i in 1:nops
+                isvol[i] && (emitted[ec[1]].mask&_brep_bit(i))!=0 &&
+                    (touched[i]=true)
+            end
+            continue
         end
         for (ui,u) in enumerate(spec.uses)
             ci=get(cellof,(fi,ui),0);ci==0 && continue
@@ -2332,6 +2344,22 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             push!(faces_out,(stag=stag[fi],credit=cr))
             for i in 1:nops
                 (cr&_brep_bit(i))!=0 && push!(face_image[i],stag[fi])
+            end
+            # a face inside one result solid is an internal face of it
+            # (OpenCASCADE's TopAbs_INTERNAL): Gmsh's synchronize embeds it
+            # in that volume (baffles.geo: Volume 1 embeds Surfaces
+            # 17,22,24,20)
+            if interior[fi]
+                # the face's own cell carries no shell; the solid is the
+                # piece of the cell with the same operand membership
+                ci=get(cellof,(fi,1),0)
+                mask=ci==0 ? UInt64(0) : emitted[ci].mask
+                for po in pieces_out
+                    (po.vtag!=0 && emitted[po.cell].mask==mask) || continue
+                    inner=get!(Vector{NTuple{2,Int}},m.embeds,(3,po.vtag))
+                    (2,stag[fi]) in inner || push!(inner,(2,stag[fi]))
+                    break
+                end
             end
         end
         for spec in sheet_out

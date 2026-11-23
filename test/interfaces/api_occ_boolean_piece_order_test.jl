@@ -82,6 +82,22 @@ end
             [-11,-6,16,12,18,17],[-19,20,-14,-9],[-21,19,-10,-17],
             [-20,21,-18,-13]]
     end
+    # two boxes overlapping on coincident y and z faces, fragmented
+    # (the volume agents' frag_boxes)
+    session() do occ
+        occ.add_box(0,0,0,1,1,1)
+        occ.add_box(0.5,0,0,1,1,1)
+        out,images=occ.fragment([(3,1)],[(3,2)])
+        occ.synchronize()
+        @test images==[[(3,1),(3,2)],[(3,2),(3,3)]]
+        @test [B(3,v) for v in 1:3]==[[-1,-2,3,4,-5,6],[-7,-8,9,10,-6,11],
+                                      [-12,-13,14,15,-9,16]]
+        @test [B(2,s) for s in 1:16]==[[-1,4,3,-2],[-5,1,7,-6],[-8,-2,7,9],
+            [-10,3,8,-11],[-10,-4,5,12],[-6,12,11,-9],[-13,6,15,-14],
+            [-16,-12,13,17],[-14,17,19,-18],[-20,-9,15,18],[-16,11,20,-19],
+            [-21,14,23,-22],[-24,-17,21,25],[-22,25,27,-26],[-28,-18,23,26],
+            [-24,19,28,-27]]
+    end
     session() do occ
         occ.add_box(0,0,0,1,1,1)
         occ.add_box(0.5,0.5,0.5,1,1,1)
@@ -92,6 +108,22 @@ end
             [-23,17,10,19,25,-24],[-22,13,18,23,27,-26],[-20,25,29,-28],
             [-26,21,28,-30],[-24,27,30,-29]]
         @test occ.get_mass(3,1)≈1.875
+    end
+end
+
+# A sheet inside a solid is an internal face: Gmsh 4.15.2 rebuilds the box
+# around it (12/16/7/1 entities) and embeds it in the volume
+# (getEmbedded(3,1) == [(2,7)]), so the volume mesh conforms to it.
+@testset "OCC fragment embeds an internal sheet" begin
+    session() do occ
+        occ.add_box(0,0,0,1,1,1)
+        occ.add_rectangle(0.3,0.3,0.5,0.3,0.3)
+        occ.synchronize()
+        out,images=occ.fragment([(3,1)],[(2,7)])
+        occ.synchronize()
+        @test images==[[(3,1)],[(2,7)]]
+        @test A.mesh.get_embedded(3,1)==[(2,7)]
+        @test Tuple(length(A.model.get_entities(d)) for d in 0:3)==(12,16,7,1)
     end
 end
 
