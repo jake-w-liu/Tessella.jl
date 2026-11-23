@@ -65,7 +65,7 @@ function _extrude_nonew_general_ordinary_partner(m::GeoModel,t::Int,surface::Int
     s_link=get(m.meshing.extrude_sources,(2,surface),nothing)
     s_link!==nothing && s_link[1]==1 || return false
     t_entry=_extrude_entity_params(m,3,t,caller)
-    partner=only(o for o in owners if o!=t)
+    partner=owners[1]==t ? owners[2] : owners[1]
     entry=_extrude_entity_params(m,3,partner,caller)
     entry===nothing && return false
     params,spec,link=entry

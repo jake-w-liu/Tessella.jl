@@ -2520,9 +2520,13 @@ function _extrude_make_positive!(coords::Matrix{Float64},
             # (tet_signed_volume has the sign of -orient3).
             all(isfinite,@view coords[:,@view nodes[:,cell]]) || throw(ArgumentError(
                 "extruded mesh: nonfinite volume in element type $msh"))
-            volume=-Float64(sum(orient3(_extrude_cell_pt(coords,nodes,i1,cell),
-                _extrude_cell_pt(coords,nodes,i2,cell),_extrude_cell_pt(coords,nodes,i3,cell),
-                _extrude_cell_pt(coords,nodes,i4,cell)) for (i1,i2,i3,i4) in _EXTRUDE_CELL_TETS[msh]))
+            winding=0
+            for (i1,i2,i3,i4) in _EXTRUDE_CELL_TETS[msh]
+                winding-=orient3(_extrude_cell_pt(coords,nodes,i1,cell),
+                    _extrude_cell_pt(coords,nodes,i2,cell),_extrude_cell_pt(coords,nodes,i3,cell),
+                    _extrude_cell_pt(coords,nodes,i4,cell))
+            end
+            volume=Float64(winding)
         end
         # A sweep that stays in its source's plane (a rotation about the
         # plane's normal) gives flat cells; Gmsh emits them as built.

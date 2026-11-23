@@ -37,14 +37,13 @@ function verts_centroid(out::QTMesh,v)
     all(isfinite,center) && return center
     # Gmsh's double sum overflows near floatmax while every vertex is
     # finite; the exact mean, rounded once, is the representable centroid.
-    exact=ntuple(3) do axis
-        total=Rational{BigInt}(0)
-        for p in 0:length(v)-1
-            ((length(v)==6 || length(v)==8) && p>n_lat-1 && v[p+1]==v[p-n_lat+1]) && continue
-            total+=Rational{BigInt}(out.coord(v[p+1])[axis])
-        end
-        Float64(total/count)
+    sx=Rational{BigInt}(0);sy=Rational{BigInt}(0);sz=Rational{BigInt}(0)
+    for p in 0:length(v)-1
+        ((length(v)==6 || length(v)==8) && p>n_lat-1 && v[p+1]==v[p-n_lat+1]) && continue
+        c=out.coord(v[p+1])
+        sx+=Rational{BigInt}(c[1]);sy+=Rational{BigInt}(c[2]);sz+=Rational{BigInt}(c[3])
     end
+    exact=(Float64(sx/count),Float64(sy/count),Float64(sz/count))
     return all(isfinite,exact) ? exact : center
 end
 
