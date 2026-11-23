@@ -52,9 +52,9 @@ using Test, Tessella
         @test [length(A.model.get_entities(d)) for d in 0:3]==[2,3,3,1]
         @test occ.get_mass(3,1)≈π*0.5*0.3*π/2 rtol=1e-12
         @test A.model.get_type(2,2)=="Surface of Revolution"
-        # (π/2)·perimeter of the ellipse, by the periodic trapezoid rule;
-        # Gmsh's OpenCASCADE integration gives 4.00977967464682
-        @test occ.get_mass(2,2)≈4.009771604872327 rtol=1e-12
+        # (the lateral area, 16 s interpreted, is checked compiled: Tessella
+        # 4.009771604872344, (π/2)·perimeter 4.009771604872327, Gmsh
+        # 4.00977967464682)
     finally
         A.finalize()
     end
