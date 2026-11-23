@@ -1433,6 +1433,9 @@ function create_topology!(m::GeoModel;make_simply_connected=true,
         "$caller: make_simply_connected must be Bool"))
     export_discrete isa Bool || throw(ArgumentError(
         "$caller: export_discrete must be Bool"))
+    # Gmsh's createTopologyFromMesh for first-order discrete meshes; other
+    # element families keep the derivation below.
+    _topo_supported(m) && return _create_topology_from_mesh!(m)
     for dim in (3,2,1)
         for key in sort!(collect(keys(m.discrete)))
             key[1]==dim || continue

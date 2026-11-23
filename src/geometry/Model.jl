@@ -963,6 +963,7 @@ include("ModelHomologyNativeChains.jl")
 include("ModelHomologyNative.jl")
 include("ModelMeshingAttributes.jl")
 include("ModelClassifyFaces.jl")    # Gmsh's classifyFaces, step by step
+include("ModelDiscreteTopology.jl")   # Gmsh's createTopologyFromMesh
 include("ModelMeshOrientationFrontend.jl")
 include("ModelTransforms.jl")
 include("ModelCurved.jl")

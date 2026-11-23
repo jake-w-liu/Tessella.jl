@@ -7982,6 +7982,8 @@ function _create_topology(make_simply_connected=true,export_discrete=true)
     return lock(STATE_LOCK) do
         create_topology!(_model_locked();
                          make_simply_connected=flag1,export_discrete=flag2)
+        # The records own the reorganized mesh (see _classify_surfaces).
+        _replace_mesh_cache_locked!(nothing;preserve_source_inputs=true)
         return nothing
     end
 end
