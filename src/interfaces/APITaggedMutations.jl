@@ -36,6 +36,29 @@ function _native_empty_element_physical_owners(model,save_all::Bool)
     return physical
 end
 
+# The public tags of the nodes of the elements of entities in `physical`:
+# the cache's cells and the records' own cells.
+function _tagged_physical_node_support(model,cached,class,physical::Set{Tuple{Int,Int32}})
+    public=class.public_tags
+    supported=Set{UInt64}()
+    for (_,dim,_,cells,owners) in _cache_catalog(cached,class)
+        for (column,owner) in enumerate(owners)
+            (dim,Int32(owner)) in physical || continue
+            for slot in axes(cells,1)
+                row=cells[slot,column]
+                0<row<=length(public.node_tags) && push!(supported,public.node_tags[row])
+            end
+        end
+    end
+    for ((dim,tag),record) in Model._discrete_mesh_records_model(model)
+        (dim,Int32(tag)) in physical || continue
+        for nodes in record.element_nodes,node in nodes
+            push!(supported,UInt64(node))
+        end
+    end
+    return supported
+end
+
 function _tagged_renumber_order(model,cached,class,node::Bool,caller;
         overlay=_high_order_overlay(cached),mid_owners=LAST_MESH_HIGH_ORDER_MIDS[],
         empty_element_mapping=false,save_all=nothing)
@@ -98,10 +121,17 @@ function _tagged_renumber_order(model,cached,class,node::Bool,caller;
             push!(entries,((dim,Int32(tag)),msh,position,external))
         end
     end
-    physical=empty_element_mapping && !node ?
+    physical=empty_element_mapping ?
         (save_all===nothing ? _native_empty_element_physical_owners(model) :
          _native_empty_element_physical_owners(model,save_all)) : Set{Tuple{Int,Int32}}()
-    if isempty(physical)
+    if node && !isempty(physical)
+        # GModel::renumberMeshVertices for a potentially partial save: the
+        # nodes of the elements of entities in physical groups first, each
+        # group in entity order, then the others.
+        supported=_tagged_physical_node_support(model,cached,class,physical)
+        sort!(entries;by=entry->(!(entry[4] in supported),entry[1],entry[2],entry[3]),
+            alg=Base.Sort.MergeSort)
+    elseif isempty(physical)
         sort!(entries;by=entry->(entry[1],entry[2],entry[3]),alg=Base.Sort.MergeSort)
     else
         sort!(entries;by=entry->(!(entry[1] in physical),entry[1],entry[2],entry[3]),

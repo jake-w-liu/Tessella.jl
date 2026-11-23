@@ -428,6 +428,7 @@ end
         "geometry/geo_occ_hyperboloid_loft_test.jl",
         "interfaces/api_occ_step_assembly_test.jl",
         "interfaces/api_occ_sphere_sector_tags_test.jl",
+        "interfaces/api_renumber_nodes_physical_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)
