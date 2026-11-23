@@ -37,9 +37,25 @@ end
 # Equal keys reuse the first producer cell, as CellComplex::insert does.
 @inline _native_homology_vertex_number(tag::UInt64)=
     reinterpret(Int32,UInt32(tag & UInt64(0xffffffff)))
-function _native_homology_key(nodes)
+# (count, narrowed labels padded with zeros to eight): the count is compared
+# first, so the padding orders like the variable-length tuple it replaces,
+# and the key is concrete (it was a Dict{Any} key and was rebuilt at every
+# comparison of a sort; t14's homology spent most of its time there).
+const _NativeHomologyKey=Tuple{Int,NTuple{8,Int32}}
+function _native_homology_key(nodes)::_NativeHomologyKey
     ordered=sort(nodes)
-    return (length(ordered),Tuple(_native_homology_vertex_number(tag) for tag in ordered))
+    count=length(ordered)
+    count<=8 || throw(ArgumentError("compute_homology!: cell with $count vertices"))
+    return (count,ntuple(i->i<=count ? _native_homology_vertex_number(ordered[i]) : Int32(0),8))
+end
+# Ids ordered by their cells' keys, each key computed once.
+function _native_homology_sorted_by_key(complex,ids)
+    list=collect(ids)
+    keys=Vector{_NativeHomologyKey}(undef,length(list))
+    for (position,id) in enumerate(list)
+        keys[position]=_native_homology_key(complex.cells[id].nodes)
+    end
+    return list[sortperm(keys)]
 end
 _native_homology_order(complex,ids)=sort!(collect(ids);by=id->complex.cells[id].number)
 function _native_homology_adjacency(complex,map;original::Bool=false)
@@ -210,7 +226,7 @@ end
 
 function _native_homology_insert_elements!(complex,elements,subdomain,coordinates;
                                            measure_geometry::Bool=true)
-    index=[Dict{Any,Int}() for _ in 0:3]
+    index=[Dict{_NativeHomologyKey,Int}() for _ in 0:3]
     for dim in 0:3, id in complex.active[dim+1]
         index[dim+1][_native_homology_key(complex.cells[id].nodes)]=id
     end
@@ -243,8 +259,7 @@ function _native_homology_insert_elements!(complex,elements,subdomain,coordinate
     end
     smallest_id=smallest[top+1];biggest_id=biggest[top+1]
     for dim in 3:-1:1
-        ids=sort!(collect(complex.active[dim+1]);
-                  by=id->_native_homology_key(complex.cells[id].nodes))
+        ids=_native_homology_sorted_by_key(complex,complex.active[dim+1])
         for id in ids
             parent=complex.cells[id]
             for (slot,pattern) in enumerate(_native_homology_patterns(dim,length(parent.nodes)))
@@ -289,8 +304,7 @@ function _native_homology_complex(domain_elements,subdomain_elements,coordinates
     number=0
     for dim in 0:3
         isempty(complex.active[dim+1]) || (complex.dim=dim)
-        ids=sort!(collect(complex.active[dim+1]);
-                  by=id->_native_homology_key(complex.cells[id].nodes))
+        ids=_native_homology_sorted_by_key(complex,complex.active[dim+1])
         for id in ids
             cell=complex.cells[id];cell.number=(number+=1)
             for map in (cell.boundary,cell.coboundary), (key,value) in map

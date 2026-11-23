@@ -424,6 +424,7 @@ end
         "geometry/geo_classify_mesh_queries_test.jl",
         "geometry/occ_blend_explorer_order_test.jl",
         "geometry/geo_create_topology_gmsh_test.jl",
+        "interfaces/api_homology_msh_gmsh_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)

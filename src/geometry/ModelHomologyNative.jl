@@ -39,7 +39,7 @@ function _native_homology_publish_chain!(m,complex,chain,dim,name,element_counte
     add_discrete_entity!(m,dim,entity_tag)
     push!(m.meshing.chain_entities,(dim,entity_tag))
     record=m.discrete[(dim,entity_tag)]
-    ids=sort!(collect(keys(chain));by=id->_native_homology_key(complex.cells[id].nodes))
+    ids=_native_homology_sorted_by_key(complex,keys(chain))
     for id in ids
         coefficient=chain[id];coefficient==0 && continue
         cell=complex.cells[id]
@@ -53,7 +53,13 @@ function _native_homology_publish_chain!(m,complex,chain,dim,name,element_counte
                 element_counter[],copy(nodes))
         end
     end
-    physical=add_physical_group!(m,dim,[entity_tag];name=name)
+    # Chain::addToModel: the physical number follows the largest one of any
+    # dimension (a model read from MSH has no running counter to follow).
+    largest=0
+    for key in keys(m.physical)
+        largest=max(largest,key[2])
+    end
+    physical=add_physical_group!(m,dim,[entity_tag];tag=largest+1,name=name)
     m.physical_names[(dim,physical)]=name
     return dim,physical
 end

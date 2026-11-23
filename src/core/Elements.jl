@@ -5191,7 +5191,11 @@ function _read_mixed_nodes_v4!(acc,io,limits)
             acc.node_map[tags[i]]=Int32(length(acc.x)); nread+=1
         end
     end
-    nread==count || throw(ArgumentError(
+    # Gmsh 4.15.2 writes a total above the blocks' sum when Mesh.SaveAll is
+    # off and entities are left out (t14's mesh without its homology groups:
+    # 2223 declared, 2051 written); its reader only sizes an array with it.
+    # Fewer nodes than declared are accepted, more are not.
+    nread<=count || throw(ArgumentError(
         "read_mixed_msh: v4 Nodes declared $count nodes but contained $nread"))
     count==0 || (actual_min==declared_min&&actual_max==declared_max) || throw(ArgumentError(
         "read_mixed_msh: v4 node-tag range does not match records"))
@@ -5301,7 +5305,11 @@ function _read_mixed_nodes_v4_binary!(acc,io,limits,swap::Bool,wide::Bool)
             acc.node_map[tags[i]]=Int32(length(acc.x)); nread+=1
         end
     end
-    nread==count || throw(ArgumentError(
+    # Gmsh 4.15.2 writes a total above the blocks' sum when Mesh.SaveAll is
+    # off and entities are left out (t14's mesh without its homology groups:
+    # 2223 declared, 2051 written); its reader only sizes an array with it.
+    # Fewer nodes than declared are accepted, more are not.
+    nread<=count || throw(ArgumentError(
         "read_mixed_msh: v4 Nodes declared $count nodes but contained $nread"))
     count==0 || (actual_min==declared_min&&actual_max==declared_max) || throw(ArgumentError(
         "read_mixed_msh: v4 node-tag range does not match records"))
