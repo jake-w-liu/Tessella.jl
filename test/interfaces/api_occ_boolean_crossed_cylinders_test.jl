@@ -43,6 +43,16 @@ const A=Tessella.API
         out,_=occ.fuse([(3,4)],[(3,5),(3,6)];tag=7)
         @test out==[(3,7)]
         @test occ.get_mass(3,7)≈3cyl-3common+8*(2-sqrt(2))*r^3 rtol=1e-8
+        # boolean.geo's last step: (box ∩ sphere) less the cross. The box
+        # face around each cylinder is an annulus whose interior probe sat
+        # in the hole ("cannot orient boolean result face"). Gmsh 4.15.2:
+        # 3.98182885452
+        occ.add_box(-1.4,-1.4,-1.4,2.8,2.8,2.8;tag=1)
+        occ.add_sphere(0,0,0,1.75;tag=2)
+        occ.intersect([(3,1)],[(3,2)];tag=3)
+        out,_=occ.cut([(3,3)],[(3,7)];tag=8)
+        @test out==[(3,8)]
+        @test occ.get_mass(3,8)≈3.98182885452 rtol=1e-6
     end
 end
 

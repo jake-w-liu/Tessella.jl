@@ -306,10 +306,26 @@ function _model_occ_boolean_wire_normal(sm::GeoModel,loop_tag::Int)
     return n,c./length(pts)
 end
 
-# 3-D sample points of a scratch wire's traversal (alias kept for the
-# probe helpers' call sites).
-_model_occ_boolean_wire_pts(sm::GeoModel,loop_tag::Int) =
-    _brep_wire_pts(sm,loop_tag)
+# 3-D sample points of a scratch wire's traversal, dense along curved edges:
+# the interior probes below are polygon tests, and a closed circle sampled
+# at four points put a "point inside the outer wire" of an annulus inside
+# its hole (boolean.geo: the box face around a cylinder).
+function _model_occ_boolean_wire_pts(sm::GeoModel,loop_tag::Int)
+    pts=NTuple{3,Float64}[]
+    for ce in sm.loops[loop_tag]
+        a,b=sm.curves[abs(ce)]
+        curve,t0,t1=_brep_edge_curve(sm,abs(ce))
+        push!(pts,sm.points[ce>0 ? a : b])
+        curve.kind in (:line,:degenerate) && continue
+        k=a==b ? 32 : 16
+        for i in 1:k-1
+            s=i/k
+            t=ce>0 ? t0+(t1-t0)*s : t1-(t1-t0)*s
+            push!(pts,_brep_curve_eval(curve,t))
+        end
+    end
+    return pts
+end
 
 # 3-D points strictly inside a scratch face's outer wire (and outside
 # its hole wires) plus the face's unit winding normal. Concave faces put
