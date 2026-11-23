@@ -613,7 +613,41 @@ function flipnm!(m,abtets,n,level,abedgepivot,fc)
                 reducflag=true
             end
         else
-            throw(Unsupported("flipnm: a 3-to-2 flip at a hull edge"))
+            # [a,b] is a hull edge (inside a 4-to-4 flip, or a non-convex
+            # hull edge): flip a convex mesh's edge only when it is coplanar.
+            if !m.nonconvex
+                orient3d(m,pa,pb,pc,pd)==0 && (reducflag=true)
+            else
+                reducflag=true
+            end
+            if reducflag
+                # An interior apex of [c,d] in the biggest tetrahedron at that
+                # edge validates the configuration.
+                searchpt=Int32(0);bigvol=0.0
+                spintet=eorgoppo(abtets[(hullflag%3)+1])
+                while true
+                    spintet=fnext(m,spintet)
+                    chkpt=oppo(m,spintet)
+                    chkpt==pb && break
+                    if chkpt!=DUMMY && apex(m,spintet)!=DUMMY
+                        ori=-orient3d(m,pd,pc,apex(m,spintet),chkpt)
+                        if ori>bigvol
+                            bigvol=ori;searchpt=chkpt
+                        end
+                    end
+                end
+                if searchpt!=0
+                    ori1=orient3d(m,pd,pc,searchpt,pa);ori2=orient3d(m,pd,pc,searchpt,pb)
+                    if ori1*ori2>=0.0
+                        reducflag=false
+                    else
+                        ori1=orient3d(m,pa,pb,searchpt,pc);ori2=orient3d(m,pa,pb,searchpt,pd)
+                        ori1*ori2>=0.0 && (reducflag=false)
+                    end
+                else
+                    reducflag=false
+                end
+            end
         end
         if reducflag
             if m.checksubfaceflag

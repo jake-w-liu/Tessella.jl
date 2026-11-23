@@ -1264,7 +1264,8 @@ function constrain_triangles!(m::Mesh, map::Vector{UInt64})
     return m
 end
 
-const _NODES_OF_EDGE = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+# getNodesFromEdge: edge e joins the nodes that facets_of_edge(5 - e) name
+const _NODES_OF_EDGE = ((2, 3), (1, 3), (1, 2), (0, 3), (0, 2), (0, 1))
 
 # hxtGetLines2TetMap + hxtConstrainLinesNotInTriangles: every cell around a
 # constrained line gets the edge constraint (which cell registers it does not

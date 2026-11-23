@@ -31,7 +31,7 @@ function tri_edge_tail(m,A,B,C,P,Q,R,sP,sQ,level)
         elseif sQ>0
             U=(B,A,C);V=(Q,P,R);pu=(1,0,2);pv=(1,0,2);z1=1
         else
-            throw(Unsupported("tri_edge_2d: a coplanar triangle-edge intersection"))
+            return tri_edge_2d(m,A,B,C,P,Q,R,level)
         end
     end
     s1=orient3d(m,U[1],U[2],V[1],V[2]);s1<0 && return 0,types,pos
@@ -71,6 +71,191 @@ function tri_edge_tail(m,A,B,C,P,Q,R,sP,sQ,level)
     end
     return 2,(t,DISJOINT),(p0,p1,0,0)
 end
+# tri_edge_2d(): [P,Q] and the triangle [A,B,C] are coplanar; R lifts the
+# plane (`R == 0` is TetGen's NULL: a point above A along the normal). The
+# slots a branch leaves unset stay DISJOINT/0 (TetGen leaves them as the
+# caller's array had them), and the z1 == 2, s3 < 0, s2 > 0 branches
+# overwrite types[0]/pos[0..1] as TetGen does.
+function tri_edge_2d(m,A,B,C,P,Q,R,level)
+    xyz(p)=p isa NTuple{3,Float64} ? p : m.xyz[p]
+    o3(a,b,c,d)=Float64(orient3(xyz(a),xyz(b),xyz(c),xyz(d)))
+    if R==0
+        a=m.xyz[A];b=m.xyz[B];c=m.xyz[C]
+        n=facenormal(a,b,c)
+        len=sqrt(dot3(n,n))
+        len==0 && return 0,(DISJOINT,DISJOINT),(0,0,0,0)
+        inv_len=1.0/len
+        n=(n[1]*inv_len,n[2]*inv_len,n[3]*inv_len)
+        len=distance(a,b)
+        len+=distance(b,c)
+        len+=distance(c,a)
+        len*=1.0/3.0
+        R=(a[1]+len*n[1],a[2]+len*n[2],a[3]+len*n[3])
+    elseif R==DUMMY
+        throw(Unsupported("tri_edge_2d: the lift point is the dummy point"))
+    end
+    sA=o3(P,Q,R,A);sB=o3(P,Q,R,B);sC=o3(P,Q,R,C)
+    I3=(0,1,2);ST=(2,0,1);STST=(1,2,0);I2=(0,1,2);SL=(1,0,2)
+    sel(p)=p==(0,1,2) ? (A,B,C) : p==(2,0,1) ? (C,A,B) : (B,C,A)
+    vsel(p)=p==(0,1,2) ? (P,Q,R) : (Q,P,R)
+    pu,pv,z1=if sA<0
+        if sB<0
+            sC<0 && return 0,(DISJOINT,DISJOINT),(0,0,0,0)
+            sC>0 ? (I3,I2,0) : (I3,I2,1)
+        elseif sB>0
+            sC<0 ? (ST,I2,0) : sC>0 ? (STST,SL,0) : (ST,I2,2)
+        else
+            sC<0 ? (ST,I2,1) : sC>0 ? (STST,SL,2) : (STST,SL,3)
+        end
+    elseif sA>0
+        if sB<0
+            sC<0 ? (STST,I2,0) : sC>0 ? (ST,SL,0) : (ST,SL,2)
+        elseif sB>0
+            sC>0 && return 0,(DISJOINT,DISJOINT),(0,0,0,0)
+            sC<0 ? (I3,SL,0) : (I3,SL,1)
+        else
+            sC<0 ? (STST,I2,2) : sC>0 ? (ST,SL,1) : (STST,I2,3)
+        end
+    else
+        if sB<0
+            sC<0 ? (STST,I2,1) : sC>0 ? (I3,I2,2) : (ST,SL,3)
+        elseif sB>0
+            sC<0 ? (I3,SL,2) : sC>0 ? (STST,SL,1) : (ST,I2,3)
+        else
+            sC<0 ? (I3,SL,3) : sC>0 ? (I3,I2,3) : (I3,I2,4)
+        end
+    end
+    U=sel(pu);V=vsel(pv)
+    s1=o3(U[1],U[3],R,V[2])
+    s2=o3(U[2],U[3],R,V[1])
+    s1>0 && return 0,(DISJOINT,DISJOINT),(0,0,0,0)
+    s2<0 && return 0,(DISJOINT,DISJOINT),(0,0,0,0)
+    level==0 && return 1,(DISJOINT,DISJOINT),(0,0,0,0)
+    types=[DISJOINT,DISJOINT];pos=[0,0,0,0]
+    function set!(t0,p0,p1,t1=nothing,p2=0,p3=0)
+        types[1]=t0;pos[1]=p0;pos[2]=p1
+        t1===nothing || (types[2]=t1;pos[3]=p2;pos[4]=p3)
+    end
+    done()=(4,(types[1],types[2]),(pos[1],pos[2],pos[3],pos[4]))
+    if z1==1
+        if s1==0
+            set!(SHAREVERT,pu[3],pv[2],DISJOINT)
+        elseif s2==0
+            set!(SHAREVERT,pu[3],pv[1],DISJOINT)
+        else
+            set!(ACROSSVERT,pu[3],pv[1],DISJOINT)
+        end
+        return done()
+    end
+    s3=o3(U[1],U[3],R,V[1])
+    s4=o3(U[2],U[3],R,V[2])
+    if z1==0
+        if s1<0
+            if s3>0
+                if s4>0
+                    set!(ACROSSEDGE,pu[3],pv[1],TOUCHFACE,3,pv[2])
+                elseif s4==0
+                    set!(ACROSSEDGE,pu[3],pv[1],TOUCHEDGE,pu[2],pv[2])
+                else
+                    set!(ACROSSEDGE,pu[3],pv[1],ACROSSEDGE,pu[2],pv[1])
+                end
+            elseif s3==0
+                if s4>0
+                    set!(TOUCHEDGE,pu[3],pv[1],TOUCHFACE,3,pv[2])
+                elseif s4==0
+                    set!(TOUCHEDGE,pu[3],pv[1],TOUCHEDGE,pu[2],pv[2])
+                else
+                    set!(TOUCHEDGE,pu[3],pv[1],ACROSSEDGE,pu[2],pv[1])
+                end
+            else
+                if s2>0
+                    if s4>0
+                        set!(TOUCHFACE,3,pv[1],TOUCHFACE,3,pv[2])
+                    elseif s4==0
+                        set!(TOUCHFACE,3,pv[1],TOUCHEDGE,pu[2],pv[2])
+                    else
+                        set!(TOUCHFACE,3,pv[1],ACROSSEDGE,pu[2],pv[1])
+                    end
+                else
+                    set!(TOUCHEDGE,pu[2],pv[1],DISJOINT)
+                end
+            end
+        else
+            set!(TOUCHEDGE,pu[3],pv[2],DISJOINT)
+        end
+    elseif z1==2
+        if s1<0
+            if s3>0
+                if s4>0
+                    set!(ACROSSVERT,pu[1],pv[1],TOUCHFACE,3,pv[2])
+                elseif s4==0
+                    set!(ACROSSVERT,pu[1],pv[1],TOUCHEDGE,pu[2],pv[2])
+                else
+                    set!(ACROSSVERT,pu[1],pv[1],ACROSSEDGE,pu[2],pv[1])
+                end
+            elseif s3==0
+                if s4>0
+                    set!(SHAREVERT,pu[1],pv[1],TOUCHFACE,3,pv[2])
+                elseif s4==0
+                    set!(SHAREVERT,pu[1],pv[1],TOUCHEDGE,pu[2],pv[2])
+                else
+                    set!(SHAREVERT,pu[1],pv[1],ACROSSEDGE,pu[2],pv[1])
+                end
+            else
+                if s2>0
+                    # TetGen writes the second record over the first here.
+                    if s4>0
+                        set!(TOUCHFACE,3,pv[2])
+                    elseif s4==0
+                        set!(TOUCHEDGE,pu[2],pv[2])
+                    else
+                        set!(ACROSSEDGE,pu[2],pv[1])
+                    end
+                else
+                    set!(TOUCHEDGE,pu[2],pv[1],DISJOINT)
+                end
+            end
+        else
+            set!(SHAREVERT,pu[1],pv[2],DISJOINT)
+        end
+    elseif z1==3
+        if s1<0
+            if s3>0
+                if s4>0
+                    set!(ACROSSVERT,pu[1],pv[1],TOUCHEDGE,pu[1],pv[2])
+                elseif s4==0
+                    set!(ACROSSVERT,pu[1],pv[1],SHAREVERT,pu[2],pv[2])
+                else
+                    set!(ACROSSVERT,pu[1],pv[1],ACROSSVERT,pu[2],pv[1])
+                end
+            elseif s3==0
+                if s4>0
+                    set!(SHAREVERT,pu[1],pv[1],TOUCHEDGE,pu[1],pv[2])
+                elseif s4==0
+                    set!(SHAREEDGE,pu[1],pv[1],DISJOINT)
+                else
+                    set!(SHAREVERT,pu[1],pv[1],ACROSSVERT,pu[2],pv[1])
+                end
+            else
+                if s2>0
+                    if s4>0
+                        set!(TOUCHEDGE,pu[1],pv[1],TOUCHEDGE,pu[1],pv[2])
+                    elseif s4==0
+                        set!(TOUCHEDGE,pu[1],pv[1],SHAREVERT,pu[2],pv[2])
+                    else
+                        set!(TOUCHEDGE,pu[1],pv[1],ACROSSVERT,pu[2],pv[1])
+                    end
+                else
+                    set!(SHAREVERT,pu[2],pv[1],DISJOINT)
+                end
+            end
+        else
+            set!(SHAREVERT,pu[1],pv[2],DISJOINT)
+        end
+    end
+    return done()
+end
+
 function tri_edge_test(m,A,B,C,P,Q,R,level)
     sP=orient3d(m,A,B,C,P);sQ=orient3d(m,A,B,C,Q)
     return tri_edge_tail(m,A,B,C,P,Q,R,sP,sQ,level)
