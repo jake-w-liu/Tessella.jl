@@ -534,7 +534,8 @@ _model_native_tetgen_br_region(kernel,facets)=ModelNativeTetgenArena.BR.region(k
 # points), or when its boundary needs flips or Steiner points to be recovered.
 # Steiner points are appended after the surface rows in TetGen's point order.
 function _model_native_tetgen_br_fill(surface,order,kernel,caller;protected_facets=nothing,
-                                      interior_points=nothing,tetgen_flip=nothing)
+                                      interior_points=nothing,tetgen_flip=nothing,
+                                      tetgen_surface=nothing)
     _MODEL_NATIVE_TETGEN_BR[] || return nothing
     protected_facets===nothing || isempty(protected_facets) || return nothing
     interior_points===nothing || isempty(interior_points) || return nothing
@@ -547,6 +548,12 @@ function _model_native_tetgen_br_fill(surface,order,kernel,caller;protected_face
         (inverse[surface.tris[1,column]],inverse[surface.tris[3,column]],inverse[surface.tris[2,column]]) :
         (inverse[surface.tris[1,column]],inverse[surface.tris[2,column]],inverse[surface.tris[3,column]])
         for column in axes(surface.tris,2)]
+    # MeshDelaunayVolume hands TetGen the Region's faces sorted by tag
+    # (`gr->set(allFaces)` from a GEntityPtrLessThan set), each with its
+    # triangles in order; a Surface Loop may list them otherwise.
+    if tetgen_surface!==nothing && length(tetgen_surface)==length(facets) && !issorted(tetgen_surface)
+        facets=facets[sortperm(tetgen_surface;alg=Base.Sort.DEFAULT_STABLE)]
+    end
     result=try
         _model_native_tetgen_br_region(kernel,facets)
     catch error

@@ -311,7 +311,8 @@ end
 function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
                                            interior_points=nothing,
                                            node_order=nothing,initial_surface=surface,options=nothing,births=nothing,
-                                           protected_facets=nothing,tetgen_flip=nothing,validated=nothing)
+                                           protected_facets=nothing,tetgen_flip=nothing,validated=nothing,
+                                           tetgen_surface=nothing)
     # `validated[]` is set when the returned fill passed `validate` with its
     # default options (every return below except the exact-CDT fallback, which
     # carries its own certificate instead).
@@ -351,7 +352,7 @@ function _model_native_initial_volume_fill(surface::Mesh,volume::Int,caller;
         mesh=_model_native_initial_delaunay_fill(initial_surface,node_order,options,caller;
             births,kernel_output=native_kernel,build_mesh=!_MODEL_NATIVE_TETGEN_BR[])
         br=_model_native_tetgen_br_fill(initial_surface,node_order,native_kernel[],caller;
-            protected_facets,interior_points,tetgen_flip)
+            protected_facets,interior_points,tetgen_flip,tetgen_surface)
         if br!==nothing
             valid,reason=certify(br)
             if valid
