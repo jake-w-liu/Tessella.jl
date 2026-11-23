@@ -7999,6 +7999,13 @@ function _classify_surfaces(angle=40*pi/180,boundary=true,
         classify_surfaces!(_model_locked();angle=Float64(angle),
                          boundary=flag1,for_reparametrization=flag2,
                          curve_angle=Float64(curve_angle))
+        # The classification re-parents elements between discrete records and
+        # adds point and line blocks to the retained mesh in place; the cached
+        # classification still describes the merged input (get_elements threw
+        # a BoundsError on t13_data.stl, and a re-read sphere STL reported
+        # every node and triangle twice). The records now own the mesh, as in
+        # Gmsh: drop the cache, keep the retained source inputs.
+        _replace_mesh_cache_locked!(nothing;preserve_source_inputs=true)
         return nothing
     end
 end

@@ -406,7 +406,9 @@ function _classify_faces_gmsh!(m::GeoModel, angle::Float64, include_boundary::Bo
     curve_ends = Dict{Int,Tuple{Int,Int}}(tag => (b, e) for (tag, b, e, _) in curves)
     for (tag, b, e, segment) in curves
         record = DiscreteEntity()
-        record.boundary = b == e ? [(0, b)] : [(0, b), (0, e)]
+        # A closed curve lists its point twice, as begin and end vertex:
+        # Gmsh's getBoundary gives [(0, b), (0, b)] for it.
+        record.boundary = [(0, b), (0, e)]
         for (element, (v1, v2)) in segment
             _record_append_element!(record, 1, element, UInt64[v1, v2])
         end

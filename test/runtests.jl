@@ -421,6 +421,7 @@ end
         "interfaces/api_generate_noop_test.jl",
         "interfaces/api_entity_identity_test.jl",
         "interfaces/api_mesh_renumber_identity_test.jl",
+        "geometry/geo_classify_mesh_queries_test.jl",
     ), get(ENV, "TESSELLA_TEST_SHARD", ""))
         println("Testing ", path, "...")
         flush(stdout)
