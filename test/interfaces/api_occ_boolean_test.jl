@@ -578,10 +578,8 @@ end
     out,map=occ.fragment([(3,1)],[(2,7),(2,8)])
     # Gmsh visits the walls 7,8,7,8,7,8: the middle slab's shell lists the
     # top wall first (getBoundary(combined=false): -14,-15,8,16,-7,17), a
-    # breadth-first order over its faces' edges that Tessella does not
-    # reproduce yet (7,7,8,8,7,8)
-    @test_broken out==[(3,1),(3,2),(3,3),(2,7),(2,8),(2,7),(2,8),(2,7),(2,8)]
-    @test sort(out)==sort([(3,1),(3,2),(3,3),(2,7),(2,8),(2,7),(2,8),(2,7),(2,8)])
+    # breadth-first order over its faces' stored edges
+    @test out==[(3,1),(3,2),(3,3),(2,7),(2,8),(2,7),(2,8),(2,7),(2,8)]
     @test map==[[(3,1),(3,2),(3,3)],[(2,7)],[(2,8)]]
     # Gmsh 4.15.2: the slabs come bottom, middle, top
     @test [occ.get_mass(3,t) for t in (1,2,3)]≈[0.3,0.4,0.3]

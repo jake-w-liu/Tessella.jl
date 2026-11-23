@@ -3425,6 +3425,11 @@ function _brep_edge_pierce_tensor(sg,crv,lo,hi,tol)
         ga=gb;gb=footlvl(b)
         (isfinite(ga) && isfinite(gb)) || continue
         signbit(ga)==signbit(gb) && continue
+        # local Newton on C(t)=S(u,v) from the bracket's secant point; the
+        # bisection below (a global projection per step) only when it leaves
+        # the bracket or the patch
+        r=_brep_pierce_newton(sg,crv,a,b,ga,gb,ftol)
+        r===nothing || (push!(out,r);continue)
         fa=ga
         for _ in 1:60
             m=(a+b)/2
@@ -3442,6 +3447,56 @@ function _brep_edge_pierce_tensor(sg,crv,lo,hi,tol)
         isfinite(fr) && abs(fr)<=ftol && push!(out,r)
     end
     return out
+end
+
+# Point and first derivative of a Boolean curve record.
+function _brep_curve_d1(crv,t::Float64)
+    if crv.kind===:line
+        return _b3add(crv.o,_b3mul(crv.d,t)),crv.d
+    elseif crv.kind===:circle
+        s,c=_gm_sincos(t)
+        p=_b3add(crv.c,_b3add(_b3mul(crv.x,c*crv.r),_b3mul(crv.y,s*crv.r)))
+        return p,_b3add(_b3mul(crv.x,-s*crv.r),_b3mul(crv.y,c*crv.r))
+    elseif crv.kind===:bspline
+        p,d,_=_model_occ_curve_d2(crv.curve,t)
+        return p,d
+    end
+    h=1e-7*max(1.0,abs(t))
+    pa=_brep_curve_eval(crv,t-h);pb=_brep_curve_eval(crv,t+h)
+    return _brep_curve_eval(crv,t),_b3mul(_b3(pb,pa),1/(2h))
+end
+
+# Where an edge pierces a tensor patch inside the bracket [a,b] of a sign
+# change of its signed foot distance: Newton on C(t)=S(u,v) in (t,u,v),
+# seeded at the secant point and its projection foot. `nothing` when the
+# iteration leaves the bracket or the patch, or does not converge.
+function _brep_pierce_newton(sg,crv,a,b,ga,gb,ftol)
+    t=a+(b-a)*(ga/(ga-gb))
+    (a<t<b) || (t=(a+b)/2)
+    u,v,_=_model_nurbs_surface_project(sg,_brep_curve_eval(crv,t))
+    plo,phi=_model_nurbs_surface_bounds(sg)
+    du0=1e-9*max(1.0,phi[1]-plo[1]);dv0=1e-9*max(1.0,phi[2]-plo[2])
+    for _ in 1:30
+        P,Ct=_brep_curve_d1(crv,t)
+        S,Su,Sv=_occ_surface_d1(sg,u,v)
+        F=_b3(P,S)
+        c2=_b3mul(Su,-1.0);c3=_b3mul(Sv,-1.0)
+        x23=_b3cross(c2,c3)
+        det=_b3dot(Ct,x23)
+        (isfinite(det) && det!=0.0) || return nothing
+        mF=_b3mul(F,-1.0)
+        dt=_b3dot(mF,x23)/det
+        du=_b3dot(Ct,_b3cross(mF,c3))/det
+        dv=_b3dot(Ct,_b3cross(c2,mF))/det
+        t+=dt;u+=du;v+=dv
+        (a<=t<=b) || return nothing
+        (plo[1]-du0<=u<=phi[1]+du0 && plo[2]-dv0<=v<=phi[2]+dv0) || return nothing
+        if abs(dt)<=4eps(max(1.0,abs(t)))
+            P=_brep_curve_eval(crv,t)
+            return _b3dist(P,_occ_surface_d1(sg,u,v)[1])<=ftol ? t : nothing
+        end
+    end
+    return nothing
 end
 
 # A box that holds the curve record over `[lo,hi]`, or `nothing` when none is
@@ -3865,6 +3920,204 @@ function _brep_cycle_area(arcs,cycle)
     return total
 end
 
+# A rebuilt face in OpenCASCADE's orientation. General Fuse keeps a split
+# face's orientation on its surface: its outer wire winds in uv the way the
+# source face's outer wire does. The traced regions wind one fixed way, so
+# a face whose source winds the other way (every face of an OpenCASCADE box
+# whose plane normal is the inward one) is stored reversed: the cycle runs
+# backwards from the same first arc. Gmsh 4.15.2 then lists the bottom slab
+# of a box as `-21,23,22,16` where the traced region gives `21,-16,-22,-23`.
+# Returns the spec and whether it was reversed (its shell uses flip).
+function _brep_spec_natural(spec,src,edges)
+    (src===nothing || isempty(spec.wires) || isempty(src.wires)) &&
+        return spec,false
+    sa=0.0
+    for (e,sgn,pc) in src.wires[1]
+        ed=edges[e]
+        sa+=_brep_pc_arc_area(pc,sgn>0 ? ed.t0 : ed.t1,sgn>0 ? ed.t1 : ed.t0)
+    end
+    best=0.0
+    for w in spec.wires
+        a=0.0
+        for ar in w
+            a+=_brep_pc_arc_area(ar.pc,ar.fwd ? ar.t0 : ar.t1,
+                                 ar.fwd ? ar.t1 : ar.t0)
+        end
+        abs(a)>abs(best) && (best=a)
+    end
+    (sa==0.0 || best==0.0 || (sa>0)==(best>0)) && return spec,false
+    wires=map(spec.wires) do w
+        r=[merge(ar,(fwd=!ar.fwd,)) for ar in Iterators.reverse(w)]
+        vcat(r[end:end],r[1:end-1])
+    end
+    return merge(spec,(wires=wires,)),true
+end
+
+# The order in which OpenCASCADE meets the faces that build operand `i`'s
+# split solids: its own faces (each one's pieces in turn), then the faces of
+# other operands inside it, walked breadth-first from the first one over
+# shared edges, each face's edges in stored order (its chain's first edge,
+# then the rest backwards). A split solid's shell starts at its first face
+# in this order: the common piece of two overlapping boxes starts at the
+# first box's z=1 piece, reached from its x=0 face through the z=1 face.
+# Returns face index => rank.
+function _brep_block_rank(kept,wires,i::Int)
+    L=Int[]
+    for (fi,spec) in enumerate(kept)
+        get(spec,:oi,0)==i && push!(L,fi)
+    end
+    bit=_brep_bit(i)
+    for (fi,spec) in enumerate(kept)
+        get(spec,:oi,0)==i && continue
+        any(u->(u[1]&bit)!=0,spec.uses) && push!(L,fi)
+    end
+    adj=Dict{Any,Vector{Int}}()
+    for fi in L, w in wires[fi], ar in w
+        v=get!(Vector{Int},adj,ar.key)
+        fi in v || push!(v,fi)
+    end
+    rank=Dict{Int,Int}()
+    queue=Int[]
+    for s in L
+        haskey(rank,s) && continue
+        rank[s]=length(rank)+1;push!(queue,s)
+        while !isempty(queue)
+            fi=popfirst!(queue)
+            for w in wires[fi], k in Iterators.flatten((1:min(1,length(w)),
+                                                       length(w):-1:2))
+                for fj in adj[w[k].key]
+                    haskey(rank,fj) && continue
+                    rank[fj]=length(rank)+1;push!(queue,fj)
+                end
+            end
+        end
+    end
+    return rank
+end
+
+# The face order of a shell OpenCASCADE builds anew. Its shell splitter
+# (BOPAlgo_ShellSplitter) grows a shell breadth-first from its first face,
+# taking each face's neighbours in the stored order of its edges (the
+# chain's first edge, then the rest backwards). Measured against Gmsh 4.15.2
+# (`getBoundary(combined=false)` of fragmented slabs, cut, fused and
+# fragmented boxes). Faces the walk does not reach keep their order after it.
+function _brep_shell_bfs(cf::Vector{Int},wires)
+    n=length(cf)
+    n<=2 && return cf
+    at=Dict{Any,Vector{Int}}()
+    for (k,fi) in enumerate(cf), w in wires[fi], ar in w
+        v=get!(Vector{Int},at,ar.key)
+        k in v || push!(v,k)
+    end
+    seen=falses(n)
+    order=Int[]
+    sizehint!(order,n)
+    for s in 1:n
+        seen[s] && continue
+        seen[s]=true;push!(order,s)
+        i=length(order)
+        while i<=length(order)
+            k=order[i];i+=1
+            for w in wires[cf[k]], j in Iterators.flatten((1:min(1,length(w)),
+                                                          length(w):-1:2))
+                for q in at[w[j].key]
+                    seen[q] && continue
+                    seen[q]=true;push!(order,q)
+                end
+            end
+        end
+    end
+    return cf[order]
+end
+
+# The faces of one result shell in OpenCASCADE's order. A solid the
+# operation splits (or that holds another operand's faces) is rebuilt by
+# its shell splitter: breadth-first from its first face in its owner's
+# block order (`_brep_block_rank`). A solid whose faces were only split or
+# replaced keeps its source face order, each face's pieces in turn and a
+# coincident wall owned by a lower operand where its own face was (Gmsh
+# 4.15.2's compsolid.geo: two boxes touching on part of a face).
+function _brep_shell_faces(cf::Vector{Int},kept,wires,own::Int,draft::Bool,
+                           rank)
+    if draft
+        key(fi)=begin
+            s=kept[fi]
+            get(s,:oi,0)==own && return Float64(fi)
+            for (i,p) in get(s,:also,())
+                i==own && return Float64(p)
+            end
+            return Inf
+        end
+        return sort(cf;by=key)
+    end
+    k=argmin([get(rank,fi,typemax(Int)) for fi in cf])
+    k==1 || (cf=vcat(cf[k:k],cf[1:k-1],cf[k+1:end]))
+    return _brep_shell_bfs(cf,wires)
+end
+
+# Whether a piece of operand `own` is that operand's draft solid: its only
+# piece, with no face of another operand inside it (only coincident walls
+# that stand in for its own faces).
+function _brep_piece_draft(comps,kept,own::Int,npieces_of_own::Int)
+    npieces_of_own==1 || return false
+    for cf in comps, fi in cf
+        s=kept[fi]
+        get(s,:oi,0)==own && continue
+        any(t->t[1]==own,get(s,:also,())) || return false
+    end
+    return true
+end
+
+# Where OpenCASCADE starts the outer wire of a rebuilt face (the first edge
+# Gmsh lists). Its source wire is stored as the chain's first edge, then the
+# rest backwards. A face cut by another shape (its wire holds an arc that
+# lies on no source edge) starts at the first piece of the first split
+# source edge in that stored order; whole source edges are passed over.
+# Otherwise its source edges keep their order and the first one starts it.
+# Measured against Gmsh 4.15.2 on boxes cut by boxes and by walls.
+function _brep_spec_start(spec,src,edges,ctags)
+    (src===nothing || isempty(spec.wires) || isempty(src.wires)) && return spec
+    sw=src.wires[1]
+    n=length(sw)
+    spos=Dict{Int,Tuple{Int,Int,Float64,Float64}}()   # ctag -> (stored, sgn, t0, t1)
+    for (k,(e,sgn,_)) in enumerate(sw)
+        ed=edges[e]
+        spos[ctags[e]]=(k==1 ? 1 : n+2-k,sgn,min(ed.t0,ed.t1),max(ed.t0,ed.t1))
+    end
+    outer=1;best=-1.0
+    for (wi,w) in enumerate(spec.wires)
+        a=0.0
+        for ar in w
+            a+=_brep_pc_arc_area(ar.pc,ar.fwd ? ar.t0 : ar.t1,
+                                 ar.fwd ? ar.t1 : ar.t0)
+        end
+        abs(a)>best && (best=abs(a);outer=wi)
+    end
+    w=spec.wires[outer]
+    foreign=false
+    cands=Tuple{Bool,Int,Float64,Int}[]   # (whole, stored pos, param, arc)
+    for (k,ar) in enumerate(w)
+        key=ar.key
+        pos=key isa Tuple && length(key)>=4 && key[1]===:e ?
+            get(spos,key[2],nothing) : nothing
+        if pos===nothing
+            foreign=true;continue
+        end
+        si,sgn,t0,t1=pos
+        lo,hi=minmax(key[3],key[4])
+        tol=1e-9*max(1.0,abs(t0),abs(t1))
+        whole=abs(lo-t0)<=tol && abs(hi-t1)<=tol
+        push!(cands,(whole,si,sgn>0 ? lo : -hi,k))
+    end
+    isempty(cands) && return spec
+    rank(c)=foreign ? (c[1],c[2],c[3]) : (false,c[2],c[3])
+    k=cands[argmin([rank(c) for c in cands])][4]
+    k==1 && return spec
+    wires=copy(spec.wires)
+    wires[outer]=vcat(w[k:end],w[1:k-1])
+    return merge(spec,(wires=wires,))
+end
+
 # Green's theorem contribution of one pcurve arc over [ta,tb] (signed by
 # direction of evaluation): ∫(u·v' − v·u')/2 dt.
 function _brep_pc_arc_area(pc,ta,tb)
@@ -4027,15 +4280,18 @@ function _brep_ray_face_hits(solid,face,P,D,tol)
     sg=face.sg
     params=_brep_line_surface(sg,(o=P,d=D))
     count=0;ambiguous=false
+    uper=_brep_uperiod(sg);vper=_brep_vperiod(sg)
+    # the hit is wrapped into the face's own cut domain, which starts at
+    # the leftmost u of its wire. Centring it on the mean u of the wire
+    # moved hits on a face spanning the whole period (a sphere less one
+    # octant) a period outside it.
+    ulo=uper>0 ? _brep_face_ubase(solid.edges,face) : 0.0
+    vlo=vper>0 ? _brep_face_vbase(solid.edges,face) : 0.0
     for t in params
         t<=tol && continue
         p=_b3add(P,_b3mul(D,t))
         uv=_brep_surface_uv(sg,p)
-        uper=_brep_uperiod(sg)
-        if uper>0
-            cu=_brep_face_wire_ucenter(solid,face)
-            uv=(uv[1]+uper*round((cu-uv[1])/uper),uv[2])
-        end
+        (uper>0 || vper>0) && (uv=_brep_wrap_uv(uv,ulo,uper,vlo,vper))
         # inside the trimmed face?
         inside=_brep_uv_in_face(solid.edges,face,uv,tol)
         # near a wire boundary → ambiguous direction
@@ -7687,7 +7943,8 @@ end
 #   created — every materialized entity tag, for caller-side rollback
 
 function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
-                                  kept,touched,nops::Int,nobj::Int,caller)
+                                  kept,touched,nops::Int,nobj::Int,caller;
+                                  natural::Bool=false)
     tol=_BREP_TOL
     scale=1.0
     for p in values(m.points)
@@ -7916,6 +8173,23 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         vb=vertex_of(p1)
         edge_verts[ei]=(va,vb)
     end
+    # each emitted face in its source face's orientation (the OCC bridge
+    # re-derives plane axes from the wires it publishes)
+    natw=Vector{Any}(undef,length(kept))
+    flipped=falses(length(kept))
+    srcrep=Dict{Int,Any}()
+    for (fi,spec) in enumerate(kept)
+        natw[fi]=spec.wires
+        (natural && emit[fi]) || continue
+        oi=get(spec,:oi,0)
+        (oi>0 && spec.stag>0 && haskey(m.volumes,tags[oi])) || continue
+        rep=get!(()->_brep_extract(m,tags[oi],caller),srcrep,oi)
+        k=findfirst(f->f.stag==spec.stag,rep.faces)
+        k===nothing && continue
+        s2,fl=_brep_spec_natural(spec,rep.faces[k],rep.edges)
+        s2=_brep_spec_start(s2,rep.faces[k],rep.edges,rep.ctags)
+        natw[fi]=s2.wires;flipped[fi]=fl
+    end
     points=Int[];curves=Int[];loops=Int[];surfaces=Int[];shells=Int[]
     pieces_out=Vector{NamedTuple}(undef,length(pieces))
     try
@@ -7977,7 +8251,7 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
             emit[fi] || continue
             pcdict=Dict{Int,NamedTuple}()
             loop_tags=Int[]
-            for wire in spec.wires
+            for wire in natw[fi]
                 ids=Int[]
                 for ar in wire
                     c=haskey(reuse_ctag,ar.key) ? reuse_ctag[ar.key] :
@@ -8073,10 +8347,21 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
         end
         # shells per piece component — the shell entry sign is the spec's use
         # sign for this piece's cell
+        ranks=Dict{Int,Dict{Int,Int}}()
         for (pi,p) in enumerate(pieces)
             p.pseudo!=0 && continue
             pshells=Int[]
             for cf in p.comps
+                # OpenCASCADE's face order (its owner is the lowest operand)
+                if natural && op===:union
+                    cf=_brep_shell_bfs(cf,natw)
+                elseif natural
+                    own=trailing_zeros(p.srcs)+1
+                    draft=_brep_piece_draft(p.comps,kept,own,length(image[own]))
+                    rk=draft ? nothing :
+                        get!(()->_brep_block_rank(kept,natw,own),ranks,own)
+                    cf=_brep_shell_faces(cf,kept,natw,own,draft,rk)
+                end
                 stags=Int[]
                 for fi in cf
                     spec=kept[fi]
@@ -8088,6 +8373,7 @@ function _brep_materialize_multi!(m::GeoModel,op::Symbol,tags,
                             "$caller: face piece lost its cell membership"))
                         spec.uses[ui][2]
                     end
+                    flipped[fi] && (sgn=-sgn)
                     push!(stags,sgn*stag[fi])
                 end
                 if get(ENV,"BREP_DEBUG_SHELL","")=="1"

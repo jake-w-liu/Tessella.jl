@@ -262,9 +262,20 @@ end
 # transform is an involution). Wires and shells are internal (-1/-2) shapes
 # and always bind fresh, matching upstream's `maxTag` allocation.
 function _model_occ_boolean_wire!(pub::_ModelOCCBooleanPub,loop_tag::Int,
-                                  hole::Bool,caller)
+                                  hole::Bool,caller;stored_rev::Bool=false)
     signed=pub.sm.loops[loop_tag]
     seq=hole ? Int[-s for s in Iterators.reverse(signed)] : signed
+    # OpenCASCADE stores the wire of a solid's face (a box's, or one its
+    # Boolean builds) as the chain's first edge, then the rest backwards;
+    # Gmsh lists the chain (ShapeFix_Wire reorders it) but numbers fresh
+    # edges in stored order: a box face reads -1,4,3,-2 over edges bound
+    # 1,2,3,4. A sheet's wire is stored as its chain.
+    if stored_rev && length(seq)>2
+        _model_occ_boolean_edge!(pub,abs(seq[1]),caller)
+        for k in length(seq):-1:2
+            _model_occ_boolean_edge!(pub,abs(seq[k]),caller)
+        end
+    end
     uses=Tuple{UInt64,Bool}[]
     for sc in seq
         eid=_model_occ_boolean_edge!(pub,abs(sc),caller)
@@ -352,7 +363,8 @@ function _model_occ_boolean_face_probe_cands(sm::GeoModel,stag::Int,caller)
     return cands,n
 end
 
-function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
+function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller;
+                                  stored_rev::Bool=false)
     skey=(2,s)
     haskey(pub.ids,skey) && return pub.ids[skey]
     desired=get(pub.desired,skey,0)
@@ -365,7 +377,8 @@ function _model_occ_boolean_face!(pub::_ModelOCCBooleanPub,s::Int,caller)
     end
     children=UInt64[]
     for (index,loop_tag) in enumerate(pub.sm.surfaces[s])
-        push!(children,_model_occ_boolean_wire!(pub,loop_tag,index>1,caller))
+        push!(children,_model_occ_boolean_wire!(pub,loop_tag,index>1,caller;
+                                                stored_rev=stored_rev))
     end
     # Untyped-default materialization leaves :plane records empty; the
     # kernel face they came from carries the verbatim record to publish.
@@ -458,7 +471,7 @@ function _model_occ_boolean_shell!(pub::_ModelOCCBooleanPub,sl::Int,
     uses=Tuple{UInt64,Bool}[]
     for sf in pub.sm.surface_loops[sl]
         stag=abs(sf)
-        fid=_model_occ_boolean_face!(pub,stag,caller)
+        fid=_model_occ_boolean_face!(pub,stag,caller;stored_rev=true)
         rev=_model_occ_boolean_face_rev(pub,stag,sv,diag,sf<0,caller)
         push!(uses,(fid,rev))
     end
@@ -2243,12 +2256,27 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             end
             return st
         end
+        # a solid's face is stored in its source face's orientation
+        flipped=falses(length(kept))
+        natw=Any[spec.wires for spec in kept]
         for (fi,spec) in enumerate(kept)
             if reuse[fi]
                 stag[fi]=spec.stag
                 continue
             end
             if emit[fi]
+                oi=get(spec,:oi,0)
+                if oi>0 && isvol[oi] && spec.stag>0
+                    rep=reps[oi]
+                    k=findfirst(f->f.stag==spec.stag,rep.faces)
+                    if k!==nothing
+                        spec,fl=_brep_spec_natural(spec,rep.faces[k],rep.edges)
+                        spec=_brep_spec_start(spec,rep.faces[k],rep.edges,
+                                              rep.ctags)
+                        flipped[fi]=fl
+                    end
+                end
+                natw[fi]=spec.wires
                 stag[fi]=emit_spec(spec)
                 # shell faces absorbed into solids still credit their sheet
                 # operands — appended after the free-face images below
@@ -2260,6 +2288,7 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
         end
         # shells per piece component — the shell entry sign is the use's
         # sign recorded for this piece's cell
+        ranks=Dict{Int,Dict{Int,Int}}()
         for (pi,p) in enumerate(pieces)
             if p.pseudo!=0
                 pieces_out[pi]=(vtag=0,srcs=p.srcs,pseudo=p.pseudo,cell=p.cell)
@@ -2271,9 +2300,21 @@ function _occ_mixed_materialize!(m::GeoModel,op::Symbol,tags::Vector{Int},
             end
             pshells=Int[]
             for cf in p.comps
+                # OpenCASCADE's face order (its owner is the lowest volume
+                # operand)
+                if op===:union
+                    cf=_brep_shell_bfs(cf,natw)
+                else
+                    own=trailing_zeros(p.srcs)+1
+                    draft=_brep_piece_draft(p.comps,kept,own,
+                                            length(vol_image[own]))
+                    rk=draft ? nothing :
+                        get!(()->_brep_block_rank(kept,natw,own),ranks,own)
+                    cf=_brep_shell_faces(cf,kept,natw,own,draft,rk)
+                end
                 stags=Int[]
                 for fi in cf
-                    push!(stags,sgnof[fi]*stag[fi])
+                    push!(stags,(flipped[fi] ? -1 : 1)*sgnof[fi]*stag[fi])
                 end
                 sh=add_surface_loop!(m,stags)
                 push!(shells,sh);push!(pshells,sh)

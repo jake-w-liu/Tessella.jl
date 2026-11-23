@@ -2398,8 +2398,10 @@ function boolean_volumes_multi!(m::GeoModel,op::Symbol,
         end
         return Int[]
     end
+    # the OCC bridge publishes faces in OpenCASCADE's orientation and edge
+    # order (`snapshots=false` is its scratch model)
     pieces,image,created=_brep_materialize_multi!(
-        m,op,tags,kept,touched,N,nobj,caller)
+        m,op,tags,kept,touched,N,nobj,caller;natural=!snapshots)
     # operand dispositions (OCC preserve-numbering):
     #   image empty → the operand is deleted from the result — removed when
     #   its group carries Delete

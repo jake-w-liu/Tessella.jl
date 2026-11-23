@@ -35,6 +35,26 @@ point(t)=Tuple(A.model.get_value(0,t,Float64[]))
     finally
         A.finalize()
     end
+    # operands swapped: the tool face keeps its source order with the
+    # object's edge 4 where its own edge 2 was. Gmsh 4.15.2 lists 5,-4,6,7
+    # (`combined=false`), a connected chain; the combined listing reorders.
+    A.initialize()
+    try
+        A.option("General.Terminal",0)
+        occ=A.model.occ
+        occ.add_rectangle(0,0,0,1,1;tag=1)
+        occ.add_rectangle(1,0,0,1,1;tag=2)
+        out,images=occ.fragment([(2,2)],[(2,1)])
+        occ.synchronize()
+        @test out==[(2,2),(2,1)]
+        @test boundary(1)==[5,-4,6,7]
+        @test boundary(2)==[1,2,3,4]
+        @test ends()==Dict(1=>(1,2),2=>(2,3),3=>(3,4),4=>(4,1),
+                           5=>(5,1),6=>(4,6),7=>(6,5))
+        @test [point(t) for t in 5:6]==[(0.0,0.0,0.0),(0.0,1.0,0.0)]
+    finally
+        A.finalize()
+    end
     # a rim shared over half its length: both edges split at the
     # partner's corner and the common half is one curve
     A.initialize()
