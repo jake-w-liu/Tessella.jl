@@ -114,6 +114,17 @@ end
         occ.translate([(3, 1), (3, 2)], 0, 0, 1); occ.synchronize()
         @test [t for (_, t) in A.model.get_entities(0)] == collect(17:32)
         @test [t for (_, t) in A.model.get_entities(2)] == collect(13:24)
+        # a mirror is a GTransform upstream: curves TrimmedCurve, faces
+        # "BSpline surface" (a translation keeps Line and Plane)
+        occ.mirror([(3, 1)], 1, 0, 0, 0); occ.synchronize()
+        f1 = abs(first(A.model.get_boundary([(3, 1)], false, false))[2])
+        f2 = abs(first(A.model.get_boundary([(3, 2)], false, false))[2])
+        c1 = abs(first(A.model.get_boundary([(2, f1)], false, false))[2])
+        c2 = abs(first(A.model.get_boundary([(2, f2)], false, false))[2])
+        @test (f1, c1, f2, c2) == (25, 49, 19, 37)
+        @test A.model.get_type(1, c1) == "TrimmedCurve"
+        @test A.model.get_type(2, f1) == "BSpline surface"
+        @test A.model.get_type(1, c2) == "Line" && A.model.get_type(2, f2) == "Plane"
     finally
         A.finalize()
     end
