@@ -13,6 +13,7 @@
 # parametric coordinates alone) only to be compared with the live mesh later;
 # a fingerprint of every word of that state answers the same question.
 const _EmittedOwner=Tuple{Int,Int32}
+const _EMITTED_NO_OWNER=(-1,Int32(0))
 
 struct _EmittedCellOwners
     two::Dict{Tuple{Int,NTuple{2,Int32}},_EmittedOwner}
@@ -170,7 +171,9 @@ struct _ModelMeshEmittedReceipt
     actual::MixedMesh
     carrier::Union{Mesh,MixedMesh}
     parts::Dict{Tuple{Int,Int32},Tuple{Union{Mesh,MixedMesh},Vector{Int32}}}
-    cell_owners::_EmittedCellOwners
+    # The owner of each carrier cell, block by block in carrier order (the
+    # tables keyed by rows are needed only to build the receipt).
+    cell_owners::Vector{Vector{_EmittedOwner}}
     carrier_rows::Vector{Int32}
     native_state::_EmittedStateStamp
 end
@@ -232,7 +235,16 @@ function _model_mesh_emitted_receipt(authority,parts,part_rows,caller)
         _emitted_owner_keys(owners)==carrier_keys || throw(ArgumentError(
             "$caller: emitted constructors do not partition the current carrier"))
     end
-    return _ModelMeshEmittedReceipt(authority.mesh,authority.carrier,bound,owners,
+    carrier_owners=Vector{_EmittedOwner}[]
+    for (msh,cells,tags) in _emitted_projection_blocks(authority.carrier)
+        aligned=Vector{_EmittedOwner}(undef,size(cells,2))
+        for column in axes(cells,2)
+            found=_emitted_owner(owners,msh,cells,column)
+            aligned[column]=found===nothing ? _EMITTED_NO_OWNER : found
+        end
+        push!(carrier_owners,aligned)
+    end
+    return _ModelMeshEmittedReceipt(authority.mesh,authority.carrier,bound,carrier_owners,
         copy(authority.carrier_rows),_model_mesh_emitted_state(authority.mesh))
 end
 
@@ -332,12 +344,14 @@ function _model_mesh_emitted_projection(m,mesh,dimension,tag,receipt,caller)
     length(carrier_cells)==length(authority.carrier_cells) || throw(ArgumentError(
         "$caller: emitted carrier cell blocks lack their actual constructor events"))
     events=Dict{Tuple{Int,Tuple},UInt64}();seen=Set{UInt64}()
-    for ((msh,cells,tags),uids) in zip(carrier_cells,authority.carrier_cells)
-        length(uids)==size(cells,2) || throw(ArgumentError(
+    length(carrier_cells)==length(receipt.cell_owners) || throw(ArgumentError(
+        "$caller: emitted receipt does not cover the carrier's cell blocks"))
+    for (bi,((msh,cells,tags),uids)) in enumerate(zip(carrier_cells,authority.carrier_cells))
+        length(uids)==size(cells,2)==length(receipt.cell_owners[bi]) || throw(ArgumentError(
             "$caller: emitted carrier cell columns lack their actual constructor events"))
         for column in axes(cells,2)
-            cell_owner=_emitted_owner(receipt.cell_owners,msh,cells,column)
-            cell_owner!==nothing || throw(ArgumentError("$caller: carrier cell lacks its emitted constructor owner"))
+            cell_owner=receipt.cell_owners[bi][column]
+            cell_owner!=_EMITTED_NO_OWNER || throw(ArgumentError("$caller: carrier cell lacks its emitted constructor owner"))
             cell_owner in closure || continue
             uid=uids[column]
             uid!==nothing || throw(ArgumentError("$caller: emitted closure cell lacks its actual constructor UID"))

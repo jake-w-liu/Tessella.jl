@@ -49,9 +49,10 @@ end
         @test M._model_mesh_emitted_state_matches(mesh, stamp)
         @test M._model_mesh_emitted_state(deepcopy(mesh)) == stamp
         # The owner of every carrier cell is on record.
-        @test all(M._emitted_owner(receipt.cell_owners, msh, cells, column) !== nothing
-                  for (msh, cells, tags) in M._emitted_projection_blocks(authority.carrier)
-                  for column in axes(cells, 2))
+        blocks = collect(M._emitted_projection_blocks(authority.carrier))
+        @test length(receipt.cell_owners) == length(blocks)
+        @test all(length(owners) == size(cells, 2) && all(!=(M._EMITTED_NO_OWNER), owners)
+                  for (owners, (msh, cells, tags)) in zip(receipt.cell_owners, blocks))
 
         # One edit at a time, undone after it is seen.
         function seen(edit!, undo!)

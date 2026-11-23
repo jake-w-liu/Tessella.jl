@@ -1,16 +1,80 @@
 # Public mesh tags are labels, while native mesh connectivity and kernels use
 # dense indices. The element array follows stored block order, not MSH type
 # order or the order of public element tags.
+# The index of each public tag, as a read-only table (`get`, `haskey`,
+# `getindex`; `copy` gives a Dict to edit). Tags 1..n, as a generation or a
+# renumbering leaves them, need no table; other distinct positive tags up to
+# a few times their number are read from a vector by tag; the rest from a
+# Dict. A Dict of every node and cell was the largest table a mesh kept.
+struct _CacheTagIndex
+    count::Int
+    slots::Vector{Int32}
+    table::Dict{UInt64,Int}
+end
+
+function Base.get(index::_CacheTagIndex,tag,default)
+    tag isa Integer && !(tag isa Bool) || return get(index.table,tag,default)
+    if index.count>=0
+        return 0<tag<=index.count ? Int(tag) : default
+    elseif !isempty(index.slots)
+        0<tag<=length(index.slots) || return default
+        value=index.slots[tag]
+        return value==0 ? default : Int(value)
+    end
+    tag<0 && return default
+    return get(index.table,UInt64(tag),default)
+end
+Base.haskey(index::_CacheTagIndex,tag)=get(index,tag,0)!=0
+function Base.getindex(index::_CacheTagIndex,tag)
+    value=get(index,tag,0)
+    value==0 && throw(KeyError(tag))
+    return value
+end
+Base.length(index::_CacheTagIndex)=index.count>=0 ? index.count :
+    !isempty(index.slots) ? count(!iszero,index.slots) : length(index.table)
+function Base.copy(index::_CacheTagIndex)
+    index.count<0 && isempty(index.slots) && return copy(index.table)
+    table=Dict{UInt64,Int}()
+    if index.count>=0
+        sizehint!(table,index.count)
+        for tag in 1:index.count
+            table[UInt64(tag)]=tag
+        end
+    else
+        for (tag,value) in enumerate(index.slots)
+            value==0 || (table[UInt64(tag)]=Int(value))
+        end
+    end
+    return table
+end
+
 struct _CachePublicTags
     mesh::Union{Mesh,MixedMesh}
     node_tags::Vector{UInt64}
     element_tags::Vector{UInt64}
-    node_indices::Dict{UInt64,Int}
-    element_indices::Dict{UInt64,Int}
+    node_indices::_CacheTagIndex
+    element_indices::_CacheTagIndex
     authority::Set{Tuple{Int,Int32}}
 end
 
 function _cache_tag_inverse(tags,caller,kind)
+    count=length(tags)
+    identity=true;highest=UInt64(0);positive=true
+    for (index,tag) in enumerate(tags)
+        identity&=tag==index
+        positive&=tag>0
+        positive && (highest=max(highest,UInt64(tag)))
+    end
+    identity && return _CacheTagIndex(count,Int32[],Dict{UInt64,Int}())
+    if positive && count<typemax(Int32) && highest<=UInt64(4)*UInt64(count)+UInt64(1024)
+        slots=zeros(Int32,Int(highest))
+        for (index,tag) in enumerate(tags)
+            slots[tag]==0 || throw(ArgumentError(
+                "$caller: duplicate public $kind tag $tag"))
+            slots[tag]=Int32(index)
+        end
+        return _CacheTagIndex(-1,slots,Dict{UInt64,Int}())
+    end
     indices=Dict{UInt64,Int}()
     sizehint!(indices,length(tags))
     for (index,tag) in enumerate(tags)
@@ -18,7 +82,7 @@ function _cache_tag_inverse(tags,caller,kind)
             "$caller: duplicate public $kind tag $tag"))
         indices[tag]=index
     end
-    return indices
+    return _CacheTagIndex(-1,Int32[],indices)
 end
 
 _cache_declared_native_zero_entity(::Mesh,dimension::Integer)=false
