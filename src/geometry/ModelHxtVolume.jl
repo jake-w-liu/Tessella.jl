@@ -79,32 +79,42 @@ function _model_hxt_volume(m::GeoModel,t::Int,caller;size_field=nothing,
     # capped by CTX::lc, and by the interpolated size when the boundary is
     # extended into the volume.
     interpolate=m.meshing.lc_extend_from_boundary>0 || m.meshing.lc_extend_from_boundary==-3
-    lc_global=options.ctx_lc
-    function size(x,y,z,interpolated,color)
-        raw=options.inner_field!==nothing ? field_value(options.inner_field,x,y,z,(3,t)) :
-            size_field!==nothing ? size_at(size_field,x,y,z,(3,t)) : GMSH_MAX_SIZE
-        options.callback===nothing || (raw=_model_algorithm_callback(
-            options.callback,3,t,x,y,z,raw,caller))
-        return interpolate && interpolated>0.0 ? min(interpolated,min(lc_global,raw)) :
-            min(lc_global,raw)
+    lc_global=Float64(options.ctx_lc)
+    inner_field=options.inner_field;callback=options.callback
+    size=if inner_field===nothing && size_field===nothing && callback===nothing
+        # no field: every candidate gets CTX::lc (or the interpolated size)
+        lc=min(lc_global,Float64(GMSH_MAX_SIZE))
+        (x,y,z,interpolated,color)->interpolate && interpolated>0.0 ? min(interpolated,lc) : lc
+    else
+        function (x,y,z,interpolated,color)
+            raw=inner_field!==nothing ? Float64(field_value(inner_field,x,y,z,(3,t))) :
+                size_field!==nothing ? Float64(size_at(size_field,x,y,z,(3,t))) : GMSH_MAX_SIZE
+            callback===nothing || (raw=Float64(_model_algorithm_callback(
+                callback,3,t,x,y,z,raw,caller)))
+            return (interpolate && interpolated>0.0 ? min(interpolated,min(lc_global,raw)) :
+                min(lc_global,raw))::Float64
+        end
     end
-    Hxt.tet_mesh!(hm;min_size=options.lc_min,max_size=options.lc_max,factor=options.lc_factor,
-        size_callback=size,quality_min=options.optimize_threshold,optimize=options.optimize>0)
+    Hxt.tet_mesh!(hm;min_size=Float64(options.lc_min),max_size=Float64(options.lc_max),
+        factor=Float64(options.lc_factor),size_callback=size,
+        quality_min=Float64(options.optimize_threshold),optimize=options.optimize>0)
     # Hxt2Gmsh: the cells of the Region in order; a vertex not on the
     # boundary becomes a new MVertex when a cell first names it.
     nb=length(uids)
-    local_row=Dict{UInt32,Int32}()
+    local_row=zeros(Int32,hm.nv)
     newcoords=NTuple{3,Float64}[]
     cells=NTuple{4,Int32}[]
+    sizehint!(cells,hm.ntet)
     for c in 0:hm.ntet-1
         hm.color[c+1]==0 || continue
         v=ntuple(4) do j
             n=hm.node[4c+j]
             n<nb && return Int32(n+1)
-            get!(local_row,n) do
+            if local_row[n+1]==0
                 push!(newcoords,Hxt.point(hm,n))
-                Int32(nb+length(newcoords))
+                local_row[n+1]=Int32(nb+length(newcoords))
             end
+            return local_row[n+1]
         end
         push!(cells,v)
     end

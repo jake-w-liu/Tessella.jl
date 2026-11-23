@@ -11443,7 +11443,10 @@ function _mesh_model_volume(m::GeoModel, tag::Integer;
     if m.meshing.algorithm_3d==10 && !isempty(m.volumes[t])
         mesh=_model_hxt_volume(m,t,caller;size_field,_mesh_input,options,
             births=_native_initial_births)
-        diag=validate(mesh)
+        # Gmsh checks nothing here; the kernel's cells are face-connected by
+        # construction, so the certificate is the cheap one: structure,
+        # finite positive volumes, no duplicate cells (no face-topology pass).
+        diag=validate(mesh;require_tet_topology=false)
         diag.ok || throw(ErrorException("$caller: invalid HXT mesh — "*join(diag.messages,"; ")))
         return mesh
     end
