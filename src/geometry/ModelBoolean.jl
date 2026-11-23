@@ -2702,6 +2702,39 @@ function _brep_sec_cylinder_cylinder(ca,cb,caller)
                 "$caller: tangent cylinder×cylinder contact is unsupported"))
         return _brep_sec_msq(ca,cb,true,caller)
     end
+    # Equal radii and intersecting axes (boolean.geo's three crossed
+    # cylinders): the section is two ellipses in the planes bisecting the
+    # axes, crossing each other where the cylinders touch. The level-set
+    # trace cannot follow that singular curve; it is exact here.
+    if abs(ca.radius-cb.radius)<=_BREP_TOL*max(1.0,ca.radius)
+        a=_b3unit(ca.axis);b=_b3unit(cb.axis)
+        m=_b3cross(a,b);mm=_b3norm(m)
+        w=_b3(cb.center,ca.center)
+        if abs(_b3dot(w,m))<=_BREP_TOL*mm*max(1.0,_b3norm(w))
+            # the axes meet at O = ca.center + s a
+            c=_b3dot(a,b);wa=_b3dot(w,a);wb=_b3dot(w,b)
+            s=(wa-c*wb)/(1-c*c)
+            O=_b3add(ca.center,_b3mul(a,s))
+            r=ca.radius
+            out=NamedTuple[]
+            for sg in (1.0,-1.0)
+                X=_b3unit(_b3add(a,_b3mul(b,sg)))
+                n=_b3unit(_b3(a,_b3mul(b,sg)))
+                Y=_b3cross(n,X)
+                ua=_b3dot(X,a)
+                rx=r/sqrt(max(1e-300,1-ua*ua))
+                g=(occ=:ellipse,center=O,n=n,X=X,Y=Y,rx=rx,ry=r,
+                   t0=0.0,t1=_OCC_TWO_PI)
+                curve=(kind=:ellipse,c=O,n=n,x=X,y=Y,rx=rx,ry=r,g=g)
+                pa=_brep_fit_conic_pc(ca,cb,curve)
+                pb=_brep_fit_conic_pc(cb,ca,curve)
+                (pa===nothing || pb===nothing) &&
+                    return _brep_sec_msq(ca,cb,true,caller)
+                push!(out,(curve=curve,closed=true,pcA=pa,pcB=pb))
+            end
+            return out
+        end
+    end
     # non-parallel axes — the generic level-set section traces the
     # curve on the first cylinder's domain
     return _brep_sec_msq(ca,cb,true,caller)
@@ -7215,6 +7248,8 @@ function _brep_collect_faces_n(m::GeoModel,op::Symbol,tags::Vector{Int},
             end
         end
     end
+    # sections crossing each other on a shared face cut each other there
+    _brep_section_crossings!(sec_cuts,sections,esec_skip,tol)
     # section sub-edges, cut at both faces' seam lifts and contact cuts
     sec_edges=NamedTuple[]
     secs_pf=[[NamedTuple[] for _ in solids[i].faces] for i in 1:N]
@@ -7524,6 +7559,52 @@ function _brep_regions_from_first_vertex(S,f,regions,arcs,cycles)
     k=findfirst(at,regions)
     (k===nothing || k==1) && return regions
     return vcat([regions[k]],regions[1:k-1],regions[k+1:end])
+end
+
+# Two sections on a common face that cross each other (the two ellipses of
+# equal crossed cylinders, which meet where the cylinders touch) cut each
+# other there: the crossing is a vertex of both, so the face's wire graph
+# splits into regions at it. Without the cut the faces stayed whole and a
+# fuse of two such cylinders returned one of them unchanged.
+function _brep_section_crossings!(sec_cuts,sections,skip,tol)
+    n=length(sections)
+    for si in 1:n, sj in 1:n
+        si==sj && continue
+        (skip[si] || skip[sj]) && continue
+        A=sections[si];B=sections[sj]
+        # ellipse sections (crossed cylinders, two or three) — other
+        # sections meet at operand edges, where the edge splits already cut
+        # them; fitted traces of sphere/cylinder contacts produced hundreds
+        # of spurious crossings (compsolid2.geo)
+        (A.curve.kind===:ellipse && B.curve.kind===:ellipse) || continue
+        _brep_same_curve3d(A.curve,B.curve,tol) && continue
+        pa=pb=nothing
+        for (ka,fa,pca) in ((A.oi,A.fa,A.pcA),(A.oj,A.fb,A.pcB)),
+                (kb,fb,pcb) in ((B.oi,B.fa,B.pcA),(B.oj,B.fb,B.pcB))
+            (ka==kb && fa==fb) || continue
+            pa=pca;pb=pcb;break
+        end
+        pa===nothing && continue
+        for (lo,hi) in A.spans, (blo,bhi) in B.spans
+        ts=try
+            _brep_pc_intersect(pa,pb,blo,bhi,tol;sec_crv=A.curve,
+                               edge_crv=B.curve)
+        catch
+            Float64[]
+        end
+        for t0 in ts, k in (A.closed ? (-2:2) : (0:0))
+            t=t0+k*_OCC_TWO_PI
+            (lo+tol<t<hi-tol) || continue
+            P=_brep_curve_eval(A.curve,t)
+            tb=_brep_curve_param(B.curve,P,(blo+bhi)/2)
+            (tb===nothing || _b3dist(_brep_curve_eval(B.curve,tb),P)>
+                1e-7*max(1.0,abs(P[1]),abs(P[2]),abs(P[3]))) && continue
+            cuts=get!(Vector{Float64},sec_cuts,si)
+            any(c->abs(c-t)<tol,cuts) || push!(cuts,t)
+        end
+        end
+    end
+    return nothing
 end
 
 # The order of a split sheet face's pieces in OpenCASCADE: as its own edges

@@ -616,6 +616,12 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     sm.next_tag[2]=max(sm.next_tag[2],maximum(keys(sm.curves);init=0))
     sm.next_tag[3]=max(sm.next_tag[3],maximum(keys(sm.surfaces);init=0))
     sm.next_tag[4]=max(sm.next_tag[4],maximum(keys(sm.volumes);init=0))
+    # operand bounds, for the sanity check of the result
+    obounds=Any[try
+            _brep_shell_bounds(sm,t,caller)
+        catch
+            nothing
+        end for t in in_tags]
     image=Vector{Int}[]
     out=boolean_volumes_multi!(sm,op,obj_tags,tool_tags;
         tag=explicit,remove_object=removeObject,remove_tool=removeTool,
@@ -687,6 +693,16 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     base==cursor || ((pub,ktagmap)=stage(base))
     # kernel mutation phase: unbind deleted/rebound operands recursively,
     # then bind the staged shapes — upstream's remove-then-bind order
+    # operand volumes, for the sanity check of the result below
+    omass=Float64[]
+    for t in in_tags
+        push!(omass,try
+            first(_model_occ_solid_measure(kernel,kernel.bindings[(3,t)];
+                                           want_centroid=false))
+        catch
+            NaN
+        end)
+    end
     for t in in_tags
         (haskey(sm.volumes,t) && !haskey(sm.booleans,t)) && continue
         id=get(kernel.bindings,(3,t),nothing)
@@ -702,7 +718,70 @@ function _model_occ_boolean(m::GeoModel,op::Symbol,objects,tools,
     out_map=Vector{Tuple{Int,Int}}[
         Tuple{Int,Int}[(3,get(ktagmap,rvmap[v],rvmap[v])) for v in im]
         for im in image]
+    _model_occ_boolean_sanity(kernel,op,omass,length(obj_tags),out_dt,
+                              out_map,caller;obounds=obounds)
     return out_dt,out_map
+end
+
+# A result that contradicts its operands' volumes is an engine failure, not
+# a model: fuse lies between the largest operand and their sum, intersect
+# below the smallest, cut between the object less the tools and the object,
+# and each fragmented operand is the sum of its pieces. A fuse of two
+# crossed cylinders once returned one of them unchanged; this raises
+# instead. Volumes that cannot be measured are not checked.
+function _model_occ_boolean_sanity(kernel,op,omass,nobj,out_dt,out_map,caller;
+                                   obounds=Any[])
+    all(isfinite,omass) || return nothing
+    vol(dt)=try
+        first(_model_occ_solid_measure(kernel,kernel.bindings[dt];
+                                       want_centroid=false))
+    catch
+        NaN
+    end
+    rmass=Float64[vol(dt) for dt in unique(out_dt)]
+    all(isfinite,rmass) || return nothing
+    scale=max(1.0,maximum(abs,omass;init=0.0))
+    tol=1e-6*scale
+    M=sum(rmass;init=0.0)
+    ok=if op===:union
+        maximum(omass)-tol<=M<=sum(omass)+tol
+    elseif op===:intersection
+        M<=minimum(omass)+tol
+    elseif op===:difference
+        mo=sum(omass[1:nobj]);mt=sum(omass[nobj+1:end];init=0.0)
+        mo-mt-tol<=M<=mo+tol
+    else
+        good=true
+        for (i,im) in enumerate(out_map)
+            isempty(im) && continue
+            s=sum(vol(dt) for dt in im)
+            isfinite(s) && abs(s-omass[i])>tol && (good=false)
+        end
+        good && M<=sum(omass)+tol && M>=maximum(omass)-tol
+    end
+    # a fuse (an intersection) as large (small) as one operand alone needs
+    # every other operand inside (around) it: one operand's box must hold
+    # the other's
+    btol=1e-7*scale
+    inbox(a,b)=a!==nothing && b!==nothing &&
+        all(a[k]>=b[k]-btol && a[k+3]<=b[k+3]+btol for k in 1:3)
+    if ok && length(obounds)==length(omass) &&
+            (op===:union || op===:intersection)
+        for i in eachindex(omass)
+            abs(M-omass[i])<=tol || continue
+            for j in eachindex(omass)
+                j==i && continue
+                fits=op===:union ? inbox(obounds[j],obounds[i]) :
+                                   inbox(obounds[i],obounds[j])
+                (obounds[i]===nothing || obounds[j]===nothing || fits) ||
+                    (ok=false)
+            end
+        end
+    end
+    ok || throw(ErrorException("$caller: the Boolean result's volume " *
+        "($(M)) contradicts its operands' volumes ($(omass)); the operation " *
+        "is not supported for this input"))
+    return nothing
 end
 
 # `gmsh.model.occ.remove_all_duplicates` — upstream
@@ -1011,6 +1090,8 @@ function _occ_mixed_collect(op::Symbol,reps,isvol::Vector{Bool},nobj::Int,
             end
         end
     end
+    # sections crossing each other on a shared face cut each other there
+    _brep_section_crossings!(sec_cuts,sections,esec_skip,tol)
     sec_edges=NamedTuple[]
     secs_pf=[[NamedTuple[] for _ in reps[i].faces] for i in 1:N]
     # fitted-section endpoint anchors: a traced contour terminates a fit
