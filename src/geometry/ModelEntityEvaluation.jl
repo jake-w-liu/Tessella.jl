@@ -917,10 +917,49 @@ function _ruled_surface_evaluator(m::GeoModel,tag::Int,caller::AbstractString,
     isempty(gens) && throw(ArgumentError(
         "$caller: no curves on boundary of ruled surface $tag"))
     exact=_ruled_exact_extrusion(m,tag,gens,caller)
-    exact===nothing && return (u::Float64,v::Float64)->
-        _ruled_blend_surface_point(m,tag,gens,u,v,caller,old_ruled)
+    exact===nothing && return _ruled_blend_evaluator(m,tag,gens,caller,old_ruled)
     return _ruled_swept_evaluator(_ruled_curve_evaluator(m,exact.source,caller),
                                   exact.spec,exact.slot,String(caller))
+end
+
+# `_ruled_blend_surface_point` with the corners, the sphere-patch test and
+# each generatrix's geometry resolved once: the same values. Point by point,
+# a sphere octant (Gmsh's t5) re-reads six curve records per evaluation.
+function _ruled_blend_evaluator(m::GeoModel,tag::Int,gens::Vector{Int},
+                                caller::AbstractString,old_ruled::Bool)
+    (old_ruled || !(3<=length(gens)<=4)) && return (u::Float64,v::Float64)->
+        _ruled_blend_surface_point(m,tag,gens,u,v,caller,old_ruled)
+    corner(i)=begin
+        signed=gens[i]
+        endpoints=m.curves[abs(signed)]
+        m.points[signed>0 ? endpoints[1] : endpoints[2]]
+    end
+    center=_ruled_cached(()->_ruled_sphere_center(m,tag,gens,caller),:sphere,tag)
+    curve(i)=_ruled_curve_evaluator(m,gens[i],caller)
+    length(gens)==4 && return _ruled_qua_evaluator(curve(1),curve(2),curve(3),curve(4),
+        (corner(1),corner(2),corner(3),corner(4)),center)
+    return _ruled_trib_evaluator(curve(1),curve(2),curve(3),
+        (corner(1),corner(2),corner(3)),center)
+end
+
+function _ruled_trib_evaluator(c1::A,c2::B,c3::C,S,center) where {A,B,C}
+    return (u::Float64,v::Float64)->begin
+        point=_ruled_trib_blend(u,v,
+            _ruled_point3(c1(u-v)),_ruled_point3(c1(u)),
+            _ruled_point3(c2(v)),_ruled_point3(c2(1.0-u+v)),
+            _ruled_point3(c3(1.0-u)),_ruled_point3(c3(1.0-v)),S)
+        center!==nothing && (point=_ruled_sphere_project(S[1],center,point))
+        _ruled_point3(point)
+    end
+end
+
+function _ruled_qua_evaluator(c1::A,c2::B,c3::C,c4::D,S,center) where {A,B,C,D}
+    return (u::Float64,v::Float64)->begin
+        point=_ruled_qua_blend(u,v,_ruled_point3(c1(u)),_ruled_point3(c2(v)),
+            _ruled_point3(c3(1.0-u)),_ruled_point3(c4(1.0-v)),S)
+        center===nothing || (point=_ruled_sphere_project(S[1],center,point))
+        _ruled_point3(point)
+    end
 end
 
 # Past the lookups, specialized on the curve and the sweep record.

@@ -2249,11 +2249,18 @@ function _set_order_dim01_plan(source_model,cached,cached_class,order::Int,calle
     high_order=order==1 ? _dim01_first_order!(assembly,m;skip_discrete=false) :
                          falses(length(assembly.nodes))
     geometry_birth=_dim01_geometry_birth(m.meshing.mesh_authority)
-    if order>2 || (order==2 && (incomplete || any(cell->msh_spec(cell.msh).order>2,assembly.cells)))
-        _dim01_higher_order!(assembly,m,entities,order;only_visible,linear,incomplete)
-    elseif order==2
-        _dim01_quadratic!(assembly,m,entities;only_visible,linear,geometry_birth)
+    # The model `m` (a transaction copy) is fixed while the nodes are placed:
+    # each ruled generatrix's geometry adapter and sphere-patch test are
+    # built once (`_ruled_cached`), not per evaluated point.
+    function place!()
+        if order>2 || (order==2 && (incomplete || any(cell->msh_spec(cell.msh).order>2,assembly.cells)))
+            _dim01_higher_order!(assembly,m,entities,order;only_visible,linear,incomplete)
+        elseif order==2
+            _dim01_quadratic!(assembly,m,entities;only_visible,linear,geometry_birth)
+        end
     end
+    haskey(task_local_storage(),:_ruled_eval_cache) ? place!() :
+        task_local_storage(place!,:_ruled_eval_cache,Dict{Tuple{Symbol,Int},Any}())
     plan=_dim01_finish!(assembly,m,entities,Set{Tuple{Int,Int32}}(),high_order,
                          renumber,order>1;save_all=save_all,
                          node_limit=Int(max_nodes),cell_limit=Int(max_cells),

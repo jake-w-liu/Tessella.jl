@@ -5,36 +5,72 @@ struct _NativeOrderFace
     nodes::Dict{Tuple,Int32}
 end
 
+# Reference tables per (family, order), built once: each lookup below
+# otherwise assembles a Symbol from strings and rebuilds the monomial list,
+# a seventh of set_order(3) on t5.
+const _NATIVE_ORDER_TABLES=Dict{Tuple{Symbol,Symbol,Int},Any}()
+const _NATIVE_ORDER_TABLES_LOCK=ReentrantLock()
+
+_native_order_table(builder,kind,family,order=0)=
+    lock(()->get!(builder,_NATIVE_ORDER_TABLES,(kind,family,order)),_NATIVE_ORDER_TABLES_LOCK)
+
 function _native_order_edges(family)
     family===:lin && return ((0,1),)
-    return getfield(Elements,Symbol("_",uppercase(string(family)),"_EDGES"))
+    return _native_order_table(:edges,family) do
+        getfield(Elements,Symbol("_",uppercase(string(family)),"_EDGES"))
+    end
 end
 
 function _native_order_faces(family)
     family===:tri && return ((0,1,2,-1),)
     family===:qua && return ((0,1,2,3),)
-    return getfield(Elements,Symbol("_",uppercase(string(family)),"_FACES"))
+    return _native_order_table(:faces,family) do
+        getfield(Elements,Symbol("_",uppercase(string(family)),"_FACES"))
+    end
 end
 
 @inline function _native_order_edge_key(assembly,first,last)
     return minmax(assembly.nodes[first].tag,assembly.nodes[last].tag)
 end
 
+# Face and slot keys are fixed-size (a triangle's fourth entry is a
+# typemax pad that sorts last), so the face tables hash concrete tuples.
+@inline function _native_order_sort4(t::NTuple{4,T}) where {T}
+    a,b,c,d=t
+    lt(x,y)=first(x)<first(y)
+    lt(b,a) && ((a,b)=(b,a)); lt(d,c) && ((c,d)=(d,c))
+    lt(c,a) && ((a,c)=(c,a)); lt(d,b) && ((b,d)=(d,b))
+    lt(c,b) && ((b,c)=(c,b))
+    return (a,b,c,d)
+end
+
+const _NativeOrderSlotKey=NTuple{4,Tuple{UInt64,Int}}
+
 function _native_order_face_key(assembly,corners)
-    return Tuple(sort!(UInt64[assembly.nodes[node].tag for node in corners]))
+    count=length(corners)
+    return _native_order_sort4(ntuple(i->(i<=count ? assembly.nodes[corners[i]].tag :
+        typemax(UInt64),),4))
 end
 
-function _native_order_face_slot_key(assembly,corners,coordinate,order)
+function _native_order_face_slot_key(assembly,corners,coordinate,order)::_NativeOrderSlotKey
     u,v=coordinate
-    weights=length(corners)==3 ? (order-u-v,u,v) :
+    triangle=length(corners)==3
+    weights=triangle ? (order-u-v,u,v,0) :
         ((order-u)*(order-v),u*(order-v),u*v,(order-u)*v)
-    return Tuple(sort!([(assembly.nodes[node].tag,weight)
-                        for (node,weight) in zip(corners,weights)];by=first))
+    return _native_order_sort4(ntuple(i->(triangle && i==4) ? (typemax(UInt64),0) :
+        (assembly.nodes[corners[i]].tag,Int(weights[i])),4))
 end
 
+struct _NativeOrderFaceSlots
+    nodes::Dict{_NativeOrderSlotKey,Int32}
+end
+
+# Read-only: callers only iterate the shared table.
 function _native_order_face_coordinates(family,order)
-    coordinates=getfield(Elements,Symbol("_",family,"_monomials"))(order,false)
-    return coordinates[_native_inner_boundary_count(family,order,length(coordinates))+1:end]
+    return _native_order_table(:face_coordinates,family,order) do
+        coordinates=getfield(Elements,Symbol("_",family,"_monomials"))(order,false)
+        coordinates[_native_inner_boundary_count(family,order,length(coordinates))+1:end]
+    end
 end
 
 function _native_order_seed_edges!(edges,assembly,cell)
@@ -58,7 +94,7 @@ function _native_order_seed_surface!(faces,assembly,cell)
     corners=cell.nodes[1:primary]
     key=_native_order_face_key(assembly,corners)
     haskey(faces,key) && return nothing
-    slots=Dict{Tuple,Int32}()
+    slots=Dict{_NativeOrderSlotKey,Int32}()
     if !spec.serendipity
         first=primary+length(_native_order_edges(spec.family))*(spec.order-1)+1
         for (coordinate,node) in zip(_native_order_face_coordinates(spec.family,spec.order),
@@ -66,7 +102,7 @@ function _native_order_seed_surface!(faces,assembly,cell)
             slots[_native_order_face_slot_key(assembly,corners,coordinate,spec.order)]=node
         end
     end
-    faces[key]=_NativeOrderFace(corners,slots)
+    faces[key]=_NativeOrderFaceSlots(slots)
     return nothing
 end
 
@@ -77,9 +113,18 @@ function _native_order_surface_uv(m,assembly,node,surface)
     dim==2 && entity==surface && parameter!==nothing && length(parameter)>=2 &&
         return parameter[1:2]
     if dim==0 && haskey(m.points,Int(entity))
+        plane=_native_order_plane_frame(m,Int(surface))
+        plane===nothing || return collect(Model._model_plane_parameters(plane,
+            m.points[Int(entity)],"model_reparametrize_on_surface",1))
         return model_reparametrize_on_surface(m,0,Int(entity),Float64[],Int(surface))
     elseif dim==1 && haskey(m.curves,Int(entity))
         parameter!==nothing && !isempty(parameter) || return nothing
+        plane=_native_order_plane_frame(m,Int(surface))
+        if plane!==nothing && isfinite(parameter[1])
+            caller="model_reparametrize_on_surface"
+            coordinate=Model._model_curve_point(m,Int(entity),Float64(parameter[1]),caller,1)
+            return collect(Model._model_plane_parameters(plane,coordinate,caller,1))
+        end
         return model_reparametrize_on_surface(m,1,Int(entity),parameter[1:1],Int(surface))
     end
     return model_parametrization(m,2,Int(surface),collect(source.point))
@@ -100,6 +145,50 @@ function _native_order_surface_face_uv(m,assembly,node,surface)
         end
     end
     return _native_order_surface_uv(m,assembly,node,surface)
+end
+
+# `model_value(m,2,tag,uv)` with the surface resolved once per `set_order`
+# pass. Asked point by point, a Plane rebuilds its mean-plane frame, which
+# samples every curve of the model for the bounding box (a third of
+# set_order(3) on t5). The evaluators return model_value's coordinates.
+const _NATIVE_ORDER_SURFACES=Ref{Union{Nothing,Tuple{GeoModel,Dict{Int,Any}}}}(nothing)
+
+function _native_order_surface_evaluator(m,tag)
+    caller="model_value"
+    haskey(m.discrete,(2,tag)) && return nothing
+    geometry=get(m.surface_geometry,tag,nothing)
+    if geometry!==nothing && hasproperty(geometry,:occ)
+        return (u::Float64,v::Float64)->Model._occ_surface_point(geometry,u,v)
+    end
+    Model._surface_type(m,tag) in (:ruled,:tric) &&
+        return Model._ruled_surface_evaluator(m,tag,caller)
+    plane=Model._model_plane_frame(m,tag,caller)
+    return (u::Float64,v::Float64)->Model._model_plane_point(plane,u,v,caller,1)
+end
+
+# The native Plane frame `model_reparametrize_on_surface` would rebuild on
+# every call, for a surface that takes that function's Plane branch; nothing
+# otherwise (or outside a set_order pass). Kept under the negated tag.
+function _native_order_plane_frame(m,tag::Int)
+    cache=_NATIVE_ORDER_SURFACES[]
+    (cache===nothing || cache[1]!==m || tag<=0) && return nothing
+    return get!(cache[2],-tag) do
+        haskey(m.surfaces,tag) && !haskey(m.discrete,(2,tag)) || return nothing
+        geometry=get(m.surface_geometry,tag,nothing)
+        geometry!==nothing && hasproperty(geometry,:occ) && return nothing
+        Model._surface_type(m,tag) in (:ruled,:tric) && return nothing
+        return Model._model_plane_frame(m,tag,"model_reparametrize_on_surface")
+    end
+end
+
+function _native_order_surface_value(m,tag::Int,parameter)
+    cache=_NATIVE_ORDER_SURFACES[]
+    (cache===nothing || cache[1]!==m || length(parameter)!=2 ||
+        !all(isfinite,parameter)) && return model_value(m,2,tag,parameter)
+    evaluate=get!(()->_native_order_surface_evaluator(m,tag),cache[2],tag)
+    evaluate===nothing && return model_value(m,2,tag,parameter)
+    point=evaluate(Float64(parameter[1]),Float64(parameter[2]))
+    return Float64[point[1],point[2],point[3]]
 end
 
 function _native_order_edge_supports!(edges,coefficients,assembly,m,cell,order,linear)
@@ -138,7 +227,7 @@ function _native_order_edge_supports!(edges,coefficients,assembly,m,cell,order,l
                     chord=Float64[ratio*b[axis]+(1.0-ratio)*a[axis] for axis in 1:3]
                     _,parameter=model_closest_point(m,2,Int(cell.owner[2]),chord)
                 end
-                values=model_value(m,2,Int(cell.owner[2]),parameter)
+                values=_native_order_surface_value(m,Int(cell.owner[2]),parameter)
                 point=(values[1],values[2],values[3])
             else
                 coordinate=Float64(slot)*(2.0/order)-1.0
@@ -175,7 +264,7 @@ function _native_order_inner_nodes!(assembly,m,owner,boundary,rows,geometric)
         end
         if geometric
             if use_parameters && Model.model_entity_type(m,2,Int(owner[2]))=="Plane"
-                values=model_value(m,2,Int(owner[2]),parameter)
+                values=_native_order_surface_value(m,Int(owner[2]),parameter)
             else
                 values,projected=model_closest_point(m,2,Int(owner[2]),collect(point))
                 use_parameters && (parameter=projected)
@@ -212,13 +301,26 @@ function _native_order_face_supports!(faces,edges,placement,assembly,m,cell,corn
     end
     geometric=!linear && cell.owner[1]==2 && !_dim01_fully_discrete(m,(2,Int(cell.owner[2])))
     supports=_native_order_inner_nodes!(assembly,m,cell.owner,boundary,rows,geometric)
-    slots=Dict(_native_order_face_slot_key(assembly,corners,q,order)=>node
-        for (q,node) in zip(coordinates,supports))
-    faces[key]=_NativeOrderFace(copy(corners),slots)
+    slots=Dict{_NativeOrderSlotKey,Int32}()
+    for (q,node) in zip(coordinates,supports)
+        slots[_native_order_face_slot_key(assembly,corners,q,order)]=node
+    end
+    faces[key]=_NativeOrderFaceSlots(slots)
     return supports
 end
 
 function _dim01_higher_order!(assembly,m,entities,order;only_visible=false,linear=false,incomplete=false)
+    previous=_NATIVE_ORDER_SURFACES[]
+    _NATIVE_ORDER_SURFACES[]=(m,Dict{Int,Any}())
+    try
+        _dim01_higher_order_pass!(assembly,m,entities,order;only_visible,linear,incomplete)
+    finally
+        _NATIVE_ORDER_SURFACES[]=previous
+    end
+    return nothing
+end
+
+function _dim01_higher_order_pass!(assembly,m,entities,order;only_visible=false,linear=false,incomplete=false)
     # The verified Curve provider owns its geometry/interpolation pass.
     _dim01_curve_order!(assembly,m,entities,order;only_visible,linear)
     first_orders=Dict{Tuple{Int,Int32},Int}()
@@ -226,7 +328,7 @@ function _dim01_higher_order!(assembly,m,entities,order;only_visible=false,linea
         cell.owner[1]>=2 && get!(first_orders,cell.owner,msh_spec(cell.msh).order)
     end
     edges=Dict{Tuple{UInt64,UInt64},Vector{Int32}}()
-    faces=Dict{Tuple,_NativeOrderFace}()
+    faces=Dict{NTuple{4,Tuple{UInt64}},_NativeOrderFaceSlots}()
     coefficients=Dict{Int,Matrix{Float64}}()
     placement=Dict{Tuple{Symbol,Int},Vector{Vector{Pair{Int,Float64}}}}()
     for cell in assembly.cells

@@ -660,6 +660,10 @@ end
 
 function _native_bezier_extrema(space,coefficients)
     first=_native_bezier_domain(space,coefficients)
+    # An identically zero field (a normal component of a flat surface cell)
+    # never meets the relative tolerance: subdivision only reproduces zeros
+    # until the 1000-split cap. Its bounds are zero; skip the 4000 copies.
+    first.minB==0.0 && first.maxB==0.0 && return first.minB,first.maxB
     domains=_NativeBezierDetDomain[first];minL=first.minL;maxL=first.maxL
     for maximum in (false,true)
         _native_bezier_heap_make!(domains,maximum)

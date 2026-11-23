@@ -241,10 +241,33 @@ function _model_high_order_ruled_surface(m,tag,caller)
                generatrices)
 end
 
+# `_ruled_surface_d1` on a resolved point function: the same stencil.
+function _ruled_surface_d1_of(evaluate::F,u::Float64,v::Float64,dir::Int) where {F}
+    eps=_RU_SURF_FD_EPS
+    if dir==1
+        a,b=u-eps<0.0 ? (evaluate(u,v),evaluate(u+eps,v)) :
+            (evaluate(u-eps,v),evaluate(u,v))
+    else
+        a,b=v-eps<0.0 ? (evaluate(u,v),evaluate(u,v+eps)) :
+            (evaluate(u,v-eps),evaluate(u,v))
+    end
+    return ((b[1]-a[1])*_RU_SURF_INV_FD_EPS,
+            (b[2]-a[2])*_RU_SURF_INV_FD_EPS,
+            (b[3]-a[3])*_RU_SURF_INV_FD_EPS)
+end
+
 function _model_closest_ruled_native(m,tag,coordinate,caller;initial=nothing)
     _model_high_order_ruled_surface(m,tag,caller) || throw(ArgumentError(
         "$caller: Surface[$tag] lacks a supported built-in geometry provider"))
-    evaluate(u,v)=_ruled_surface_point(m,tag,u,v,caller)
+    # The surface resolved once (`_ruled_surface_evaluator`, the same values
+    # as `_ruled_surface_point`): the scan and the minimization ask ~400
+    # points, each of which otherwise re-resolves the sweep and the arcs.
+    return _model_closest_ruled_with(_ruled_surface_evaluator(m,tag,caller),
+        coordinate,caller,initial)
+end
+
+# Past the lookups, specialized on the surface's point function.
+function _model_closest_ruled_with(evaluate::F,coordinate,caller,initial) where {F}
     function distance(u,v)
         p=evaluate(u,v)
         dx=coordinate[1]-p[1];dy=coordinate[2]-p[2];dz=coordinate[3]-p[3]
@@ -273,8 +296,8 @@ function _model_closest_ruled_native(m,tag,coordinate,caller;initial=nothing)
     function callback(uv)
         p=evaluate(uv...)
         dx=coordinate[1]-p[1];dy=coordinate[2]-p[2];dz=coordinate[3]-p[3]
-        first=_ruled_surface_d1(m,tag,uv[1],uv[2],1,caller)
-        second=_ruled_surface_d1(m,tag,uv[1],uv[2],2,caller)
+        first=_ruled_surface_d1_of(evaluate,uv[1],uv[2],1)
+        second=_ruled_surface_d1_of(evaluate,uv[1],uv[2],2)
         return 0.5*dx*dx+dy*dy+dz*dz,
             (-dx*first[1]-dy*first[2]-dz*first[3],
              -dx*second[1]-dy*second[2]-dz*second[3])
