@@ -7394,7 +7394,12 @@ function _renumber_nodes_native_lookup_live(old_tags=(),new_tags=())
         cached=LAST_MESH[]
         class=cached===nothing ? nothing : _cached_classification_locked(cached)
         if class!==nothing
-            plan=_tagged_renumber_plan(model,cached,class,old_tags,new_tags,:node,caller)
+            plan=_tagged_renumber_plan(model,cached,class,old_tags,new_tags,:node,caller;
+                allow_identity=true)
+            if get(plan,:identity,false)
+                NODE_TAG_MAX[]=plan.max_node_tag;ELEMENT_TAG_MAX[]=plan.max_element_tag
+                return nothing
+            end
             _commit_renumber_labels_locked!(plan)
             return nothing
         end
@@ -7513,7 +7518,12 @@ function _renumber_elements_native_lookup_live(old_tags=(),new_tags=())
         cached=LAST_MESH[]
         class=cached===nothing ? nothing : _cached_classification_locked(cached)
         if class!==nothing
-            plan=_tagged_renumber_plan(model,cached,class,old_tags,new_tags,:element,caller)
+            plan=_tagged_renumber_plan(model,cached,class,old_tags,new_tags,:element,caller;
+                allow_identity=true)
+            if get(plan,:identity,false)
+                NODE_TAG_MAX[]=plan.max_node_tag;ELEMENT_TAG_MAX[]=plan.max_element_tag
+                return nothing
+            end
             _commit_renumber_labels_locked!(plan)
             return nothing
         end

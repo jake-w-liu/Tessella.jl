@@ -183,16 +183,30 @@ function _tagged_mesh_max_tags(model,mesh,public=nothing)
     return node,element
 end
 
+# `GModel::renumberMeshVertices` first parks every node on tag count+1 when
+# the mesh may be saved partially — physical groups without Mesh.SaveAll, or
+# Mesh.SaveWithoutOrphans — and the node counter that `getMaxNodeTag` reports
+# keeps that value.
+function _tagged_renumber_parked_max(model,max_node_tag,count,save_all)
+    whole=save_all===nothing ? !iszero(OPTIONS["Mesh.SaveAll"]) : save_all
+    partial=!iszero(get(OPTIONS,"Mesh.SaveWithoutOrphans",0.0)) ||
+        (!whole && !isempty(model_physical_groups(model)))
+    first_tag=max(1,Int(get(OPTIONS,"Mesh.FirstNodeTag",1.0)))
+    partial && (max_node_tag=max(max_node_tag,UInt64(first_tag-1+count+1)))
+    return max_node_tag
+end
+
 function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller;
         overlay=_high_order_overlay(cached),mid_owners=LAST_MESH_HIGH_ORDER_MIDS[],
         node_max=NODE_TAG_MAX[],element_max=ELEMENT_TAG_MAX[],save_all=nothing,
-        renumber_uid_data::Bool=true)
+        renumber_uid_data::Bool=true,allow_identity::Bool=false)
     node=kind===:node || kind=="node"
     node || kind===:element || kind=="element" || throw(ArgumentError(
         "$caller: renumber kind must be node or element"))
     cached isa Union{Mesh,MixedMesh} && class!==nothing && class.mesh===cached ||
         throw(ArgumentError("$caller: renumbering requires a classified mesh cache"))
     public=class.public_tags
+    tabled=public!==nothing
     if public===nothing
         count=overlay===nothing ? nnodes(cached) : nnodes(overlay)
         public=_cache_public_tags(cached;node_count=count)
@@ -209,6 +223,20 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller;
         for uid in public.element_tags
             get!(mapping,uid,uid)
         end
+    end
+    if allow_identity && tabled && isempty(mapping_events) && isempty(SESSION_VIEWS) &&
+            all(pair->pair.first==pair.second,mapping) &&
+            !(renumber_uid_data && cached isa MixedMesh && cached.entity_data!==nothing &&
+              any(section->section.uid_context!==nothing,cached.ancillary_sections))
+        # Every label keeps its value (renumbering a mesh already numbered in
+        # entity order, as after generate): no record, cache or view changes.
+        # Only the tag counters follow the rules below; the caller skips the
+        # transaction copy and the commit.
+        max_node_tag,max_element_tag=_tagged_mesh_max_tags(model,cached,public)
+        node && (max_node_tag=_tagged_renumber_parked_max(model,max_node_tag,
+            length(order),save_all))
+        return (identity=true,max_node_tag=max(max_node_tag,UInt64(node_max)),
+            max_element_tag=max(max_element_tag,UInt64(element_max)))
     end
     staged_model=Model._model_mesh_transaction_copy(model)
     _tagged_record_renumber!(staged_model,mapping,node)
@@ -248,17 +276,7 @@ function _tagged_renumber_plan(model,cached,class,old_list,new_list,kind,caller;
     max_node_tag,max_element_tag=_tagged_mesh_max_tags(staged_model,mesh,table)
     # Renumbering does not lower Gmsh's historical maximum tag counters.
     previous_node,previous_element=_tagged_mesh_max_tags(model,cached,public)
-    if node
-        # `GModel::renumberMeshVertices` first parks every node on tag count+1
-        # when the mesh may be saved partially — physical groups without
-        # Mesh.SaveAll, or Mesh.SaveWithoutOrphans — and the node counter that
-        # `getMaxNodeTag` reports keeps that value.
-        whole=save_all===nothing ? !iszero(OPTIONS["Mesh.SaveAll"]) : save_all
-        partial=!iszero(get(OPTIONS,"Mesh.SaveWithoutOrphans",0.0)) ||
-            (!whole && !isempty(model_physical_groups(model)))
-        first_tag=max(1,Int(get(OPTIONS,"Mesh.FirstNodeTag",1.0)))
-        partial && (max_node_tag=max(max_node_tag,UInt64(first_tag-1+length(order)+1)))
-    end
+    node && (max_node_tag=_tagged_renumber_parked_max(model,max_node_tag,length(order),save_all))
     return (model=staged_model,mesh=mesh,class=new_class,
         element_tag_map=node ? nothing : mapping,authority=public.authority,
         node_tag_map=node ? mapping : Dict(tag=>tag for tag in public.node_tags),
