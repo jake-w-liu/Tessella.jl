@@ -530,9 +530,11 @@ function _gmsh_bds_collapse_max_size(m::_GmshBDS,face,e::Int32,p::Int32)
     o=_gmsh_bds_other(m,e,p)
     largest=0.0
     for edge in m.pedges[p]
-        q=_gmsh_bds_other(m,edge,p)
-        largest=max(largest,_gmsh_bds_edge_size(m,face,
-            m.edge_p1[edge]==p ? o : q,m.edge_p1[edge]==p ? q : o))
+        # `BDS_Edge(newP1, newP2)` orders its ends by number.
+        a=m.edge_p1[edge]==p ? o : m.edge_p1[edge]
+        b=m.edge_p2[edge]==p ? o : m.edge_p2[edge]
+        m.id[a]<m.id[b] || ((a,b)=(b,a))
+        largest=max(largest,_gmsh_bds_edge_size(m,face,a,b))
     end
     return largest
 end
@@ -540,7 +542,7 @@ end
 function _gmsh_bds_collapse!(m::_GmshBDS,e::Int32,p::Int32)
     length(m.edge_faces[e])==2 || return false
     (m.pdeg[p]==0 || m.pdeg[p]==1) && return false
-    m.edge_deg[e]==2 && m.pdeg[p]!=2 && return false
+    m.edge_deg[e]==2 && (m.pdeg[p]!=2 || m.ptag[p]!=1) && return false
     f0,f1=m.edge_faces[e]
     a=m.edge_p1[e];b=m.edge_p2[e]
     o0=_gmsh_bds_opposite(m,f0,a,b);o1=_gmsh_bds_opposite(m,f1,a,b)

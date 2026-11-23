@@ -10,7 +10,11 @@
 # The initial mesh: PolyMesh of the source parameters, then the BDS swap
 # pass. Returns the triangulation with the swaps applied, its interior and
 # the initial cells in BDS2GMSH order with their MTriangle node order.
-function _gmsh_native_ruled_initial(source::_ModelSurfaceSource,tag::Int,ground)
+# The data `meshGenerator` builds its BDS mesh from: the PolyMesh initial
+# mesh of the source, its triangulation and interior, the BDS number and model
+# entity of each PolyMesh vertex, which faces are in the domain and the
+# recovered model edges.
+function _gmsh_native_bds_input(source::_ModelSurfaceSource,tag::Int)
     _gmsh_native_surface_split_constraints!(source)
     rows=Mesh2D._gmsh_initial_uid_order(source.occurrence)
     order=Int[source.positions[label] for label in source.occurrence[rows]]
@@ -37,6 +41,12 @@ function _gmsh_native_ruled_initial(source::_ModelSurfaceSource,tag::Int,ground)
                                    for (a,b,_) in source.segments]
     owners=Tuple{Int,Int}[v<=4 ? (2,0) : (Int(source.owners[row_of[v]][1]),
         Int(source.owners[row_of[v]][2])) for v in eachindex(p.x)]
+    return (;T,inside,p,row_of,ids,interior_faces,constrained,owners)
+end
+
+function _gmsh_native_ruled_initial(source::_ModelSurfaceSource,tag::Int,ground)
+    (;T,inside,p,row_of,ids,interior_faces,constrained,owners)=
+        _gmsh_native_bds_input(source,tag)
     bds=Mesh2D._gmsh_bds_delaunayize(p,ids,interior_faces,constrained,ground;owners)
     for (a,b,c,d) in bds.swaps
         ra=row_of[a];rb=row_of[b];rc=row_of[c];rd=row_of[d]

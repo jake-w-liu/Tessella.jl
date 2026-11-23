@@ -110,7 +110,19 @@ Transfinite Curve{1,2,3,4}=5;
             @test all(edge->get(incidence,minmax(edge...),0)==2,
                 eachcol(reshape(only(nodes),2,:)))
         end
-        if !recombine
+        if !recombine && !bounded && warp==0 && algorithm==1
+            # Gmsh 4.15.2's refineMeshBDS on this square: 28 nodes, 38
+            # triangles, longest edge 0.3341671698961219 — longer than the
+            # 0.25 boundary edges: MeshAdapt accepts edges up to 1.4 sizes.
+            longest=maximum(norm(collect(points_by_uid[a]).-collect(points_by_uid[b]))
+                            for (a,b) in keys(incidence))
+            if Sys.ARCH === :x86_64
+                @test (length(points_by_uid),length(cells))==(28,38)
+                @test longest==0.3341671698961219
+            else
+                @test longest<=1.4*.35
+            end
+        elseif !recombine
             limit=bounded ? .35 : inherited_bound
             @test all(keys(incidence)) do (a,b)
                 norm(collect(points_by_uid[a]).-collect(points_by_uid[b]))<=limit+64eps(Float64)*max(1.,limit)

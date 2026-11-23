@@ -1336,3 +1336,4 @@ function _model_periodic_surface_production(m::GeoModel,
 end
 
 include("ModelGmshRuledProducer.jl")
+include("ModelGmshMeshAdaptProducer.jl")

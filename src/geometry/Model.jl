@@ -8023,6 +8023,14 @@ function _mesh_model_surface_unstructured_once(m::GeoModel,t::Int,forced,min_ang
                                       Dict{Tuple{Int,Float64},Float64}(),
                                   _periodic_positions=nothing)
     algorithm=_normal_surface_mesh_algorithm(m,t,caller;metric=true)
+    if algorithm==1 && (_return_surface_production || _mesh_input!==nothing) &&
+       _gmsh_native_meshadapt_admitted(m,t)
+        options=_model_algorithm_size_options(m,_mesh1d_options,caller)
+        return _gmsh_native_meshadapt_surface(m,t,options,_mesh_input,
+            _mesh_node_high_water,caller;size_field,
+            element_high_water=_mesh_element_high_water,forced,
+            _periodic_positions),get(m.embeds,(2,t),NTuple{2,Int}[])
+    end
     algorithm==1 && return ((Base.inferencebarrier(_meshadapt_surface_algorithm_mesh)(m,t,caller;
         size_field,_mesh_input,_mesh1d_options,_mesh_node_high_water,
         _mesh_element_high_water,_boundary_regrade))::_ModelSurfaceProduction),

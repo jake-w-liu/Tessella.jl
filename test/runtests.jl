@@ -386,6 +386,7 @@ end
         "interfaces/geo_discrete_stl_volume_test.jl",
         "interfaces/api_partition_regenerate_test.jl",
         "geometry/occ_swept_strip_surface_test.jl",
+        "meshing/gmsh_meshadapt_plane_test.jl",
         "interfaces/api_occ_boolean_touching_solids_test.jl",
         "geometry/geo_occ_boolean_coplanar_operand_test.jl",
         "geometry/geo_occ_boolean_native_operand_test.jl",
