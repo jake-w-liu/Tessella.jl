@@ -2375,7 +2375,7 @@ end
 
 # (corner tags, corner params, corner coords) for one element of `record`.
 function _discrete_element_frame(m::GeoModel,record::DiscreteEntity,
-                                 msh_type::Int,nodes::Vector{UInt64},
+                                 msh_type::Int,nodes::AbstractVector{UInt64},
                                  coords::Dict{UInt64,NTuple{3,Float64}},
                                  caller::AbstractString)
     count=msh_family(msh_type)===:qua ? 4 :

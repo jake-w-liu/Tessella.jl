@@ -151,6 +151,95 @@ ModelPeriodicConstraint(dim,slave,master,affine,reversed,atol)=
     ModelPeriodicConstraint(dim,slave,master,affine,reversed,atol,false)
 
 """
+The node tags of a record's cells, as one column: cell `i` is
+`data[start[i]:start[i]+width[i]-1]`, read as a view. It reads and writes like
+the vector of per-cell vectors it replaces (`cells[i]`, `cells[i]=nodes`,
+`push!`, `empty!`, `cells[keep]`), but holds three arrays instead of one array
+per cell. A cell given new nodes gets a new slice at the end, so a view read
+earlier keeps what it held, as the replaced vector did; writing through a view
+writes the cell, as writing into the vector did.
+"""
+struct RecordCellNodes <: AbstractVector{SubArray{UInt64,1,Vector{UInt64},Tuple{UnitRange{Int}},true}}
+    start::Vector{Int}
+    width::Vector{Int32}
+    data::Vector{UInt64}
+end
+RecordCellNodes()=RecordCellNodes(Int[],Int32[],UInt64[])
+
+function RecordCellNodes(cells::AbstractVector)
+    out=RecordCellNodes()
+    sizehint!(out,length(cells))
+    for nodes in cells
+        push!(out,nodes)
+    end
+    return out
+end
+
+Base.convert(::Type{RecordCellNodes},cells::RecordCellNodes)=cells
+Base.convert(::Type{RecordCellNodes},cells::AbstractVector)=RecordCellNodes(cells)
+
+Base.size(cells::RecordCellNodes)=(length(cells.start),)
+Base.IndexStyle(::Type{RecordCellNodes})=IndexLinear()
+Base.@propagate_inbounds function Base.getindex(cells::RecordCellNodes,i::Int)
+    start=cells.start[i]
+    return Base.view(cells.data,start:start+Int(cells.width[i])-1)
+end
+
+# A selection of cells is a new column holding copies of their nodes.
+function Base.getindex(cells::RecordCellNodes,selection::AbstractVector)
+    indices=to_indices(cells,(selection,))[1]
+    out=RecordCellNodes()
+    sizehint!(out,length(indices))
+    for i in indices
+        push!(out,cells[i])
+    end
+    return out
+end
+Base.getindex(cells::RecordCellNodes,::Colon)=copy(cells)
+
+# The nodes are appended; a view of this column is read before it grows.
+function _record_cells_append!(cells::RecordCellNodes,nodes)
+    values=nodes isa SubArray && Base.parent(nodes)===cells.data ? collect(UInt64,nodes) : nodes
+    start=length(cells.data)+1
+    for node in values
+        push!(cells.data,UInt64(node))
+    end
+    return start,length(cells.data)-start+1
+end
+
+function Base.setindex!(cells::RecordCellNodes,nodes,i::Int)
+    checkbounds(cells,i)
+    start,width=_record_cells_append!(cells,nodes)
+    cells.start[i]=start;cells.width[i]=Int32(width)
+    return cells
+end
+
+function Base.push!(cells::RecordCellNodes,nodes)
+    start,width=_record_cells_append!(cells,nodes)
+    push!(cells.start,start);push!(cells.width,Int32(width))
+    return cells
+end
+
+function Base.append!(cells::RecordCellNodes,more::AbstractVector)
+    for nodes in (more===cells ? copy(more) : more)
+        push!(cells,nodes)
+    end
+    return cells
+end
+
+function Base.empty!(cells::RecordCellNodes)
+    empty!(cells.start);empty!(cells.width);empty!(cells.data)
+    return cells
+end
+
+function Base.sizehint!(cells::RecordCellNodes,n::Integer)
+    sizehint!(cells.start,n);sizehint!(cells.width,n)
+    return cells
+end
+
+Base.copy(cells::RecordCellNodes)=RecordCellNodes(copy(cells.start),copy(cells.width),copy(cells.data))
+
+"""
 Parametrization-free model entity created by `add_discrete_entity!` (Gmsh's
 `model.addDiscreteEntity`). Nodes and elements added through the mesh API are
 recorded here with their caller-assigned — possibly sparse — tags; `boundary`
@@ -165,7 +254,7 @@ mutable struct DiscreteEntity
     node_params::Matrix{Float64}
     element_types::Vector{Int32}
     element_tags::Vector{UInt64}
-    element_nodes::Vector{Vector{UInt64}}
+    element_nodes::RecordCellNodes
     # Parametric coordinates of nodes owned by *other* records with respect to
     # this entity's parametrization (e.g. a classified surface's boundary nodes
     # live on curve records but still carry surface (u,v) parameters after
@@ -188,7 +277,7 @@ DiscreteEntity(boundary,tags,coords,params,types,elements,nodes,aux)=
 
 DiscreteEntity() = DiscreteEntity(NTuple{2,Int}[], UInt64[],
     Matrix{Float64}(undef,3,0), Matrix{Float64}(undef,0,0),
-    Int32[], UInt64[], Vector{UInt64}[], Dict{UInt64,Vector{Float64}}())
+    Int32[], UInt64[], RecordCellNodes(), Dict{UInt64,Vector{Float64}}())
 
 function _model_mesh_node_parameters(record::DiscreteEntity,position::Int)
     stored=get(record.node_native_params,record.node_tags[position],nothing)

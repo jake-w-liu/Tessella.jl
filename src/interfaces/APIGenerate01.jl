@@ -2149,6 +2149,26 @@ end
 _dim01_plan_records_reconciled(plan)=plan.mesh isa MixedMesh &&
     get(plan,:records_mesh,nothing)===plan.mesh
 
+# The cells of one block into their records: types, labels and the public
+# node tags, written into each record's node column.
+function _dim01_reconcile_block!(records::Dict{Tuple{Int,Int},DiscreteEntity},dim::Int,msh::Int32,
+        nodes::AbstractMatrix{<:Integer},owners::Vector{Int32},labels::Vector{UInt64},
+        node_tags::Vector{UInt64})
+    width=size(nodes,1)
+    for column in axes(nodes,2)
+        record=get(records,(dim,Int(owners[column])),nothing)
+        record===nothing && continue
+        push!(record.element_types,msh)
+        push!(record.element_tags,labels[column])
+        cells=record.element_nodes
+        push!(cells.start,length(cells.data)+1);push!(cells.width,Int32(width))
+        for slot in 1:width
+            push!(cells.data,node_tags[nodes[slot,column]])
+        end
+    end
+    return nothing
+end
+
 function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_parameters=nothing)
     data=mesh.entity_data
     positions_by_owner=Dict{Tuple{Int,Int},Vector{Int}}()
@@ -2166,7 +2186,7 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
         # below and replaced by new tables that share their vectors.
         record=previous===nothing ? DiscreteEntity() : DiscreteEntity(
             copy(previous.boundary),UInt64[],zeros(3,0),zeros(0,0),
-            Int32[],UInt64[],Vector{UInt64}[],previous.aux_params,
+            Int32[],UInt64[],Model.RecordCellNodes(),previous.aux_params,
             runtime_parameters===nothing ? previous.node_native_params :
                 Dict{UInt64,Vector{Float64}}(),previous.geometry_parametrized)
         positions=get(positions_by_owner,entity,Int[])
@@ -2212,15 +2232,8 @@ function _dim01_reconcile_records!(m,entities,mesh,node_tag_map;runtime_paramete
         records[entity]=record
     end
     for (bi,block) in enumerate(mesh.blocks)
-        dim=msh_dimension(block.msh)
-        for column in axes(block.nodes,2)
-            record=get(records,(dim,Int(data.block_entities[bi][column])),nothing)
-            record===nothing && continue
-            push!(record.element_types,Int32(block.msh))
-            push!(record.element_tags,data.external_element_tags[bi][column])
-            push!(record.element_nodes,UInt64[data.external_node_tags[block.nodes[slot,column]]
-                for slot in axes(block.nodes,1)])
-        end
+        _dim01_reconcile_block!(records,msh_dimension(block.msh),Int32(block.msh),block.nodes,
+            data.block_entities[bi],data.external_element_tags[bi],data.external_node_tags)
     end
     for (entity,record) in records
         if haskey(m.discrete,entity)

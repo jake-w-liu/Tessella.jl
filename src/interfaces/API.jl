@@ -6619,7 +6619,7 @@ end
 # with a negative determinant. First-order types follow Gmsh's per-type swaps;
 # other types keep the first node and reverse the remainder, which flips the
 # orientation of every linear face convention.
-function _record_reverse_connectivity!(msh::Int32,nodes::Union{Vector{Int32},Vector{UInt64}})
+function _record_reverse_connectivity!(msh::Int32,nodes::Union{AbstractVector{Int32},AbstractVector{UInt64}})
     n=length(nodes)
     n<2 && return nothing
     if msh_spec(Int(msh)).order>1

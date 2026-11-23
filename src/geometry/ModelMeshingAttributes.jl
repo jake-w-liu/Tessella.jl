@@ -1097,7 +1097,7 @@ const _RECORD_FACET_FAMILIES = Dict{Symbol,Vector{NTuple{4,Int}}}(
 )
 
 # Facets of one record cell: a vector of node-tag vectors, one per facet.
-function _record_cell_facets(msh_type::Int,nodes::Vector{UInt64})
+function _record_cell_facets(msh_type::Int,nodes::AbstractVector{UInt64})
     family=msh_family(msh_type)
     table=get(_RECORD_FACET_FAMILIES,family,nothing)
     table===nothing && return Vector{UInt64}[]
