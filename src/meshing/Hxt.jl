@@ -1580,7 +1580,7 @@ below `quality_min`. Cells of volume `k` (0-based, the order of
 """
 function tet_mesh!(m::Mesh; min_size::Float64=0.0, max_size::Float64=floatmax(Float64),
                    factor::Float64=1.0, size_callback=nothing, quality_min::Float64=0.3,
-                   optimize::Bool=true, refine::Bool=true)
+                   optimize::Bool=true, refine::Bool=true, boundary_recovery=nothing)
     max_size <= 0.0 && (max_size = floatmax(Float64))
     factor <= 0.0 && (factor = 1.0)
     b = bbox(m)
@@ -1591,9 +1591,26 @@ function tet_mesh!(m::Mesh; min_size::Float64=0.0, max_size::Float64=floatmax(Fl
     map, missing = tri2tet_map(m)
     lines = lines_not_in_triangles(m)
     missing_lines = missing == 0 ? constrain_lines!(m, lines) : 0
-    (missing != 0 || missing_lines != 0) && throw(ArgumentError(
-        "HXT: $missing boundary facets and $missing_lines lines are missing from the Delaunay " *
-        "tetrahedralization; HXT's boundary recovery is not ported yet"))
+    if missing != 0 || missing_lines != 0
+        boundary_recovery === nothing && throw(ArgumentError(
+            "HXT: $missing boundary facets and $missing_lines lines are missing from the " *
+            "Delaunay tetrahedralization and no boundary recovery was given"))
+        # hxt_boundary_recovery: TetGen/BR rebuilds the cells and their
+        # adjacency (flags cleared); the map is taken again and must be whole.
+        nv = m.nv
+        node, neigh, ntet = boundary_recovery(m)
+        reserve!(m, ntet)
+        copyto!(m.node, 1, node, 1, 4ntet); copyto!(m.neigh, 1, neigh, 1, 4ntet)
+        fill!(view(m.flag, 1:ntet), 0x0000)
+        m.ntet = ntet
+        opt.num_vertices_in_mesh += m.nv - nv
+        map, missing = tri2tet_map(m)
+        missing == 0 || throw(ErrorException(
+            "HXT: $missing boundary faces still missing (after recovery step)"))
+        missing_lines = constrain_lines!(m, lines)
+        missing_lines == 0 || throw(ErrorException(
+            "HXT: $missing_lines constrained edges still missing (after recovery step)"))
+    end
     constrain_triangles!(m, map)
     map_colors_to_brep!(m, map)
     if refine

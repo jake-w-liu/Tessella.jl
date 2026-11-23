@@ -95,9 +95,16 @@ function _model_hxt_volume(m::GeoModel,t::Int,caller;size_field=nothing,
                 min(lc_global,raw))::Float64
         end
     end
+    recovery=hm->try
+        _model_hxt_boundary_recovery(hm)
+    catch err
+        err isa ModelNativeTetgenArena.Unsupported || rethrow()
+        throw(ArgumentError("$caller: HXT boundary recovery of Volume[$t] is not supported: $(err.reason)"))
+    end
     Hxt.tet_mesh!(hm;min_size=Float64(options.lc_min),max_size=Float64(options.lc_max),
         factor=Float64(options.lc_factor),size_callback=size,
-        quality_min=Float64(options.optimize_threshold),optimize=options.optimize>0)
+        quality_min=Float64(options.optimize_threshold),optimize=options.optimize>0,
+        boundary_recovery=recovery)
     # Hxt2Gmsh: the cells of the Region in order; a vertex not on the
     # boundary becomes a new MVertex when a cell first names it.
     nb=length(uids)
@@ -139,4 +146,12 @@ function _model_hxt_volume(m::GeoModel,t::Int,caller;size_field=nothing,
         _model_native_volume_cell_births!(births,mesh)
     end
     return mesh
+end
+
+# hxt_boundary_recovery on the HXT mesh: the TetGen/BR port with Gmsh's
+# Mesh.ToleranceInitialDelaunay (1e-12) for both of HXT's tolerance switches.
+function _model_hxt_boundary_recovery(hm::Hxt.Mesh)
+    xyz=NTuple{3,Float64}[Hxt.point(hm,v) for v in 0:hm.nv-1]
+    return ModelNativeTetgenArena.BR.hxt_recovery(xyz,hm.node,hm.neigh,hm.ntet,
+        hm.tri_node,hm.tri_color,hm.line_node,hm.line_color;epsilon=1e-12,facet_overlap=1e-12)
 end

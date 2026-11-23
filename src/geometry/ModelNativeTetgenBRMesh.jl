@@ -503,3 +503,137 @@ function _recoverdelaunay!(m)
     empty!(m.unflipqueue)
     return nothing
 end
+
+# ---------------------------------------------------------------------------
+# hxt_boundary_recovery (contrib/hxt/tetBR/src/hxt_boundary_recovery.cxx):
+# tetgenmesh::reconstructmesh from an HXT tetrahedralization -- ghost cells
+# become hull tetrahedra -- then recoverboundary, suppresssteinerpoints (only
+# when recovery queued Steiner points), recoverdelaunay, and the write-back in
+# pool order. No carveholes and no optimizemesh, as there.
+
+const HXT_GHOST=typemax(UInt32)
+
+"""
+    BR.hxt_recovery(xyz, node, neigh, ntet, tri_node, tri_color, line_node,
+                    line_color; epsilon=1e-12, facet_overlap=1e-12)
+
+HXT's boundary recovery on one tetrahedralization in HXT's 0-based arrays
+(`node[4t+j]`, `neigh[4t+j] = 4u+f`, the ghost vertex `typemax(UInt32)`) with
+the boundary triangles and lines. `epsilon` and `facet_overlap` are the
+values of the `-T` and `-p/` switches (HXT passes its tolerance to both).
+Returns `(node, neigh, ntet)` of the recovered tetrahedralization. Recovery
+that needs Steiner points throws `Unsupported`.
+"""
+function hxt_recovery(xyz::Vector{NTuple{3,Float64}},node::AbstractVector{UInt32},
+                      neigh::AbstractVector{UInt64},ntet::Int,tri_node::AbstractVector{UInt32},
+                      tri_color::AbstractVector{UInt32},line_node::AbstractVector{UInt32},
+                      line_color::AbstractVector{UInt32};epsilon::Float64=1e-12,
+                      facet_overlap::Float64=1e-12)
+    n=length(xyz)
+    m=_emptytg(xyz,n,1,epsilon)
+    # makepoint(&pointloop, UNUSEDVERTEX)
+    for p in 1:n;setpointtype!(m,p,UNUSEDVERTEX);end
+    tgpoint(v)=v==HXT_GHOST ? DUMMY : Int32(v+1)
+    for i in 0:ntet-1
+        t=maketetrahedron!(m)
+        t.tet==i+1 || throw(Unsupported("hxt_recovery: the tetrahedron pool is not fresh"))
+        setvertices!(m,t,tgpoint(node[4i+1]),tgpoint(node[4i+2]),tgpoint(node[4i+3]),tgpoint(node[4i+4]))
+    end
+    # Faces are bonded from the hashLess side; the neighbour's version names
+    # which rotation of the shared face it holds (computeTetGenVersion).
+    for i in 0:ntet-1,f in 0:3
+        nb=neigh[4i+f+1];other=nb>>2
+        (((UInt64(i)⊻other)&1)⊻UInt64(UInt64(i)<other))!=0 || continue
+        iface2=Int(nb&3)
+        face2=(node[4other+((iface2+1)&3)+1],node[4other+((iface2&2)⊻3)+1],
+               node[4other+((iface2+3)&2)+1])
+        v1=node[4i+((f+1)&3)+1]
+        k=v1==face2[1] ? 0 : v1==face2[2] ? 1 : v1==face2[3] ? 2 :
+            throw(Unsupported("hxt_recovery: inconsistent HXT adjacency"))
+        bond!(m,Tri(i+1,f),Tri(Int(other)+1,4k+iface2))
+    end
+    for slot in 1:m.tmax
+        (tvert(m,slot,4)==0 || tvert(m,slot,7)==DUMMY) && continue
+        for v in 0:3;setpoint2tet!(m,tvert(m,slot,4+v),Tri(slot,0));end
+    end
+    ntri=length(tri_node)÷3
+    facets=NTuple{3,Int32}[(Int32(tri_node[3t+1]+1),Int32(tri_node[3t+2]+1),Int32(tri_node[3t+3]+1))
+                           for t in 0:ntri-1]
+    _surface!(m,facets,facet_overlap/180.0*Float64(pi))
+    F=m.subfaces;S=m.subsegs
+    for t in 1:ntri;F.mark[t]=Int32(tri_color[t]);end
+    # makepoint2submap, then the PSC edges: an edge of a subface takes (or
+    # becomes) a segment; a dangling one is a lone segment.
+    counts=zeros(Int,n+1)
+    for slot in 1:F.maxitems
+        s=Sh(slot,0);shdead(F,s) && continue
+        counts[sw(F,s,3)]+=1;counts[sw(F,s,4)]+=1;counts[sw(F,s,5)]+=1
+    end
+    first=zeros(Int,n+1);acc=0
+    for i in 1:n
+        first[i]=acc;acc+=counts[i]
+    end
+    first[n+1]=acc
+    list=Vector{Sh}(undef,acc);at=copy(first)
+    for slot in 1:F.maxitems
+        s=Sh(slot,0);shdead(F,s) && continue
+        j=sw(F,s,3);at[j]+=1;list[at[j]]=Sh(slot,0)
+        j=sw(F,s,4);at[j]+=1;list[at[j]]=Sh(slot,2)
+        j=sw(F,s,5);at[j]+=1;list[at[j]]=Sh(slot,4)
+    end
+    for l in 0:length(line_node)÷2-1
+        p0=Int32(line_node[2l+1]+1);p1=Int32(line_node[2l+2]+1)
+        setpointtype!(m,p0,RIDGEVERTEX);setpointtype!(m,p1,RIDGEVERTEX)
+        p0==p1 && continue
+        searchsh=SNULL
+        for k in first[p0]+1:first[p0+1]
+            s=list[k]
+            if sdest(F,s)==p1
+                searchsh=s;break
+            elseif sapex(F,s)==p1
+                searchsh=sesym(senext2(s));break
+            end
+        end
+        if searchsh.sh!=0
+            newseg=sspivot(F,searchsh)
+            if newseg.sh==0
+                newseg=makeshellface!(S)
+                setshvertices!(S,newseg,p0,p1,0)
+                ssbond!(m,searchsh,newseg)
+                neighsh=spivot(F,searchsh)
+                neighsh.sh!=0 && ssbond!(m,neighsh,newseg)
+            end
+        else
+            newseg=makeshellface!(S)
+            setshvertices!(S,newseg,p0,p1,0)
+        end
+        S.mark[newseg.sh]=Int32(line_color[l+1])
+    end
+    _recoverboundary!(m)
+    isempty(m.subvertstack) || _suppresssteinerpoints!(m)
+    _recoverdelaunay!(m)
+    m.pitems>n && throw(Unsupported("hxt_recovery: Steiner points were inserted"))
+    # Write-back: every live tetrahedron, hull ones included, in pool order.
+    index=zeros(Int,m.tmax);count=0
+    for slot in 1:m.tmax
+        tvert(m,slot,4)==0 && continue
+        index[slot]=count;count+=1
+    end
+    out_node=Vector{UInt32}(undef,4count);out_neigh=Vector{UInt64}(undef,4count)
+    for slot in 1:m.tmax
+        tvert(m,slot,4)==0 && continue
+        c=index[slot]
+        for k in 0:3
+            p=tvert(m,slot,4+k)
+            if p==DUMMY
+                k==3 || throw(Unsupported("hxt_recovery: the ghost vertex is not the fourth vertex"))
+                out_node[4c+k+1]=HXT_GHOST
+            else
+                out_node[4c+k+1]=UInt32(m.pmark[p]-1)
+            end
+            other=fsym(m,Tri(slot,k))
+            out_neigh[4c+k+1]=UInt64(4index[other.tet]+(other.ver&3))
+        end
+    end
+    return out_node,out_neigh,count
+end
