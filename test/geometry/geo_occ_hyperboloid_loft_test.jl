@@ -14,7 +14,8 @@
 #   points 14-17 (was 6-9), translating two boxes renumbers their points
 #   17-32.
 # - A .geo OCC curve loop runs from its first curve (twist.geo's {1:4} is
-#   1,-4,3,-2), so the loft's faces follow that order.
+#   1,-4,3,-2), so the loft's faces follow that order. (twist.geo's sections
+#   are ellipse arcs; squares with the same chaining keep the test fast.)
 module GeoOccHyperboloidLoftTest
 using Test, Tessella
 const A = Tessella.API
@@ -77,16 +78,15 @@ end
     try
         m = opened("""
             SetFactory("OpenCASCADE");
-            a = 0.300; b = 0.075;
-            Point(1) = {a*Cos(Pi/6), a*Sin(Pi/6), 0};
-            Point(2) = {-b*Sin(Pi/6), b*Cos(Pi/6), 0};
-            Point(3) = {-a*Cos(Pi/6), -a*Sin(Pi/6), 0};
-            Point(4) = {b*Sin(Pi/6), -b*Cos(Pi/6), 0};
+            Point(1) = {0.3, 0.1, 0};
+            Point(2) = {-0.1, 0.3, 0};
+            Point(3) = {-0.3, -0.1, 0};
+            Point(4) = {0.1, -0.3, 0};
             Point(5) = {0, 0, 0};
-            Ellipse(1) = {3, 5, 3, 2};
-            Ellipse(2) = {3, 5, 3, 4};
-            Ellipse(3) = {1, 5, 1, 4};
-            Ellipse(4) = {1, 5, 1, 2};
+            Line(1) = {3, 2};
+            Line(2) = {3, 4};
+            Line(3) = {1, 4};
+            Line(4) = {1, 2};
             Curve Loop(1) = {1:4};
             l2() = Translate{0,0,0.5}{ Duplicata{ Curve{1:4}; } };
             Rotate {{0, 0, 1}, {0, 0, 0}, Pi/8} { Curve{l2()}; }
@@ -104,6 +104,7 @@ end
         @test [sort(abs.(bnd(t))) for t in (13, 17, 20, 23)] ==
             [[2, 3], [1, 2], [1, 4], [3, 4]]
         @test m.get_type(2, 6) == "Plane"
+        @test m.occ.get_mass(3, 1) ≈ 0.199845484651 rtol=1e-9
     finally
         A.finalize()
     end
