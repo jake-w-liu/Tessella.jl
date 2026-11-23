@@ -274,7 +274,42 @@ end
 # positive-weight homogeneous curves are compared through exact Bernstein
 # bounds, including nonclamped/rational supports and intermediate knot spans.
 include("ModelNURBSSeams.jl")
-_model_nurbs_patch_seam_period(g,dim::Int)=_model_nurbs_certified_seam_period(g,dim)
+# The certificate runs in exact rational arithmetic and depends only on the
+# surface, the axis and the seam tolerance, so it is computed once per
+# surface: ray containment asks it for every face hit (t20's STEP slice
+# spent a third of its time re-certifying the same seams). Keyed weakly by
+# the control net, like the projection grids; a hit is checked against the
+# rest of the surface.
+const _MODEL_NURBS_SEAM_PERIODS=WeakKeyDict{Matrix{NTuple{3,Float64}},
+    Vector{Tuple{Any,Float64}}}()
+const _MODEL_NURBS_SEAM_LOCK=ReentrantLock()
+
+function _model_nurbs_patch_seam_period(g,dim::Int)
+    surface=g.patch.surface
+    controls=surface.controls
+    controls isa Matrix{NTuple{3,Float64}} ||
+        return _model_nurbs_certified_seam_period(g,dim)
+    key=(dim,Float64(get(g,:seam_tolerance,1e-7)),surface.degree_u,
+         surface.degree_v,surface.knots_u,surface.knots_v,surface.weights)
+    same(k)=k[1]==key[1] && k[2]===key[2] && k[3]==key[3] && k[4]==key[4] &&
+        (k[5]===key[5] || k[5]==key[5]) && (k[6]===key[6] || k[6]==key[6]) &&
+        (k[7]===key[7] || k[7]==key[7])
+    hit=lock(_MODEL_NURBS_SEAM_LOCK) do
+        entries=get(_MODEL_NURBS_SEAM_PERIODS,controls,nothing)
+        entries===nothing && return nothing
+        for (k,p) in entries
+            same(k) && return p
+        end
+        return nothing
+    end
+    hit===nothing || return hit
+    p=_model_nurbs_certified_seam_period(g,dim)
+    lock(_MODEL_NURBS_SEAM_LOCK) do
+        entries=get!(()->Tuple{Any,Float64}[],_MODEL_NURBS_SEAM_PERIODS,controls)
+        any(e->same(e[1]),entries) || push!(entries,(key,p))
+    end
+    return p
+end
 
 function _model_nurbs_knots(count,degree,knots,multiplicities,caller,axis)
     mult=Int[]
