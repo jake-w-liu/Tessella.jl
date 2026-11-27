@@ -91,7 +91,8 @@ function _topo_elements(record::DiscreteEntity,dim::Int)
     return order
 end
 
-function _topo_face_key(nodes::Vector{UInt64},face::Vector{Int})
+function _topo_face_key(nodes::AbstractVector{UInt64},
+                        face::AbstractVector{<:Integer})
     sorted=sort!(UInt64[nodes[slot] for slot in face])
     return ntuple(i->i<=length(sorted) ? sorted[i] : UInt64(0),4)
 end
